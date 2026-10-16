@@ -1,0 +1,93 @@
+\chapter{SSA Construction}
+\label{ch:pebble-ssa}
+
+The source name \code{total} can denote a succession of values during a loop.
+An optimizer needs to distinguish those values without repeatedly searching for assignments that might reach a use.
+\term{Static single assignment}, or SSA, gives each static definition its own name and makes path-dependent selection explicit.
+
+\section{Direct construction for expressions}
+\label{sec:pebble-direct-ssa}
+The expression front end constructs SSA directly.
+Each arithmetic operation creates a fresh value ID and returns it to its parent.
+All references to \code{x} use the single input ID.
+There are no source assignments, so neither renaming stacks nor dominance-frontier placement are necessary for this client.
+This is a useful first implementation: do not build a general conversion pass before a client needs it.
+
+Branches and loops in the test fixtures are also built directly, with explicit phis.
+The executable library verifies these graphs and executes them, but does not yet convert an arbitrary mutable-variable CFG to SSA.
+The construction algorithm below specifies that extension and shows what additional state it requires.
+
+\section{Merge a loop-carried value}
+\label{sec:pebble-loop-ssa}
+The summation fixture computes $\sum_{i=0}^{x-1}i$ modulo 256.
+Entry creates input $v_1$, zero $v_2$, and one $v_3$.
+An additional constant at $v_4$ is deliberately unused in this fixture and is removed by optimization.
+Header values $v_5$ and $v_6$ are the current index and sum.
+Their incoming values are
+\[
+v_5=\phifn{0:v_2,\ 2:v_8},\qquad
+v_6=\phifn{0:v_2,\ 2:v_9}.
+\]
+The header compares $v_5<v_1$ at $v_7$.
+The body computes $v_8=v_5+v_3$ and $v_9=v_6+v_5$, then jumps back.
+Exit returns $v_6$.
+
+For $x=3$, header states $(i,s)$ are $(0,0)$, $(1,0)$, $(2,1)$, and $(3,3)$.
+The last visit exits without executing the body.
+The static IDs remain unchanged while the dynamic instances of their values change on each loop traversal.
+SSA means one static definition, not one execution of that definition.
+
+\section{The mutable-variable extension}
+\label{sec:pebble-ssa-extension}
+Algorithm~\ref{alg:pebble-ssa-build} uses iterated dominance frontiers for placement and a dominator-tree walk for renaming.
+It assumes definite assignment and a representation whose phi capacity can accommodate every predecessor.
+Our two-input representation can implement it only for normalized joins with at most two predecessors; a more general converter must expand the phi representation or transform larger joins first.
+
+\begin{algorithm}[htbp]
+\caption{Converting mutable variables to SSA: an extension contract.}
+\label{alg:pebble-ssa-build}
+\begin{pseudocode}
+\Require reachable CFG, definite assignment, dominator tree, frontiers, definition sites
+\Ensure renamed graph whose uses satisfy SSA dominance
+\ForAll{source variables $v$}
+\State seed a placement worklist with the blocks defining $v$
+\State insert one phi at each newly reached frontier block
+\State treat each inserted phi as a new definition for further placement
+\EndFor
+\State seed version stacks with entry definitions
+\State walk the dominator tree, pushing fresh names at definitions
+\State rename ordinary uses from the current stack tops
+\State fill each successor phi input from the stack state on its incoming edge
+\State pop a block's definitions when returning from its dominator subtree
+\State verify the complete renamed graph
+\end{pseudocode}
+\end{algorithm}
+
+The stack discipline is lexical with respect to the dominator tree, not the source text or block-number order.
+If a sibling subtree inherits names pushed by its sibling, its uses may refer to definitions that never execute on that path.
+An empty stack at a reachable use is an unfulfilled initialization obligation, not permission to invent a zero constant.
+
+Placement may create dead phis.
+Pruned SSA additionally consults liveness, while trivial-phi simplification can remove a merge whose incoming values are identical.
+Both are separate refinements of construction.
+The current optimizer conservatively retains live phis rather than attempting arbitrary congruence reasoning through cycles.
+
+\section{Use-def information}
+\label{sec:pebble-use-def}
+PebbleIR's operands are authoritative; it does not maintain reverse use lists.
+Replacing all uses therefore scans the table and terminators.
+This costs $O(N+B)$, but avoids maintaining two structures during every edit.
+If repeated rewrites become expensive, add use records that identify the user, operand position, and, for phis, the associated incoming edge.
+Test consistency by rebuilding the reverse relation from operands and comparing it with the maintained lists.
+
+\section{Exercises}
+\label{sec:pebble-ten-exercises}
+\begin{enumerate}
+\item \label{ex:pebble-sum-trace} Trace the summation fixture for inputs 0 and 4, including the final failed test. Give the number of body executions and returned byte.
+\item \label{ex:pebble-sibling-stack} In a diamond, the left arm defines \code{a} and the right arm uses the entry definition of \code{a}. Explain the error caused by failing to pop the left arm's renaming stack.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:pebble-ten-reading}
+The primary SSA construction paper gives the placement and renaming foundations that the extension relies on~\cite{cytron-1991-ssa}.
+Read its invariants before implementing a worklist that merely resembles the algorithm.

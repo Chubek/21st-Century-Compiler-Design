@@ -1,0 +1,90 @@
+\chapter{Semantics Before Structures}
+\label{ch:pebble-semantics}
+
+Two implementations can agree on the fields of an addition instruction and disagree on its result.
+Before choosing a container, specify the machine that the container describes.
+PebbleIR has enough control flow to expose a subtler problem too: returning the right number is not the same as preserving whether the program returns.
+
+\section{Values and observations}
+\label{sec:pebble-observations}
+The type \code{u8} denotes $\{0,\ldots,255\}$.
+The type \code{i1} denotes $\{0,1\}$, with zero false and one true.
+The instruction \code{lt} compares two unsigned byte values and returns an \code{i1}.
+There is no implicit conversion from a byte to a branch condition.
+The verifier rejects branching directly on \code{x}, even when a particular test input happens to be zero or one.
+
+For a defined input, a valid function either returns a byte or continues executing forever.
+These are its semantic observations.
+\term{Fuel exhaustion} is a third result of our testing interface, not an additional instruction in the language and not proof of divergence.
+An invalid representation is rejected before execution and therefore is not a program whose behavior an optimizer must preserve.
+
+\section{A state that explains a step}
+\label{sec:pebble-state}
+An interpreter state contains the current block, the predecessor just taken, and a register map from value IDs to bytes or booleans.
+Entering a block first selects every phi input from the predecessor and captures all those values.
+It then assigns the phi results simultaneously, executes ordinary instructions in ID order within the block, and executes the terminator.
+Figure~\ref{fig:pebble-step} separates these events.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=9mm]
+\node[basic block] (select) {Select incoming phi values};
+\node[basic block,below=of select] (assign) {Publish all phi results};
+\node[basic block,below=of assign] (body) {Execute ordinary instructions};
+\node[basic block,below=of body] (term) {Return or choose successor};
+\draw[cfg edge] (select)--(assign);
+\draw[cfg edge] (assign)--(body);
+\draw[cfg edge] (body)--(term);
+\end{tikzpicture}
+\caption{One block entry selects a complete incoming state before executing the body.}
+\label{fig:pebble-step}
+\end{figure}
+
+Consider a loop that swaps two values on its back edge.
+If their old values are 1 and 2, sequentially assigning \code{a = b} and then \code{b = a} produces 2 and 2.
+Parallel selection produces 2 and 1.
+After a second iteration it produces 1 and 2 again.
+The executable swap fixture checks precisely this distinction.
+
+\begin{algorithm}[htbp]
+\caption{Evaluating a block's phi prefix.}
+\label{alg:pebble-phi-state}
+\begin{pseudocode}
+\Require verified block $B$, incoming predecessor $P$, register map $R$
+\Ensure all phi results receive the values selected from the old $R$
+\ForAll{phis $v=\phifn{p:a,q:b}$ in $B$}
+\State $T[v]\gets R[a]$ if $P=p$, otherwise $R[b]$
+\EndFor
+\ForAll{phis $v$ in $B$}
+\State $R[v]\gets T[v]$
+\EndFor
+\end{pseudocode}
+\end{algorithm}
+
+Algorithm~\ref{alg:pebble-phi-state} takes $O(P)$ time and scratch slots for $P$ phis when the prefix is directly indexed.
+The teaching implementation scans the value table to find the prefix, adding $O(N)$ work per block entry.
+Keeping that cost visible prevents a simple representation from acquiring an undeserved linear-execution claim.
+
+\section{The host is not the language}
+\label{sec:pebble-host}
+The C implementation uses \code{unsigned} and masks arithmetic results with 255.
+The largest sum is 510; the largest product is 65,025.
+Both fit the minimum range required of C's unsigned integer type.
+The comparison uses those already normalized unsigned values.
+Consequently these operations implement the byte semantics without relying on signed overflow, optional eight-bit types, or a particular endianness.
+
+Adding division would require a zero-divisor rule before adding an opcode.
+Adding memory would require observations of stores and a model of invalid accesses.
+Adding floating point would require an explicit decision about rounding and exceptional values.
+The representation does not answer these questions merely because a host C operator exists.
+
+\section{Exercises}
+\label{sec:pebble-two-exercises}
+\begin{enumerate}
+\item \label{ex:pebble-swap} Trace two iterations of the swap using both sequential and parallel assignments. Identify the first incorrect state.
+\item \label{ex:pebble-fuel} A program returns after 20 block entries. What can be concluded from exhaustion at budgets 5 and 19? What changes when it returns at budget 20?
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:pebble-two-reading}
+The C11 draft specifies unsigned arithmetic and minimum integer ranges; use those requirements to justify the host implementation rather than observations on one machine~\cite[Sections~5.2.4.2.1 and~6.2.5]{wg14-2011-c11}.

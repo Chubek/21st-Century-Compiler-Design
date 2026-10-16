@@ -1,0 +1,82 @@
+\chapter{Textual IR}
+\label{ch:pebble-text}
+
+When a compiler fails, the smallest useful artifact is often the IR just before the failing pass.
+A printer that emits attractive but unparsable annotations is a diagnostic aid, not a reproducible interchange format.
+PebbleIR's first format favors a stable contract over source-language elegance.
+
+\section{A versioned record format}
+\label{sec:pebble-records}
+The header contains the magic word, format version, block count, and allocated value count.
+Value records follow in ascending ID order, including tombstones.
+Each record contains ID, owning block, opcode name, type name, operands $a,b$, immediate, and predecessor IDs $p,q$.
+Terminator records follow in block order, then a final \code{end} line.
+Every record ends in a newline, including the final record; trailing records are rejected.
+
+Listing~\ref{lst:pebble-text-example} is the unoptimized running expression.
+All zeros are meaningful canonical unused fields.
+The parser rejects a nonzero predecessor field on an addition, even though the interpreter would not read that field.
+
+\begin{irlisting}[caption={The version-one format preserves value IDs and explicitly encodes every field.},label={lst:pebble-text-example}]
+pebble 1 1 7
+v 1 0 input u8 0 0 0 0 0
+v 2 0 const u8 0 0 7 0 0
+v 3 0 add u8 1 2 0 0 0
+v 4 0 const u8 0 0 3 0 0
+v 5 0 const u8 0 0 5 0 0
+v 6 0 add u8 4 5 0 0 0
+v 7 0 mul u8 3 6 0 0 0
+t 0 ret 7 0 0
+end
+\end{irlisting}
+
+\section{Parsing is a transaction}
+\label{sec:pebble-parse-transaction}
+The reader accepts only bounded line records, recognized names, and unsigned decimal fields with checked accumulation.
+It does not use unchecked \code{atoi}, whose interface does not provide the validation required here.
+It constructs a temporary function, checks the complete syntax, calls the verifier, and only then assigns the caller's destination.
+On failure the destination remains unchanged, although the input stream has advanced.
+Algorithm~\ref{alg:pebble-text-parse} states that separation.
+
+\begin{algorithm}[htbp]
+\caption{Parsing a complete IR file without publishing a partial function.}
+\label{alg:pebble-text-parse}
+\begin{pseudocode}
+\Require readable stream $S$, destination $F$
+\Ensure verified new lifetime in $F$, or unchanged $F$
+\State parse version and bounded counts into temporary $T$
+\State read exactly the declared value records in ID order
+\State read exactly the declared terminators in block order
+\State require final marker, newline, and end of stream without error
+\State verify $T$; reject if any structural or semantic invariant fails
+\State publish $T$ and discard facts from the old lifetime of $F$
+\end{pseudocode}
+\end{algorithm}
+
+For an input of $C$ characters, lexical processing is $O(C)$ before verification.
+The 256-character line buffer is a format implementation limit: an overlong record is rejected, not split into several records.
+The source-expression parser is a different client and uses different grammar and size limits.
+Do not accidentally accept a source expression where an IR snapshot is expected merely because both are text.
+
+\section{What round trips promise}
+\label{sec:pebble-roundtrip}
+The test prints a verified function, parses it, prints the parsed function, and compares the two byte streams.
+It performs this check both before and after optimization, including loops and tombstones.
+The property is canonical print stability, not byte-for-byte preservation of arbitrary input whitespace.
+Parsing may accept additional whitespace between tokens and printing removes that variation.
+
+Revisions and C addresses are not serialized.
+They describe a live editor object, not program meaning.
+A reparsed function gets a new logical lifetime with the same serialized IDs and semantics.
+Debug source spans, pass names, and failure inputs could later be stored in a separate reproducer envelope so they do not change the core language's identity rules.
+
+\section{Exercises}
+\label{sec:pebble-seven-exercises}
+\begin{enumerate}
+\item \label{ex:pebble-text-fold} Rewrite Listing~\ref{lst:pebble-text-example} after folding and dead-code elimination. Preserve all seven allocated IDs.
+\item \label{ex:pebble-roundtrip-contract} Does print--parse--print stability prove that the interpreter is correct? Give a fault that could pass this test.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:pebble-seven-reading}
+The C11 stream and conversion interfaces are worth reading alongside a text reader's error contract, especially the distinction between end of file and stream error~\cite[Section~7.21]{wg14-2011-c11}.

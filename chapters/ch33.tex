@@ -1,0 +1,222 @@
+\chapter{Garbage Collection}\label{ch:garbage-collection}
+
+Manual memory management asks every programmer to free exactly the right objects at exactly the right time.
+Large programs fail that test through leaks, double frees, and dangling references.
+A \term{garbage collector} reclaims unreachable objects automatically so programmers manage reachability instead of storage.
+The collector must never free a live object and should reclaim dead objects promptly enough to bound memory.
+This chapter builds that contract from three classic designs and one precise marking algorithm.
+We trace each collection by hand so the invariants are checkable without running code.
+
+\section{Reachability Is the Contract}\label{sec:ch33-reachability}
+
+An object is live when the program can still reach it.
+\term{Roots} are the starting set: globals, stack slots, registers, and map-described references.
+An object is reachable when some path of references leads from a root to it.
+Everything else is garbage, no matter how recently it was allocated.
+Figure~\ref{fig:ch33-heap-graph} shows a heap with two roots, five reachable objects, and two unreachable ones.
+Reachability, not age or size, decides the outcome.
+Table~\ref{tab:ch33-collectors} compares the three collectors of this chapter by pause shape, throughput cost, and fragmentation behavior.
+The entries are qualitative because real behavior depends on allocation rate and heap shape.
+\term{Mark-sweep} marks reachable objects and sweeps the rest into free lists.
+\term{Semi-space copying} moves survivors into a fresh half and frees the old half at once.
+\term{Reference counting} tracks incoming edges and frees objects whose count drops to zero.
+Each design upholds the same safety rule.
+No live object is ever reclaimed.
+They differ in when they pay, how long they pause, and whether free memory stays contiguous.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=1.0cm and 1.5cm]
+\node[basic block] (r1) {root R1};
+\node[basic block, below=of r1] (a) {A};
+\node[basic block, below left=of a] (b) {B};
+\node[basic block, below right=of a] (c) {C};
+\node[basic block, right=of r1] (r2) {root R2};
+\node[basic block, below=of r2] (d) {D};
+\node[basic block, below=of d] (e) {E dead};
+\node[basic block, left=of e] (f) {F dead};
+\draw[cfg edge] (r1) -- (a);
+\draw[cfg edge] (a) -- (b);
+\draw[cfg edge] (a) -- (c);
+\draw[cfg edge] (r2) -- (d);
+\draw[cfg edge] (d) -- (a);
+\end{tikzpicture}
+\caption{Two roots reach A, B, C, and D through shared and direct edges, while E and F have no path from any root and are garbage.}
+\label{fig:ch33-heap-graph}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{Collector designs uphold the same safety rule but pay at different times and fragment differently.}
+\label{tab:ch33-collectors}
+\begin{tabular}{llll}
+\toprule
+Design & Pause shape & Steady cost & Fragmentation \\
+\midrule
+Mark-sweep & Mark pause & Mark per live object & Free lists fragment \\
+Semi-space & Copy pause & Copy per survivor & Survivors stay compact \\
+Ref. counting & Small steps & Count per update & Needs cycle handling \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Tri-Color Marking}\label{sec:ch33-tricolor}
+
+Marking must visit every reachable object exactly once without losing track of partially scanned ones.
+The \term{tri-color invariant} assigns each object a color.
+White means undiscovered.
+Gray means discovered but not fully scanned.
+Black means scanned with all children discovered.
+Collection starts with roots gray and everything else white.
+Each step takes a gray object, grays its white children, and paints it black.
+When no gray objects remain, black is exactly the reachable set.
+Algorithm~\ref{alg:ch33-mark} states the worklist version used by mark-sweep and by concurrent markers.
+It assumes the object graph is fixed during marking and that every reference is enumerable.
+It requires that roots are enumerated before the loop starts.
+Its output is the set of reachable objects; sweep or copy then follows.
+The invariant does the heavy lifting.
+No black object ever points to a white object.
+That property holds initially because nothing is black.
+Each step preserves it because children gray before their parent blacks.
+At the end, with no gray left, no reachable object can still be white.
+Mutators complicate the picture when collection runs alongside the program.
+A write that installs a white pointer into a black object would hide garbage as live or, worse, hide a live object as garbage.
+The standard remedy is a \term{write barrier}: a small check on pointer stores that preserves the invariant.
+An insertion barrier can shade the newly stored referent; a deletion barrier can record the old referent before overwriting it; another design logs the modified object for rescanning.
+These choices maintain different invariants and cannot be interchanged without changing the collector's proof.
+The barrier code is short, but removing any of its cases breaks safety.
+
+\begin{algorithm}[htbp]
+\caption{Tri-color marking with an explicit worklist}\label{alg:ch33-mark}
+\begin{pseudocode}
+\Require valid non-null object roots $R$, stable heap $H$ with reference lists; mutator stopped
+\Ensure every reachable object is marked black
+\State color all objects white
+\State $W \gets \emptyset$
+\ForAll{$r \in R$}
+\If{$r$ is white}
+\State color $r$ gray and add $r$ to $W$
+\EndIf
+\EndFor
+\While{$W \neq \emptyset$}
+\State remove some $g$ from $W$
+\ForAll{valid non-null object references $c$ in $g$}
+\If{$c$ is white}
+\State color $c$ gray and add $c$ to $W$
+\EndIf
+\EndFor
+\State color $g$ black
+\EndWhile
+\State \Return all black objects
+\end{pseudocode}
+\end{algorithm}
+
+\section{Worked Example: Marking and Sweeping by Hand}\label{sec:ch33-worked}
+
+We run Algorithm~\ref{alg:ch33-mark} on the heap of Figure~\ref{fig:ch33-heap-graph}.
+Roots are $R1$ and $R2$.
+References are $A \to B$, $A \to C$, $D \to A$, and no edges from $B$, $C$, $E$, or $F$.
+All objects start white.
+Initialization grays $R1$-reachable entry $A$ and $R2$-reachable entry $D$, so $W = \{A, D\}$.
+Pop $A$: children $B$ and $C$ are white, so both turn gray and $W = \{D, B, C\};$ then $A$ turns black.
+Figure~\ref{fig:visual-gc-transition} freezes the state on either side of that step.
+Object $D$ stays gray because it has not yet been scanned; removing it merely because another root was processed would lose pending work.
+
+\input{figures/gc-color-transition}
+
+Pop $D$: child $A$ is black, so nothing changes; $D$ turns black and $W = \{B, C\}$.
+Pop $B$: no children, so $B$ turns black and $W = \{C\}$.
+Pop $C$: no children, so $C$ turns black and $W = \emptyset$.
+The black set is $\{A, B, C, D\}$, which matches the reachable set exactly.
+$E$ and $F$ stay white.
+Sweep then reclaims $E$ and $F$ and leaves four survivors.
+Counting confirms the work: four objects grayed, four blackened, three edges traversed, two objects freed.
+A semi-space variant would copy the same four survivors and free both dead objects implicitly.
+A reference-counting variant would have freed $E$ and $F$ when their last edges vanished, but it would keep any dead cycle alive.
+The listing below pins the trace for tests.
+\begin{irlisting}
+; tri-color trace for Figure heap
+; init: gray {A, D}, white {B, C, E, F}
+; pop A: gray {D, B, C}, black {A}
+; pop D: black {A, D}
+; pop B: black {A, D, B}
+; pop C: black {A, B, C, D}
+; sweep: free {E, F}
+\end{irlisting}
+Any implementation that reports a different black set or frees a black object fails this trace.
+
+\section{Counting, Cycles, and Barriers}\label{sec:ch33-counting}
+
+Reference counting frees an object when its count reaches zero.
+The rule is local and pauses stay short.
+Its weakness is cycles: a dead ring keeps every member above zero forever.
+Production counters therefore pair counting with a periodic cycle detector or a backup tracer.
+Copying collectors take the opposite trade.
+They compact survivors but must copy every live object on each collection.
+Mark-sweep avoids copying but fragments the free space.
+Fragmentation then forces size classes, coalescing, or occasional compaction.
+\begin{ccwarning}[Barrier first]
+A concurrent or incremental collector without a correct write barrier is a wrong collector.
+Prove the barrier before tuning pause times.
+\end{ccwarning}
+Roots need the same rigor as heap edges.
+A stack map that omits one reference slot turns a live object into garbage.
+A conservative root scan that invents references turns garbage into leaks.
+Test a collector implementation with adversarial heaps: shared diamonds, self-loops, two-cycles, and deep chains.
+Each test asserts the exact survivor set, not merely that nothing crashed.
+The \enquote{exact set} rule catches collectors that leak quietly.
+
+\section{Generations: Most Objects Die Young}\label{sec:ch33-generations}
+
+Measurements across many systems agree on one pattern: most allocated objects become unreachable soon after creation.
+A \term{generational collector} exploits that pattern with two or more regions called generations.
+New objects enter the young generation, also called the nursery.
+Survivors of several nursery collections promote to the old generation.
+The nursery collects often and scans only itself plus roots plus remembered old-to-young references.
+A \term{remembered set} records those cross-generation pointers so the nursery need not scan the whole old heap.
+The old generation collects rarely with a full traced collection.
+Promotion policy controls the trade.
+Promote too fast and the old generation fills with short-lived data.
+Promote too slow and survivors are copied repeatedly in the nursery.
+A typical rule promotes after one or two survivals, with large objects allocated directly in the old generation.
+Consider a loop that builds one temporary list per iteration and keeps every tenth list.
+Each iteration allocates one list and drops nine of ten.
+Nursery collection reclaims the nine cheaply because it copies only the survivor.
+The remembered set stays small because few old objects point into the nursery.
+A generational-collector test should allocate one thousand temporaries, retain one hundred, and assert the survivor set after a nursery collection.
+A second test drops all roots and asserts the nursery empties completely.
+The \enquote{empty after drop} check catches remembered-set leaks that pin dead objects.
+
+\section{Implementation Notes and Complexity}\label{sec:ch33-implementation}
+
+Marking visits each reachable object once and traverses each of its edges once.
+Tracing costs $O(|R|+L+E_L)$ where $L$ is the live-object count and $E_L$ is the number of references scanned in live objects.
+The explicit initialization in the algorithm also visits all heap objects, adding $O(|H|)$ time.
+Sweep scans the whole heap in $O(H)$ where $H$ is the heap size.
+Copying costs $O(S)$ where $S$ is the survivor size plus forwarding work.
+Updating a reference count costs $O(1)$, but a decrement to zero can trigger a cascade of reclamation; that work must be counted separately.
+Memory overhead includes one color or mark bit per object, free-list links or a reserve half, and barrier metadata.
+Production collectors generationalize: young objects die fast, so a small nursery collects often and survivors promote.
+They run concurrently, snapshot roots atomically, and resume mutators during marking.
+Each refinement preserves the tri-color invariant or states its replacement explicitly.
+A common pitfall sizes the heap from a single program and declares victory.
+Heap behavior changes with input size, thread count, and object shape.
+Another pitfall measures only throughput and ignores pause distribution.
+Interactive programs feel the longest pause, not the average.
+We report both, with conditions, in the measurement chapter.
+% TODO(cite): need a primary reference for write-barrier correctness arguments.
+
+\section{Exercises}\label{sec:ch33-exercises}
+
+\begin{enumerate}
+\item Run Algorithm~\ref{alg:ch33-mark} on roots $\{X\}$ with edges $X \to Y$, $Y \to X$, and isolated $Z$, list the color of each object after every pop, and give the sweep set.\label{ex:ch33-cycle-trace}
+\item Give a two-object heap where reference counting without cycle detection leaks, show the counts after dropping the external edge, and state what a backup tracer would free.\label{ex:ch33-count-leak}
+\item Design a write-barrier test with a black object, a white child, and one pointer store, and explain which barrier action keeps the tri-color invariant.\label{ex:ch33-barrier-test}
+\end{enumerate}
+
+\section{Further Reading}\label{sec:ch33-reading}
+
+Appel treats storage management and collection as part of the runtime system~\cite{appel-1998-modern}.
+Morgan discusses how allocation and lifetime shape optimization choices~\cite{morgan-1998-optimizing}.
+Safonov addresses trustworthy reclamation when components share memory~\cite{safonov-2010-trustworthy}.
+The C standard draft defines object lifetime and pointer-validity rules for C-managed memory~\cite{wg14-2011-c11}.

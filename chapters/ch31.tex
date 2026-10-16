@@ -1,0 +1,258 @@
+\chapter{Virtual Machines and Bytecode}\label{ch:virtual-machines-bytecode}
+
+A virtual machine turns interpretation into an engineering discipline.
+It fixes an instruction set, an encoding, and a state model before anyone writes an optimizer.
+Programs become data that tools can verify, transform, and execute on any host.
+This chapter defines a small bytecode machine precisely enough to implement and test.
+We then show how verification, dispatch, and calls interact.
+The result is a stable target for compilers and a stable host for later just-in-time techniques.
+
+\section{Why Fix a Bytecode}\label{sec:ch31-why-bytecode}
+
+A \term{virtual machine} is a program that executes programs written for an abstract instruction set.
+The abstract set is called \term{bytecode} when instructions are compactly encoded.
+Fixing the set separates language front ends from execution engines.
+A front end lowers source constructs to a bounded list of operations.
+The machine implements each operation once.
+New languages reuse the machine, and new hosts reimplement it.
+That reuse only works when the machine definition is complete.
+It must specify value representations, instruction meanings, error behavior, and limits.
+Consider unsigned addition on eight-bit values.
+The definition must say whether the result wraps, traps, or produces a wider value.
+It must say what happens on stack underflow and on a jump past the program end.
+Without those answers, two hosts can run most programs yet disagree on edge cases.
+We therefore define the machine as a state transition system.
+A state holds a program counter, an operand stack, a frame stack, and a heap reference.
+Each instruction maps one state to the next state or to a defined error.
+The definition fits on a few pages for a small set.
+Its brevity is a feature.
+Every omitted case is a portability bug waiting for a test to find it.
+
+\section{Stack Versus Register Machines}\label{sec:ch31-stack-register}
+
+Bytecode machines divide into \term{stack machines} and \term{register machines}.
+A stack machine keeps temporaries on an operand stack.
+Instructions are short because operands are implicit.
+A register machine names temporaries explicitly in each instruction.
+Instructions are longer but programs need fewer of them.
+Figure~\ref{fig:ch31-machine-state} shows the state components shared by both designs.
+Control, operands, activation records, and heap references stay in distinct regions.
+The split lets verification reason about each region separately.
+Table~\ref{tab:ch31-stack-register} compares the two styles on code size, dispatch count, and verification effort.
+The comparison is qualitative.
+Real designs mix ideas, for example by adding a small register file to a stack machine.
+The expression \code{(a + b) + (c + d)} illustrates the trade-off.
+A stack encoding pushes four values and performs three additions, using seven instructions before return or halt.
+If the four inputs are already in virtual registers, a register encoding can express the same calculation with three adds.
+If separate loads are needed, those instructions must also be counted; the benefit depends on the chosen instruction set.
+Neither style is uniformly better.
+Stack code suits compact distribution and simple verification.
+Register code suits fast dispatch and direct mapping to native registers.
+We choose a stack machine for this chapter because its verifier is shorter.
+Later chapters reuse the same state picture for frames and deoptimization.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=1.0cm and 1.2cm]
+\node[basic block] (pc) {pc\\ next opcode};
+\node[basic block, right=of pc] (op) {operand stack\\ temporaries};
+\node[basic block, right=of op] (fr) {frames\\ locals, return pc};
+\node[basic block, right=of fr] (hp) {heap\\ objects, arrays};
+\draw[cfg edge] (pc) -- (op);
+\draw[cfg edge] (op) -- (fr);
+\draw[cfg edge] (fr) -- (hp);
+\end{tikzpicture}
+\caption{Machine state separates control, temporaries, activation records, and heap data so each instruction touches a defined region.}
+\label{fig:ch31-machine-state}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{Stack and register designs differ in encoding density and dispatch count rather than expressiveness.}
+\label{tab:ch31-stack-register}
+\begin{tabular}{llll}
+\toprule
+Property & Stack machine & Register machine & Consequence \\
+\midrule
+Operands & Implicit & Explicit & Stack code is shorter \\
+Dispatches & More & Fewer & Registers save steps \\
+Verification & Simpler & Richer & Stack types track depth \\
+Mapping & Indirect & Direct & Registers map to hardware \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Encoding and Verification}\label{sec:ch31-encoding}
+
+An encoding assigns each opcode a numeric tag and a fixed operand shape.
+Fixed shapes keep decoding simple and verification decidable.
+Our machine uses one-byte opcodes with zero, one, or two inline operands.
+Jump targets are instruction indices, not byte offsets.
+That choice removes alignment questions and makes out-of-range jumps easy to detect.
+\term{Bytecode verification} checks a program before execution.
+It proves that the operand stack has a consistent depth at every program point.
+It proves that each instruction receives values of a compatible kind.
+It proves that every jump target is a valid instruction start.
+Algorithm~\ref{alg:ch31-verify} gives the depth-checking pass for straight-line and branching code without subroutines.
+It assumes a control-flow graph over instruction indices is already built.
+It requires each opcode to declare how many operands it pops and how many results it pushes.
+It propagates a required depth along each edge and reports the first inconsistency.
+Type checking extends the same idea from depths to kinds.
+Each stack slot carries an abstract kind such as integer, reference, or unknown.
+Handlers declare the kinds they consume and produce.
+The verifier joins kinds at merge points and rejects programs with no consistent assignment.
+Verification runs once per program load.
+Execution then omits most static checks except guards the definition requires, such as division and null checks.
+A frequent mistake verifies depth but skips kinds.
+Depth-correct programs can still confuse integers and references.
+Another mistake allows jumps into the middle of multi-word instructions.
+Index-based targets prevent that error class by construction.
+We adopt both restrictions here.
+
+Figure~\ref{fig:visual-stack-arity} shows why the pop count cannot be replaced with the net stack effect.
+An add started with one operand has net depth $0$, yet its second input never existed.
+Listing~\ref{lst:visual-depth-step} checks the required operands and the remaining capacity in an order that avoids unsigned underflow and overflow in the verifier itself.
+
+\input{figures/stack-arity}
+
+
+\begin{listing}[htbp]
+  \inputminted{c}{example-code/visual-labs/depth.c}
+  \caption{A checked depth transition validates operand availability before calculating the resulting depth.}
+  \label{lst:visual-depth-step}
+\end{listing}
+
+The helper verifies one transition, not the whole control-flow graph or operand types.
+The graph solver must still require matching depths at joins, valid targets, and the specified depth at each return.
+Its tests enumerate 9,000 combinations of small depths, pop counts, push counts, and capacities, and separately exercise the largest \code{size\_t} boundary.
+
+\begin{algorithm}[htbp]
+\caption{Stack-depth verification over a bytecode control-flow graph}\label{alg:ch31-verify}
+\begin{pseudocode}
+\Require decoded array $P$, entry depth $d_0$, pop count $p(i)$ and push count $q(i)$
+\Ensure depth map $D$ or a verification error
+\State build CFG with successors for branches, jumps, and fall-through
+\State set $D[v] \gets$ unknown for all $v$, $D[entry] \gets d_0$
+\State $W \gets \{entry\}$
+\While{$W \neq \emptyset$}
+\State remove some $v$ from $W$
+\If{$D[v] < p(v)$}
+\State \Return underflow at $v$
+\EndIf
+\State $d \gets D[v]-p(v)+q(v)$
+\State reject arithmetic overflow or $d$ above the configured stack capacity
+\State reject invalid branch targets and invalid return depths
+\ForAll{$s \in \Succ(v)$}
+\If{$D[s]$ is unknown}
+\State $D[s] \gets d$
+\State add $s$ to $W$
+\ElsIf{$D[s] \neq d$}
+\State \Return depth mismatch at $s$
+\EndIf
+\EndFor
+\EndWhile
+\State \Return $D$
+\end{pseudocode}
+\end{algorithm}
+
+Decode instruction boundaries and validate encoded targets before constructing successor links, including targets in unreachable code if the format requires whole-file validity.
+The worklist verifies stack depths only on entry-reachable instructions; unreachable instructions retain unknown depth.
+A successful depth check does not establish operand types or execution termination, which require separate contracts.
+
+\section{Worked Example: Verifying and Running a Sum}\label{sec:ch31-worked}
+
+We verify and execute a program that computes \code{(6 + 9) + (2 + 3)}.
+The bytecode uses pushes, adds, and a halt.
+Control flow is straight-line, so the verifier has one path to check.
+Each push has effect $+1$ and each add has effect $-1$.
+Starting from depth $0$, the depths evolve deterministically.
+After the first push the depth is $1$.
+After the second push the depth is $2$.
+The first add reduces it to $1$.
+The third push raises it to $2$.
+The fourth push raises it to $3$.
+The second add reduces it to $2$.
+The final add reduces it to $1$.
+Each add has at least two operands before it executes, and the exit depth is $1$.
+Checking only that the net depth stays nonnegative would miss an add started with one operand.
+Verification accepts with one value left for the halt.
+The listing below records the expected depth and value at each step.
+\begin{irlisting}
+; (6 + 9) + (2 + 3), stack machine encoding
+push 6        ; depth 0 -> 1
+push 9        ; depth 1 -> 2
+add           ; depth 2 -> 1, value 15
+push 2        ; depth 1 -> 2
+push 3        ; depth 2 -> 3
+add           ; depth 3 -> 2, value 5
+add           ; depth 2 -> 1, value 20
+halt          ; result 20
+\end{irlisting}
+Execution proceeds from an empty stack.
+After pushing $6$ and $9$, the stack holds $[6, 9]$.
+The first add replaces them with $[15]$.
+Pushing $2$ and $3$ gives $[15, 2, 3]$.
+The second add gives $[15, 5]$.
+The final add gives $[20]$.
+The halt returns $20$.
+Arithmetic confirms the result: $6 + 9 = 15$, $2 + 3 = 5$, and $15 + 5 = 20$.
+There are seven value-producing instructions and one halt, for eight dispatches when halt is dispatched.
+A register encoding would use fewer dispatches at the cost of wider instructions.
+That is the density trade-off of Table~\ref{tab:ch31-stack-register} made concrete.
+We also check two failure modes by hand.
+Removing the final add leaves exit depth $2$, which a strict loader rejects when exactly one result is required.
+Changing a jump target past the program end fails control-flow construction before depth checking begins.
+Both checks happen before any instruction executes.
+
+\section{Calls, Frames, and Constants}\label{sec:ch31-calls}
+
+Calls need an explicit frame discipline on top of the operand stack.
+A frame holds locals, a return address, and a saved stack base.
+A call pushes a frame and resets the operand window.
+A return restores both and delivers one result value.
+Constants live in a separate pool so instructions stay narrow.
+A load takes a pool index instead of embedding a full value.
+That split keeps the common cases to one operand byte.
+\begin{ccwarning}[One table]
+The verifier, the interpreter, and any compiler must share one opcode table.
+Separate tables drift apart and admit programs that one component rejects.
+\end{ccwarning}
+Test calls with three tiny programs.
+The first calls a leaf and returns a constant.
+The second nests two calls and checks operand windows do not leak.
+The third passes the wrong arity and must fail verification, not execution.
+The \enquote{fail before running} rule keeps calling-convention defects reproducible.
+
+\section{Implementation Notes and Complexity}\label{sec:ch31-implementation}
+
+A compact value stack backed by an array handles typical programs well.
+Frames form a linked chain with a small header per activation.
+The verifier of Algorithm~\ref{alg:ch31-verify} runs in $O(N + E)$ where $N$ is the instruction count and $E$ is the edge count.
+Each program point enters the worklist at most twice: once when first assigned and once when a mismatch is found.
+Memory use is $O(N)$ for the depth map and successor lists.
+Dispatch cost per instruction is constant for a switch loop.
+Total execution cost is $O(I)$ dispatches where $I$ is the dynamic instruction count, plus handler work.
+Production machines add measured refinements.
+They cache name lookups at call sites.
+They tier from a switch loop to threaded code for hot methods.
+They split verification into load-time structural checks and run-time type guards.
+Each refinement preserves the state model of Figure~\ref{fig:ch31-machine-state}.
+A useful discipline tests the verifier with mutants that shift one jump target or drop one push.
+Those single-change mutants expose missing checks quickly.
+Another discipline replays every verifier rejection as an interpreter test that must fail before dispatch.
+% TODO(cite): need a primary reference for split bytecode verification designs.
+
+\section{Exercises}\label{sec:ch31-exercises}
+
+\begin{enumerate}
+\item Encode \code{(10 - 4) + (7 - 2)} in the stack bytecode above, compute the depth after each instruction, and give the final stack.\label{ex:ch31-encode-trace}
+\item Run Algorithm~\ref{alg:ch31-verify} on a diamond whose two predecessors supply depths $2$ and $3$ to the same join, name the instruction where it reports an error, and propose a one-instruction fix.\label{ex:ch31-depth-join}
+\item Add a conditional jump to the machine, state its stack effect and successor rule, and write two tests: one for a jump past the end and one for a depth mismatch after the join.\label{ex:ch31-branch-op}
+\end{enumerate}
+
+\section{Further Reading}\label{sec:ch31-reading}
+
+Appel explains virtual machines as translation targets with explicit representations~\cite{appel-1998-modern}.
+Morgan relates bytecode layout and calling structure to later optimization choices~\cite{morgan-1998-optimizing}.
+Safonov discusses execution trustworthiness when code crosses component boundaries~\cite{safonov-2010-trustworthy}.
+The C standard draft defines the sequencing and value rules that any C-facing interface must respect~\cite{wg14-2011-c11}.

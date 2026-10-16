@@ -1,0 +1,425 @@
+\section{Translate the tree into a sequence}
+\label{sec:tiny-stack-translation}
+
+The constant folder changes a tree into another tree.
+We can check its result with the same evaluator because the representation has not changed.
+A compiler must eventually cross a harder boundary: the result and the input may have different shapes and different execution rules.
+We need a way to explain why those different executions still agree.
+
+Our first such translation removes the tree from execution.
+It produces a sequence of instructions for a small stack machine.
+The machine does not follow child pointers.
+It reads instructions in order and keeps intermediate values on a stack.
+The input still belongs to $V$, and every arithmetic result still belongs to $V$.
+We change the execution mechanism without changing the arithmetic promise.
+
+A \term{stack machine} obtains operands from a stack rather than naming a separate storage location for every intermediate value.
+The top is the end from which values are removed.
+For our notation, the top appears on the right.
+Thus $[23,7,8]$ has $8$ at its top.
+The sequence $[23,7]$ remains after removing that value.
+This convention is small enough to state once and easy enough to get wrong if left unstated.
+
+The instruction set has four operations.
+\code{PUSH} carries a literal operand and pushes its value.
+\code{GET\_INPUT} pushes the current input.
+\code{ADD8} removes two values, adds them modulo $256$, and pushes the result.
+\code{MUL8} does the same with multiplication.
+There are no branch instructions and no explicit return instruction.
+Reaching the end with exactly one stack value completes a program.
+That value is its result.
+
+The compiler's task is now concrete.
+For every valid expression, it must produce instructions that finish with its value.
+It must not consume a value that the expression's caller already had on the stack.
+It must not rely on an instruction that reads a nonexistent operand.
+These are related obligations, but they are not interchangeable.
+
+\subsection{Give each instruction a meaning}
+\label{sec:tiny-stack-semantics}
+
+Write $S\mathbin{\|}[v]$ for the stack obtained by appending $v$ to stack $S$.
+The stack $S$ can be empty.
+For input $a$, the instruction rules are
+\begin{align*}
+  \code{PUSH}\ n &: S \longmapsto S\mathbin{\|}[n],\\
+  \code{GET\_INPUT} &: S \longmapsto S\mathbin{\|}[a],\\
+  \code{ADD8} &: S\mathbin{\|}[u,v]
+    \longmapsto S\mathbin{\|}[(u+v)\bmod256],\\
+  \code{MUL8} &: S\mathbin{\|}[u,v]
+    \longmapsto S\mathbin{\|}[(u\times v)\bmod256].
+\end{align*}
+The arithmetic instructions need at least two values.
+Trying to execute one with fewer values is \term{stack underflow}.
+We reject such instruction sequences before running them.
+This is an error in the target representation, not a newly introduced result of the source expression language.
+
+For a binary instruction, $v$ is removed first because it is on top.
+The value $u$ is removed second.
+The calculation uses $u$ as its left operand and $v$ as its right operand.
+Addition and multiplication give the same answer if those two operands are exchanged.
+A later subtraction instruction would not.
+We keep the operand convention explicit even though the present instruction set cannot expose that particular mistake through a changed numeric answer.
+
+Let $\operatorname{Exec}(c,a,S)$ mean executing instruction sequence $c$ with input $a$ and initial stack $S$.
+For now this notation describes the mathematical machine, with enough storage and a valid instruction sequence.
+Execution of an empty sequence leaves $S$ unchanged.
+Execution of a nonempty sequence applies its first instruction and then executes the remaining sequence.
+The finite sequence and absence of jumps guarantee that this execution reaches its end.
+The bounded C implementation will report failure when it cannot meet its storage contract.
+
+\subsection{Generate instructions in operand order}
+\label{sec:tiny-stack-generation}
+
+Write $C(e)$ for the instruction sequence compiled from expression $e$.
+The translation rules are
+\begin{align*}
+  C(\operatorname{lit}(n)) &= [\code{PUSH}\ n],\\
+  C(x) &= [\code{GET\_INPUT}],\\
+  C(\operatorname{add}(p,q)) &= C(p)\mathbin{\|}C(q)\mathbin{\|}[\code{ADD8}],\\
+  C(\operatorname{mul}(p,q)) &= C(p)\mathbin{\|}C(q)\mathbin{\|}[\code{MUL8}].
+\end{align*}
+Here the same concatenation symbol joins instruction sequences rather than stacks.
+The surrounding expressions identify which kind of sequence is involved.
+These rules choose left-to-right operand evaluation.
+That order is permitted because the source expressions are pure and total.
+It is a choice made by this compiler, not a general permission to reorder effectful operations in other languages.
+
+Algorithm~\ref{alg:tiny-stack-emit} gives the corresponding traversal.
+Emission appends one instruction to a growable logical sequence.
+The mathematical algorithm assumes enough storage; the implementation checks a fixed capacity.
+Like folding, emission visits children before completing their parent.
+Unlike folding, it does not replace the parent with another tree node.
+It appends an instruction that will combine the values left by the children's code.
+
+\begin{algorithm}
+  \caption{Emit stack instructions for an expression.}
+  \label{alg:tiny-stack-emit}
+  \begin{pseudocode}
+    \Require A valid expression tree $e$; an instruction sequence with enough capacity
+    \Ensure Append $C(e)$ without changing the existing instruction prefix
+    \Function{Emit}{$e$}
+      \If{$e=\operatorname{lit}(n)$}
+        \State append $\code{PUSH}\ n$
+      \ElsIf{$e=x$}
+        \State append $\code{GET\_INPUT}$
+      \Else
+        \State \Call{Emit}{$\operatorname{left}(e)$}
+        \State \Call{Emit}{$\operatorname{right}(e)$}
+        \State append $\code{ADD8}$ or $\code{MUL8}$ according to $e$'s operator
+      \EndIf
+    \EndFunction
+  \end{pseudocode}
+\end{algorithm}
+
+Our running expression produces seven instructions.
+The input and $7$ must be pushed before their addition.
+The literals $3$ and $5$ must then be pushed before the second addition.
+Finally, the multiplication combines the two subtree results.
+Table~\ref{tab:tiny-stack-trace} works through the complete sequence at input $250$.
+The first addition wraps to $1$, just as it did in the tree evaluator.
+
+\begin{table}
+  \centering
+  \caption{The seven-instruction program produces 8 at input 250.}
+  \label{tab:tiny-stack-trace}
+  \begin{tabular}{rll}
+    \toprule
+    Position & Instruction & Stack after execution \\
+    \midrule
+    & Before execution & $[\,]$ \\
+    0 & \code{GET\_INPUT} & $[250]$ \\
+    1 & \code{PUSH} 7 & $[250,7]$ \\
+    2 & \code{ADD8} & $[1]$ \\
+    3 & \code{PUSH} 3 & $[1,3]$ \\
+    4 & \code{PUSH} 5 & $[1,3,5]$ \\
+    5 & \code{ADD8} & $[1,8]$ \\
+    6 & \code{MUL8} & $[8]$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Figure~\ref{fig:tiny-stack-boundary} separates the representations involved.
+The source evaluator and target executor reach the same value through different data structures.
+The compiler does not run the target program to discover its answer.
+It builds an instruction sequence that will work for every allowed input.
+At input $9$, the same seven instructions produce $128$.
+There is no input-specific substitution in the generated program.
+
+\begin{figure}
+  \centering
+  \begin{tikzpicture}[node distance=15mm and 17mm]
+    \node[basic block] (tree) {Expression tree};
+    \node[basic block,right=of tree] (code) {Stack code};
+    \node[basic block,below=of tree] (value1) {Value in $V$};
+    \node[basic block,below=of code] (value2) {Value in $V$};
+    \draw[cfg edge] (tree) -- node[above,font=\small] {compile} (code);
+    \draw[cfg edge] (tree) -- node[left,font=\small] {evaluate} (value1);
+    \draw[cfg edge] (code) -- node[right,font=\small] {execute} (value2);
+    \draw (value1) -- node[above,font=\small] {equal} (value2);
+  \end{tikzpicture}
+  \caption{Correct translation connects two execution mechanisms at a common result.}
+  \label{fig:tiny-stack-boundary}
+\end{figure}
+
+\section{Prove preservation of the surrounding stack}
+\label{sec:tiny-stack-proof}
+\index{stack machine!correctness}
+
+Starting from an empty stack is how we run a whole expression program.
+It is not enough for the most useful induction statement.
+When the right subtree starts, the left subtree's value is already on the stack.
+The right subtree's code must preserve that value while producing its own.
+A proof restricted to an empty stack cannot directly justify that step.
+
+Instead, we prove the stronger statement
+\begin{equation}
+  \operatorname{Exec}(C(e),a,S)
+  = S\mathbin{\|}[\llbracket e\rrbracket_a]
+  \label{eq:tiny-stack-prefix}
+\end{equation}
+for every valid expression $e$, every input $a\in V$, and every finite initial stack $S$ of values in $V$.
+The execution must also avoid underflow.
+Equation~\ref{eq:tiny-stack-prefix} says that compiled expression code preserves the entire initial stack and appends one result.
+It states exactly the property that a parent needs from each child.
+
+For a literal, the emitted instruction pushes that literal and changes nothing below it.
+For the input node, the emitted instruction pushes $a$ and changes nothing below it.
+These cases establish the statement for leaves.
+Neither instruction removes an operand, so neither can underflow.
+
+For an addition, assume the statement holds for children $p$ and $q$.
+Executing $C(p)$ on $S$ gives $S\mathbin{\|}[u]$, where $u=\llbracket p\rrbracket_a$.
+Now use the claim for $q$ with that larger initial stack.
+Executing $C(q)$ gives $S\mathbin{\|}[u,v]$, where $v=\llbracket q\rrbracket_a$.
+Both child executions avoid underflow by the induction assumptions.
+The final \code{ADD8} has the two operands it needs.
+It replaces them with $(u+v)\bmod256$ without touching $S$.
+By the source addition rule, this value is $\llbracket\operatorname{add}(p,q)\rrbracket_a$.
+
+For multiplication, the two child executions establish the same stack shape.
+The final \code{MUL8} replaces $u,v$ with their product modulo $256$.
+That is the source multiplication's value.
+All expression forms have now been covered, so structural induction establishes Equation~\ref{eq:tiny-stack-prefix}.
+Choosing $S$ empty gives the whole-program correctness statement.
+
+The stronger statement was not extra decoration.
+It let the proof follow the implementation's actual composition rule.
+When an induction stalls because a recursive call runs in a larger context, the missing ingredient can be a claim about preserving that context.
+Here the context is an existing stack prefix.
+In a different compiler proof, it might be untouched memory, an environment of names, or a relation between source and target stores.
+The appropriate claim depends on what the generated code can read or change.
+
+\subsection{Do not confuse a fragment with a program}
+\label{sec:tiny-stack-fragments}
+
+Compiled expression code has a net stack effect of plus one.
+That is true whether it starts with zero values or twenty.
+A whole expression program additionally starts empty and finishes with exactly one value.
+Those extra conditions belong to its execution interface.
+
+For example, take a stack containing $23$ and execute the running expression's code at input $250$.
+The result is $[23,8]$.
+Nothing has gone wrong: the fragment preserved its caller's value and appended its result.
+But if we present that two-value final stack as a complete expression program's result, we have violated the whole-program interface.
+
+The C compiler can append a fragment to a code buffer that already contains instructions.
+It therefore cannot promise that every successful append produces a complete executable program.
+The existing prefix might leave values on the stack or might itself be malformed.
+The compiler promises how it appends code; the verifier checks the resulting whole sequence.
+Separating these promises prevents an append operation from being mistaken for an endorsement of arbitrary existing code.
+
+\section{Check the code before executing it}
+\label{sec:tiny-stack-verifier}
+\index{stack machine!verification}
+
+A target instruction sequence can have a plausible length and still be invalid.
+An arithmetic instruction can appear before its operands.
+A literal can lie outside $V$.
+An instruction tag can be unknown.
+The sequence can finish with zero values or leave several values instead of one.
+We can detect all of these faults without knowing the runtime input.
+
+The verifier scans the instructions while tracking only stack depth.
+A push increases depth by one.
+An arithmetic instruction requires depth at least two and decreases it by one.
+At the end, depth must be exactly one.
+The verifier also records the largest depth it encounters.
+This is an exact bound for this branch-free machine: every accepted instruction executes on every run and its stack effect is independent of input values.
+
+We also choose a canonical representation for unused instruction operands.
+Only \code{PUSH} uses its argument field.
+The argument field of every other opcode must contain zero.
+This rule is not necessary for the arithmetic meaning, but it avoids several encodings of the same instruction caused by irrelevant leftover data.
+It gives tests and diagnostic tools a simpler representation to inspect.
+The compiler establishes the rule; the verifier checks it rather than trusting the compiler to have done so.
+
+The verifier does not prove that the program implements a particular source tree.
+The sequence consisting only of \code{PUSH} with operand $99$ is valid.
+It is still the wrong translation of most source expressions.
+Structural safety and semantic preservation remain different properties even when both are easy to test.
+
+\subsection{Bound the storage explicitly}
+\label{sec:tiny-stack-storage}
+
+The implementation in \code{stack.h} reserves room for $64$ instructions.
+This number is an engineering limit of the example, not part of the mathematical source language.
+The code structure contains an instruction array and a logical length named \code{used}.
+The valid portion is the prefix ending just before \code{used}.
+The remaining slots are storage, not instructions in the program.
+
+Because every push consumes an instruction, an accepted program of at most $64$ instructions cannot need more than $64$ stack slots.
+The executor therefore uses a fixed stack array of that size.
+The verifier rejects a logical code length larger than its instruction array before reading any instruction.
+It checks every instruction before execution starts.
+The executor then uses the verified stack effects to avoid an underflow or out-of-bounds stack write.
+
+This argument assumes that the code object is a real, initialized C object and that its active instructions do not change between verification and execution.
+It does not turn arbitrary bytes received from an untrusted file into a valid C structure.
+There is no byte decoder in this example.
+There is also no concurrent writer changing the instruction array during the run.
+A serialized format or concurrent runtime would need additional boundary rules.
+
+The compiler takes a limit no greater than the array capacity.
+If an append would exceed the limit, it reports failure.
+The public wrapper restores the original logical length when any recursive emission fails.
+The existing active instruction prefix remains unchanged.
+Unused slots may contain partially emitted instructions, but they lie outside the restored logical length.
+This is a limited rollback guarantee, not a promise to restore every byte of the code object.
+
+For the original seven-node example, an empty buffer with limit seven succeeds.
+Limit six fails, and the buffer's logical length returns to zero.
+After constant folding, the five-node expression needs five instruction slots.
+Its code sequence pushes the input, pushes $7$, adds, pushes $8$, and multiplies.
+The arithmetic result remains unchanged even though the capacity needed by this target representation falls.
+
+\section{Read the compiler and executor together}
+\label{sec:tiny-stack-c-implementation}
+
+Listing~\ref{lst:tiny-stack-emitter} shows the recursive emission helper from \code{stack.c}.
+The two recursive calls are separate statements.
+Their left-to-right order is therefore visible in the implementation rather than depending on the evaluation order of function arguments in C.
+The helper stops as soon as an append fails.
+The public wrapper, shown in the source file, handles restoration of the logical length.
+
+\begin{listing}
+  \inputminted[firstline=13,lastline=25]{c}{example-code/ch01/stack.c}
+  \caption{Emission follows the source tree while appending target instructions.}
+  \label{lst:tiny-stack-emitter}
+\end{listing}
+
+Listing~\ref{lst:tiny-stack-runner} gives the executor.
+It validates the input range and the whole code sequence before running any instruction.
+The variable \code{sp} is a count of occupied stack slots.
+Consequently, the next pushed value goes into \code{stack[sp]}, and removing a value first decrements \code{sp}.
+Keeping that convention consistent is more useful than relying on a variable name such as \enquote{top}, which could mean either an index or a count.
+
+\begin{listing}
+  \inputminted[firstline=66,lastline=85]{c}{example-code/ch01/stack.c}
+  \caption{The executor runs verified code and publishes one result on success.}
+  \label{lst:tiny-stack-runner}
+\end{listing}
+
+The executor removes the right value into \code{b} and then the left value into \code{a}.
+Its unsigned intermediate arithmetic has the same range argument as the tree evaluator.
+Both operands lie in $V$, so the largest product is $65025$.
+The explicit remainder implements the target instruction's specified arithmetic.
+The implementation does not rely on a host overflow to stand in for the guest machine's reduction.
+
+The output parameter is assigned only after successful verification and execution.
+On rejection, the caller's existing result value remains unchanged.
+Failure is reported through a Boolean status rather than a special numeric result.
+Every value in $V$, including zero, is a legitimate program result.
+Using zero to mean both a valid answer and a failed execution would make the interface needlessly ambiguous.
+
+\subsection{Account for both time and space}
+\label{sec:tiny-stack-costs}
+
+For a tree with $N$ nodes and height $H$, successful compilation emits exactly $N$ instructions.
+Each leaf emits one push and each binary node emits one arithmetic instruction.
+With a preallocated instruction buffer and constant-time append, compilation takes $O(N)$ time and $O(H)$ additional recursion space.
+The target code occupies $O(N)$ slots.
+This statement describes the algorithm as capacity grows; the example's fixed limit restricts which instances it accepts.
+
+The verifier takes $O(N)$ time and $O(1)$ auxiliary space when instruction count is $N$.
+The executor takes another $O(N)$ time.
+This implementation verifies on every call, so a reported execution cost includes both scans.
+A runtime could verify an immutable code object once and execute it many times, but it would then need a trustworthy association between the checked object and the object being executed.
+Skipping the scan without establishing that association would remove the premise of the stack-safety argument.
+
+The exact peak stack demand can be calculated from the source tree.
+Let $D(e)$ be the maximum number of extra stack slots needed while executing $C(e)$.
+For either leaf, $D(e)=1$.
+For either binary operation with children $p,q$,
+\begin{equation}
+  D(e)=\max\bigl(D(p),\,1+D(q)\bigr).
+  \label{eq:tiny-stack-demand}
+\end{equation}
+The first term covers evaluation of the left child.
+The second covers evaluation of the right child while the left result occupies one slot.
+The final arithmetic instruction does not increase the peak.
+
+For the original running expression, each addition has demand two.
+The root therefore has demand $\max(2,1+2)=3$.
+After folding the right addition into a literal, the demand becomes $\max(2,1+1)=2$.
+The verifier obtains the same peaks from the instruction sequences without seeing the original trees.
+Agreement between the two calculations is another useful implementation check.
+
+\section{Compose folding with translation}
+\label{sec:tiny-stack-composition}
+
+We now have two distinct preservation results.
+Folding preserves the source expression's value.
+Compilation preserves that value while moving from tree evaluation to stack execution.
+The two results can be connected because folding produces a valid tree of the kind compilation expects.
+That representation condition is essential: equality of values would not excuse a malformed tree passed to the compiler.
+
+With enough target capacity, the combined claim is
+\begin{align*}
+  \operatorname{Exec}(C(F(e)),a,[\,])
+    &= [\llbracket F(e)\rrbracket_a]\\
+    &= [\llbracket e\rrbracket_a].
+\end{align*}
+The first equality comes from the compiler's stack-prefix theorem.
+The second comes from the folder's value-preservation theorem.
+Neither proof needs to know the internal implementation of the other pass.
+Their contracts identify the shared boundary.
+
+The bounded implementation adds a status distinction to this account.
+A translation that reports insufficient capacity has not produced an executable replacement.
+The preservation claim concerns successful translations under the stated resource assumptions.
+The caller must handle failure rather than execute unused or partially written array slots.
+In a larger compiler, that handling might grow a buffer, select another representation, or report a controlled compilation failure.
+It must not quietly reinterpret a resource failure as the source program's answer.
+
+\subsection{Test the connected claim}
+\label{sec:tiny-stack-testing}
+
+The new test program, \code{test\_stack.c}, compares source evaluation with target execution before and after folding.
+For each selected tree, it records all $256$ source results before mutation.
+It compiles the original tree and compares the target result at every input.
+It then folds the tree, compiles again, and compares the second target program against the saved source results.
+Saving the original answers prevents the test from accidentally treating the already folded tree as its only reference.
+
+The running example gets additional structural checks.
+The test checks all seven original opcodes and their operands, not merely the final numeric result.
+It checks peak depth three before folding and peak depth two afterward.
+It checks that the folded program has five instructions.
+Those assertions expose a translation that preserves answers but fails to implement the intended representation or simplification.
+
+For the arithmetic instructions, the tests cover both operations on all $65{,}536$ literal operand pairs.
+For translation across larger shapes, they generate $256$ bounded trees and check every input before and after folding.
+Those generated cases remain a finite sample of source shapes.
+Their value is in testing the connections among components, not in replacing the structural proof with a large count of successful runs.
+
+Rejection tests exercise the target interface separately.
+They include an empty program, an arithmetic instruction with no operands, an out-of-range literal, an unknown opcode, nonzero unused operands, excess final values, and an impossible logical length.
+They also check that a failed run leaves its output parameter alone.
+Capacity tests exercise partial emission and restoration of the logical prefix.
+A nonempty-prefix test confirms that a successful fragment append need not constitute a valid whole program.
+
+These tests cover a boundary that result comparisons alone would miss.
+A compiler used only on valid small trees might never emit an invalid instruction.
+Its verifier still needs rejection tests because the verifier's contract is broader than the compiler's normal output set.
+Conversely, a verifier that accepts a program says nothing about whether the compiler chose the correct program for its source.
+Testing the components together does not remove the need to test their separate promises.

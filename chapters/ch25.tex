@@ -1,0 +1,193 @@
+\chapter{Instruction Selection}\label{ch:instruction-selection}
+
+Instruction selection turns machine-independent IR into machine instructions.
+The IR says what to compute without saying how the target spells it.
+The selector closes that gap by covering each IR fragment with target patterns that compute the same value.
+Good coverage produces short, fast code.
+Bad coverage produces correct but clumsy code with redundant moves, missed addressing modes, and unused compound instructions.
+
+\section{Tiles, Patterns, and Costs}\label{sec:ch25-tiles}
+
+A selector views the program as trees or graphs and the machine as a catalog of patterns.
+\term{Instruction selection} maps IR operations onto target instructions that implement them.
+\term{Pattern} means a template IR fragment with a result, a cost, and an emission recipe.
+\term{Tile} means one placed pattern instance covering part of the program.
+\term{Cover} means a set of tiles that implements every operation exactly once without overlap or gaps.
+The task looks like jigsaw: cover the IR with the cheapest fitting tiles, then emit their recipes.
+
+Consider address computation on a target with scaled indexed addressing.
+The IR fragment \code{t = add x, mul k, 8} followed by \code{v = load [t]} can become one load with a scaled index when \code{k} is the loop counter.
+Selected separately, the same fragment becomes a multiply, an add, and a plain load.
+The difference is entirely in the selector window: a peephole of one operation misses the compound form, while a tree window of three operations finds it.
+That is why selectors work on expression trees or directed acyclic graphs rather than single instructions.
+The \code{load}, \code{mul}, and \code{add} in the example are \code{IR opcodes} that one load-with-scale tile absorbs.
+
+Costs guide the choice when several covers are legal.
+A simple model assigns each pattern a static size or latency number.
+A better model adds context such as whether an operand is a constant, whether a value is already in the right register class, and whether the addressing mode folds a use for free.
+For a fixed finite catalog with additive local costs, tree dynamic programming finds a minimum-cost cover in linear time in tree size.
+This optimum is relative to the catalog and cost model; register pressure, scheduling, and shared subexpressions introduce interactions outside that model.
+The practical consequence is modest: tree selectors with a sharing rule handle nearly all integer and address code well, and the remaining graph cases get careful hand patterns.
+Table~\ref{tab:ch25-pattern-examples} lists typical patterns and what they absorb.
+Figure~\ref{fig:ch25-tiling} shows two competing covers of one expression tree.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=0.9cm and 1.2cm]
+\node[basic block] (add) {add};
+\node[basic block, below left=of add] (mul) {mul k, 8};
+\node[basic block, below right=of add] (x) {x};
+\draw[cfg edge] (add) -- (mul);
+\draw[cfg edge] (add) -- (x);
+\end{tikzpicture}
+\caption{The multiply and add form an address subtree. When consumed by a load, the whole fragment may match a scaled-index load tile.}
+\label{fig:ch25-tiling}
+\end{figure}
+
+\begin{table}[htbp]
+\caption{Common selection patterns and the IR they absorb.}
+\label{tab:ch25-pattern-examples}
+\begin{tabular}{lll}
+\toprule
+Pattern & IR fragment absorbed & Benefit \\
+\midrule
+Load with displacement & \code{add} plus \code{load} & Fewer instructions \\
+Scaled indexed load & \code{mul}, \code{add}, \code{load} & No separate multiply \\
+Multiply-accumulate & \code{mul} plus \code{add} & One fused operation \\
+Compare and branch & \code{cmp} plus \code{br} & Uses flag-setting form \\
+Move immediate & Constant plus \code{mov} & Shorter encoding \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The target description supplies the pattern catalog.
+Each rule names the IR shape, the constraints on operands, the result location, and the assembly or machine-IR template.
+Predicates guard rules that apply only to certain constant ranges, alignments, or register classes.
+A RISC target contributes a few dozen crisp rules.
+A vector or DSP target contributes hundreds with overlapping shapes.
+Keeping the catalog ordered and tested matters more than making it large.
+An untested rule with a wrong predicate silently miscompiles every program that triggers it.
+\begin{ccwarning}[Every pattern is a correctness claim]
+A pattern asserts semantic equivalence between its IR fragment and its instruction template for all allowed operands.
+Test constant boundaries, signedness, overflow flags, and NaN behavior explicitly.
+A missed edge case in one rule corrupts every function the selector tiles with it.
+\end{ccwarning}
+
+\section{Maximal Munch and Tree DP}\label{sec:ch25-techniques}
+
+Two classical techniques cover most practice: greedy \term{maximal munch} and optimal tree dynamic programming.
+Maximal munch walks the tree from the root and always takes the largest pattern that matches at the current node, then recurses on the leftovers.
+It is fast, easy to implement, and good enough for regular RISC targets where the largest tile is usually the best tile.
+Its weakness is myopia: it can grab a large tile at the root that forces awkward tiles below, while two smaller tiles would have been cheaper overall.
+Tree DP fixes that by computing the cheapest cover for every subtree bottom-up and then emitting top-down.
+Each node records the best cost per result location, called its \term{state}, and the rule that achieved it.
+Emission follows the recorded rules without further search.
+
+DAG structure complicates both techniques because a shared value has two parents.
+A simple strategy cuts at shared values, materializes each once, and selects the resulting trees with temporary leaves.
+Duplicating a shared computation is a separate legality and profitability decision, especially for loads, traps, and effects.
+More ambitious selectors handle small DAGs directly or use multi-output patterns, such as an instruction producing both quotient and remainder.
+Control flow stays outside the tile: selectors cover single-entry single-exit regions such as basic blocks or extended blocks, and branches become explicit tile boundaries.
+Machine idioms such as zeroing a register with \code{xor r, r} or testing with a flag-setting compare belong in the catalog as special low-cost rules.
+
+Algorithm~\ref{alg:ch25-tree-dp} gives the tree DP skeleton used in many textbook and production selectors.
+It assumes each IR region has been converted to expression trees with explicit temporaries at region boundaries.
+It labels every node with its cheapest rule per result kind, then emits code greedily from the root following those labels.
+The labeling pass visits each node once and tries every rule whose shape matches, so the cost is $O(N \cdot R \cdot P)$, where $N$ is the node count, $R$ is the number of result kinds, and $P$ is the pattern count checked per node.
+With indexed rule tables this behaves like linear time in practice.
+Emission is linear in the tile count.
+
+\begin{algorithm}[htbp]
+\caption{Tree-pattern instruction selection by dynamic programming}\label{alg:ch25-tree-dp}
+\begin{pseudocode}
+\Require expression tree $T$, finite tree patterns $P$ with additive costs and proper-subtree frontier operands
+\Ensure cheapest cover for the requested root result kind, or failure if none exists
+\ForAll{node $n$ in postorder}
+\State set $Cost(n, k) \gets \infty$ for each result kind $k$
+\ForAll{rule $r$ in $P$ matching $n$}
+\State check operand predicates and constant ranges
+\State $c \gets Cost(r) + \sum_{f\in frontier(r,n)} Cost(f, kind(r,f))$
+\If{$c < Cost(n, kind(r))$}
+\State record $Cost(n, kind(r)) \gets c$ with rule $r$
+\EndIf
+\EndFor
+\EndFor
+\State reject if the required root cost is infinite
+\State follow recorded rules, emitting frontier operands before their consuming instruction
+\end{pseudocode}
+\end{algorithm}
+
+The frontier consists of unmatched operand subtrees at a tile's boundary, not necessarily the root's immediate children.
+Charging covered internal nodes again would double-count the operations absorbed by a compound instruction.
+The recurrence excludes same-node chain rules; catalogs with result-kind conversions need an additional closure computation.
+The same skeleton supports single-node simplification patterns when their semantics and costs satisfy these conditions.
+Constant folding at selection time, identity removal, and strength reduction by pattern all fall out of the cost comparison without a separate pass.
+The danger is rule interaction: two simplification rules can ping-pong the same node if their costs tie, so implementations order rules deterministically and re-label to a fixed point only within one node.
+Retargetability comes from generating the matcher from the catalog rather than hand-writing nested tests.
+Table-driven matchers, tree-grammar generators, and declarative TableGen-style patterns all produce the same bottom-up labeling behavior with different engineering tradeoffs.
+% TODO(cite): need a primary reference for tree-grammar code-generator generators.
+
+\section{Worked Example}\label{sec:ch25-worked}
+
+We tile a small address expression by hand on a target with three relevant patterns: plain load, load with 12-bit displacement, and scaled indexed load.
+The program computes \code{a[i+1]} for 8-byte elements with base \code{a} and index \code{i}.
+\begin{irlisting}
+; IR trees
+t1 = mul i, 8
+t2 = add t1, 8
+t3 = add a, t2
+v = load t3
+\end{irlisting}
+Assign costs: plain operations cost 1 each, displacement folding saves 1, and the scaled indexed form costs 2 total.
+Bottom-up labeling starts at \code{mul i, 8}: the scaled-index fragment matches with cost carried upward, while plain multiply costs 1.
+At \code{add t1, 8}, the displacement rule matches because \code{8} fits in 12 bits, giving a folded cost below the two-instruction alternative.
+At the root, the scaled indexed load covers the multiply, both adds, and the load in one tile of cost 2 plus a materialized base.
+Count precisely: the naive cover uses \code{mul} (1), \code{add} (1), \code{add} (1), and \code{load} (1) for a total of 4.
+The displacement-only cover uses a multiply, a base-plus-index add, and a displacement load, each of cost $1$, for a total of $3$; the full scaled form costs $2$.
+The selector picks the cheapest, namely the scaled indexed load with the small constant folded into the displacement field.
+
+Now verify legality of the winning tile step by step.
+The multiply by 8 matches the scale field exactly, so no shift residue remains.
+The constant 8 fits the displacement range, so no extra addend register is needed.
+The base \code{a} is loop-invariant and already in a register, so the addressing mode can name it directly.
+The loaded width is 8 bytes, which the mode supports.
+Every predicate holds, so emission is one instruction plus the loop-invariant base setup.
+If any predicate had failed, for example a 9000-byte displacement on a 12-bit field, the selector would fall back to the next-cheapest cover automatically.
+That fallback chain is the point of costed DP over greedy matching.
+
+\section{Implementation Notes}\label{sec:ch25-implementation}
+
+Production selectors blend the textbook algorithm with target-specific lowering passes.
+LLVM runs DAG combining before and during selection to canonicalize shapes toward the patterns the catalog favors, then uses a generated matcher over selection DAGs with hand-written C++ for complex cases.
+GCC expands to a register-transfer level first and then matches machine-description patterns with predicates and constraints.
+Both pipelines canonicalize commutative operations, fold constants early, and legalize types the target cannot handle directly.
+Legalization matters: a 64-bit multiply on a 32-bit target becomes a library call or a multi-instruction sequence before tiling, not during it.
+
+Debugging a selector means inspecting the DAG, the chosen tiles, and the predicate trace for the rejected tile.
+Dump the selection DAG with costs per node when a suspicious instruction appears.
+Check whether the missing tile failed on shape, predicate, type, or register class.
+Common bugs include an off-by-one constant range, a signedness mismatch on extension patterns, and a missing predicate for an immediate that the assembler cannot encode.
+Fuzz the catalog with random expression trees and differential-test against an unoptimized selector to catch miscompilations early.
+
+Complexity stays manageable because regions are small.
+Tree DP is linear in the region size for a fixed catalog, and DAG combining is bounded by worklist updates over local neighborhoods.
+The engineering cost sits in the catalog: hundreds of patterns with predicates, costs, and tests.
+Keep patterns declarative, review new rules for overlap with old ones, and record why each cost was chosen.
+Good structural background on selector organization and machine-level IR appears in~\cite{appel-1998-modern} and see~\cite{morgan-1998-optimizing}.
+Validation strategies for keeping lowering and selection faithful appear in~\cite{safonov-2010-trustworthy}.
+The integer and type rules that predicates must respect are defined in~\cite{wg14-2011-c11}.
+
+\section{Exercises}\label{sec:ch25-exercises}
+
+\begin{enumerate}
+\item Tile \code{t = add x, 16} followed by \code{v = load t} with costs 1 per plain operation and 1 for a displacement load. \label{ex:ch25-displacement} Show both covers, compute their total costs, and state the winning tile.
+\item A shared value \code{s = mul p, 4} feeds two loads. \label{ex:ch25-sharing} Explain why tree duplication miscompiles or duplicates work here, and show the single-computation cover with explicit reuse.
+\item A target adds a fused multiply-add with cost 2 versus cost 3 for separate multiply and add. \label{ex:ch25-fma-cost} Give an expression where maximal munch misses the fused form and tree DP finds it, with costs shown.
+\end{enumerate}
+
+\section{Further Reading}\label{sec:ch25-reading}
+
+Selector structure, frame lowering, and machine-level code generation are introduced in~\cite{appel-1998-modern}.
+Pattern design, machine descriptions, and optimization interplay are developed in~\cite{morgan-1998-optimizing}.
+Techniques for validating aggressive low-level rewrites appear in~\cite{safonov-2010-trustworthy}.
+Language-level semantics that selection must preserve are specified in~\cite{wg14-2011-c11}.

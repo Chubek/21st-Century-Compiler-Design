@@ -1,0 +1,86 @@
+\chapter{The Pass Infrastructure}
+\label{ch:pebble-passes}
+
+A pass pipeline is an agreement about which facts exist between edits.
+Running two correct transformations in sequence can fail when the second consumes an analysis of the first transformation's input.
+The first PebbleIR pipeline avoids clever preservation claims and makes its commit boundary explicit.
+
+\section{One transaction around several phases}
+\label{sec:pebble-pass-contract}
+The supplied \code{pir\_optimize} verifies its input, copies the function, folds constant operations to a fixed point, marks demanded values, removes unmarked definitions, advances the revision, verifies the candidate, and commits.
+Neither pass can expose its intermediate construction state through the public function object.
+A failed verification leaves the original available for diagnosis.
+
+Algorithm~\ref{alg:pebble-pipeline} presents the same organization as a driver contract.
+The current implementation has a fixed pair of phases rather than a plugin registry.
+That is enough infrastructure to enforce the invariants without first designing a registration framework for passes that do not exist.
+
+\begin{algorithm}[htbp]
+\caption{Running the initial optimization pipeline.}
+\label{alg:pebble-pipeline}
+\begin{pseudocode}
+\Require candidate function $F$ with a revision that can advance
+\Ensure verified optimized function or unchanged input
+\State verify $F$ and retain its diagnostic on failure
+\State $T\gets F$
+\State fold eligible constant operations in $T$ until none change
+\State mark values demanded by returns and branch conditions in $T$
+\State replace unmarked value records with tombstones
+\State increment $T.revision$
+\State verify $T$; commit only on success
+\end{pseudocode}
+\end{algorithm}
+
+The observable function includes the CFG and its possible nontermination.
+The pipeline deliberately retains every terminator and block.
+It is therefore not an aggressive control-flow optimizer, and a constant branch condition does not automatically remove the untaken region.
+That restriction keeps reachability and phi-repair obligations out of the first two passes.
+
+\section{Facts need owners and versions}
+\label{sec:pebble-pass-facts}
+\code{PirFacts} records predecessor sets, dominator sets, the function pointer, and revision.
+A cached table is usable only while all three conditions hold: the object belongs to the same logical lifetime, the pointer matches, and the revision matches.
+The lifetime condition is external to the current numeric revision scheme and is documented at initialization and parsing boundaries.
+It should become an explicit generation field when clients cannot enforce it reliably.
+
+A pass descriptor for a larger implementation should list required facts, preserved facts, representation preconditions, and its failure policy.
+For example, a pure value rewrite may preserve the CFG while invalidating value-range facts and reverse use lists.
+A block-splitting pass invalidates predecessor tables and may require dominance repair.
+Treat preservation declarations as checked engineering claims; periodically recomputing and comparing supposedly preserved facts is a useful debug mode.
+
+\section{A worked cache invalidation}
+\label{sec:pebble-pass-worked}
+Suppose the running function has revision 9 after construction and verification returns facts tagged 9.
+Optimization commits a candidate tagged 10.
+The CFG happens to be identical, but the uniform policy invalidates the old cache because its revision no longer matches.
+If optimization fails, the original remains revision 9 and its old facts remain associated with that unchanged object.
+If the destination is reparsed into a new lifetime, all old facts are discarded regardless of numeric revision.
+
+The test suite checks revision invalidation on successful optimization and byte-for-byte preservation on rejected replacement.
+It also checks that a saturated revision counter rejects optimization without mutation.
+These boundary tests are more informative than testing only that the happy-path result has the expected arithmetic value.
+
+\section{Instrument decisions before elapsed time}
+\label{sec:pebble-pass-measures}
+Count allocated slots, live values, successful folds, CFG edges, and VM instructions separately.
+They answer different questions.
+The running example keeps seven allocated IDs after optimization but drops from seven live values to five.
+Its lowered instruction count drops from eight to six.
+Calling this a two-slot memory saving would be wrong because tombstones still occupy their slots.
+Calling it a measured speedup would also be wrong: instruction count is not elapsed time.
+
+For a future pass manager, record deterministic pass order and optional before-and-after snapshots.
+If a failure appears only after phase three, retaining phase two's verified snapshot reduces the search space immediately.
+Do not let instrumentation mutate the representation or alter iteration order; otherwise enabling diagnostics may hide the defect under investigation.
+
+\section{Exercises}
+\label{sec:pebble-thirteen-exercises}
+\begin{enumerate}
+\item \label{ex:pebble-failed-pass} State which revision and analysis facts remain valid after a transaction fails verification. Contrast this with a successful parse into the same C object.
+\item \label{ex:pebble-three-counts} Give allocated-slot, live-value, and lowered-instruction counts for the running example before and after optimization.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:pebble-thirteen-reading}
+Morgan's organization of optimization around reusable analyses provides context for pass interfaces~\cite{morgan-1998-optimizing}.
+Safonov emphasizes the importance of making a compiler's trust boundaries explicit~\cite{safonov-2010-trustworthy}.

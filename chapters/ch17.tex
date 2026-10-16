@@ -1,0 +1,222 @@
+\chapter{Code Motion}
+\label{ch:ch17-code-motion}
+
+\section{Computations in the Wrong Place}
+\label{sec:ch17-wrong-place}
+
+Some computations are correct but badly placed.
+A loop recomputes the same address expression on every iteration although its operands never change.
+A branch computes a value on one path that later code needs on every path.
+An expression sits inside a conditional although it would be cheaper, or safer, to evaluate it once outside.
+Deleting code cannot fix any of these, because the value is genuinely needed.
+Moving code fixes them, provided the move preserves meaning on every path.
+\term{Code motion} relocates computations to places where they execute fewer times while producing the same values.
+The two directions have different characters.
+\term{Hoisting} moves a computation earlier, usually out of a loop, so it runs once instead of many times.
+\term{Sinking} moves a computation later, usually below a branch, so it runs only on paths that need it.
+\term{Partial redundancy elimination} generalizes both directions by inserting computations on some paths and deleting them on others.
+Every motion must answer two questions.
+Legality asks whether the move preserves values, faults, and observable effects on all paths.
+Profitability asks whether the move is worth the extra registers and code size it may cost.
+This chapter answers legality exactly and treats profitability as a heuristic judgment.
+It builds directly on the redundancy classification of Chapter~\ref{ch:ch16-value-numbering-redundancy} and supplies the loop facts it needs from Chapter~\ref{ch:ch18-loop-analysis}.
+
+\section{Loop-Invariant Code Motion}
+\label{sec:ch17-invariant-motion}
+
+The most profitable motion is usually \term{loop-invariant code motion}.
+An expression is \term{loop invariant} when its operands are constant or defined outside the loop, or are themselves the results of invariant computations.
+Listing~\ref{lst:ch17-loop} shows a loop with one invariant computation, one variant computation, and one computation that looks invariant but is not.
+
+\begin{irlisting}[caption={A loop whose body mixes an invariant address term with variant uses of the index.},label={lst:ch17-loop}]
+pre:   n = load limit
+head:  i = phi(0, inext)
+       s = phi(0, snext)
+body:  t = n * 4
+       u = i * 4
+       v = t + u
+       snext = s + v
+       inext = i + 1
+       cond = inext < 100
+       br cond, head, exit
+exit:  ret s
+\end{irlisting}
+
+The product \code{n * 4} is invariant because \code{n} comes from outside the loop and \code{4} is constant.
+The product \code{i * 4} is variant because \code{i} changes every iteration.
+The sum \code{t + u} is variant because one of its operands is variant, even though the other is invariant.
+Hoisting \code{t = n * 4} into the block before the loop header, called the \term{preheader}, evaluates it once instead of one hundred times.
+Four conditions make such a hoist legal.
+First, the defining block must dominate every loop exit at which the assigned variable is live, or the variable must not be live outside the loop at all.
+Second, the variable must have exactly one definition inside the loop, so no second assignment can change it mid-iteration.
+Third, the expression must not fault when evaluated earlier, which rules out hoisting trapping operations past the guard that protects them.
+Fourth, no store inside the loop may write a location the expression reads, where \enquote{may write} comes from the alias analysis of Chapter~\ref{ch:ch20-alias-analysis}.
+Violating the first condition computes a value nobody uses on some exits, which is harmless but wasteful, unless the computation can fault.
+Violating the third condition turns a program that terminates normally into one that traps, which is a miscompilation.
+Algorithm~\ref{alg:ch17-licm} computes the invariant set and then hoists what the conditions allow.
+
+\begin{algorithm}
+  \caption{Loop-invariant code motion to the preheader}\label{alg:ch17-licm}
+  \begin{pseudocode}
+    \Require SSA loop $L$ with preheader $P$, pure total operations only
+    \Ensure invariant computations satisfying the hoist conditions move to $P$
+    \State $Inv \gets$ empty set of invariant instructions
+    \State $changed \gets true$
+    \While{$changed$}
+      \State $changed \gets false$
+      \For{each instruction $I$ in $L$ defining $v \gets e$}
+        \If{$I\notin Inv$ is not a phi and every operand is constant, defined outside $L$, or in $Inv$}
+          \State add $I$ to $Inv$; $changed \gets true$
+        \EndIf
+      \EndFor
+    \EndWhile
+    \For{each $I$ defining $v$ in $Inv$, in operand-before-user order}
+      \If{$v$ has one definition in $L$ and $I$ dominates the exits where $v$ is live}
+        \If{$I$ is pure and total and every operand is available in $P$}
+          \State move $I$ immediately before the terminator of $P$
+        \EndIf
+      \EndIf
+    \EndFor
+  \end{pseudocode}
+\end{algorithm}
+
+The marking loop runs to a fixed point because invariance propagates through chains.
+A computation whose operands are all invariant is itself invariant, so one pass rarely suffices.
+Hoisting runs after marking completes, and it moves each qualifying computation once.
+The preheader must exist and must have exactly the loop header as its successor.
+If the header has several outside predecessors, redirect all their entry edges through a new preheader and repair the header phis, introducing preheader phis where incoming values differ.
+
+\section{Worked Example: Marking the Invariants}
+\label{sec:ch17-worked-marking}
+
+We run the marking phase of Algorithm~\ref{alg:ch17-licm} on Listing~\ref{lst:ch17-loop} by hand.
+The loop body holds five computed values: \code{t}, \code{u}, \code{v}, \code{snext}, and \code{inext}.
+The comparison and branch control the loop and are not candidates for motion.
+In the first marking pass, \code{t = n * 4} qualifies because \code{n} is defined in the preheader block and \code{4} is constant.
+Nothing else qualifies yet: \code{u} reads the changing index, \code{v} reads \code{u}, and the carried values read themselves around the back edge.
+In the second pass, no new instruction qualifies, because \code{v} still reads the variant \code{u} and the carried values still read loop-varying inputs.
+The fixed point is therefore the singleton set containing only \code{t = n * 4}.
+Table~\ref{tab:ch17-marking} shows each candidate across both passes.
+
+\begin{table}
+  \centering
+  \caption{Invariant marking over Listing~\ref{lst:ch17-loop} reaches a fixed point after two passes with one member.}
+  \label{tab:ch17-marking}
+  \begin{tabular}{lll}
+    \toprule
+    Candidate & Pass 1 & Pass 2 \\
+    \midrule
+    \code{t = n * 4} & invariant & invariant \\
+    \code{u = i * 4} & variant & variant \\
+    \code{v = t + u} & variant & variant \\
+    \code{snext = s + v} & variant & variant \\
+    \code{inext = i + 1} & variant & variant \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Hoisting then checks the four conditions for \code{t = n * 4}.
+The variable \code{t} has one definition in the loop, it is not live outside the loop, multiplication of two available integers cannot fault in the source semantics assumed here, and the loop contains no stores at all.
+The computation moves to the preheader, and Figure~\ref{fig:ch17-hoist} shows the loop before and after.
+The dynamic count of multiplications for \code{t} drops from one hundred to one.
+The body still computes \code{u} and \code{v} every iteration, because those genuinely vary.
+A tempting follow-up is to strength-reduce \code{i * 4} into an induction stepped by four, but that is a different transformation with its own legality argument.
+
+\begin{figure}
+  \centering
+  \begin{tikzpicture}[node distance=10mm and 14mm]
+    \node[basic block] (ch17p1) {P: };
+    \node[basic block,below=of ch17p1] (ch17h1) {H: i, s = phi};
+    \node[basic block,below=of ch17h1] (ch17b1) {B: t = n*4; v = t+u};
+    \node[basic block,below=of ch17b1] (ch17x1) {X: ret s};
+    \draw[cfg edge] (ch17p1) -- (ch17h1);
+    \draw[cfg edge] (ch17h1) -- (ch17b1);
+    \draw[cfg edge] (ch17b1) -- (ch17h1);
+    \draw[cfg edge] (ch17h1) -- (ch17x1);
+    \node[basic block,right=28mm of ch17p1] (ch17p2) {P: t = n*4};
+    \node[basic block,below=of ch17p2] (ch17h2) {H: i, s = phi};
+    \node[basic block,below=of ch17h2] (ch17b2) {B: v = t+u};
+    \node[basic block,below=of ch17b2] (ch17x2) {X: ret s};
+    \draw[cfg edge] (ch17p2) -- (ch17h2);
+    \draw[cfg edge] (ch17h2) -- (ch17b2);
+    \draw[cfg edge] (ch17b2) -- (ch17h2);
+    \draw[cfg edge] (ch17h2) -- (ch17x2);
+    \node[font=\sffamily\small] at (ch17p1.north west) {Before};
+    \node[font=\sffamily\small] at (ch17p2.north west) {After};
+  \end{tikzpicture}
+  \caption{Hoisting moves the invariant product into the preheader, so the loop body keeps only the variant work.}
+  \label{fig:ch17-hoist}
+\end{figure}
+
+\section{Partial Redundancy and Anticipation}
+\label{sec:ch17-partial-redundancy}
+
+Some expressions are redundant on certain paths but freshly computed on others.
+Hoisting alone cannot help, because there is no single dominating computation to reuse.
+\term{Partial redundancy elimination}, usually shortened to PRE, solves this by placing fresh computations on exactly the paths that lack one.
+An expression is \term{anticipable} at a point when every path forward computes it before any operand changes.
+It is \term{available} when every path backward already computed it without a later kill.
+A computation is partially redundant when some, but not all, incoming paths already provide its value.
+Anticipability helps choose safe placements; lack of availability alone does not prove any prior computation exists.
+PRE inserts the expression at the points where it becomes anticipable and deletes the original computations that the insertions make redundant.
+Consider a diamond where the left branch computes \code{a + b} and the right branch does not, while the join computes it again.
+Assuming unchanged operands and pure total addition, the expression is anticipable at the right branch's exit because the join immediately computes it.
+PRE inserts it on that missing path and merges the two available results with a phi before removing the join addition.
+After insertion, both paths provide the value, the join computation is fully redundant, and global numbering removes it.
+\term{Critical edges} complicate placement.
+An edge from a block with several successors to a block with several predecessors accepts no inserted code without affecting a path that should not receive it.
+Splitting the edge with a fresh block creates a home for the insertion.
+The legality conditions resemble those for hoisting: inserted computations must not fault on their new paths, must not disturb observable effects, and must respect aliasing stores.
+PRE subsumes both loop-invariant motion and global redundancy removal in one framework, at the cost of a less obvious implementation.
+% TODO(cite): primary reference for lazy code motion formulation of PRE.
+
+\section{Implementation Notes}
+\label{sec:ch17-implementation}
+
+Invariant marking costs $O(m \cdot k)$ in the worst case, where $m$ is the number of loop instructions and $k$ is the number of passes to the fixed point.
+Processing instructions in dependency order usually converges in two or three passes, and production compilers accept the theoretical worst case because loops are small.
+Hoisting itself is linear in the size of the invariant set.
+The dominance and liveness queries behind the hoist conditions must already exist for other passes, so motion reuses them rather than recomputing them.
+Lazy-code-motion formulations solve several bit-vector dataflow problems; their cost depends on the expression universe, graph edges, queue order, and set representation as well as the block count.
+Edge splitting adds at most one block per critical edge and keeps the flow graph reducible when it already was.
+Profitability heuristics deserve more attention than textbooks sometimes admit.
+Hoisting increases register pressure by extending the live range of the moved value across the whole loop.
+A loop that fits in registers before motion may spill after it, and the spill can cost more than the saved recomputation.
+Compilers therefore estimate pressure, refuse motion that extends very long ranges for tiny savings, and rely on the scheduler and allocator to report the damage.
+Sinking has the mirror risk: delaying a computation can push it across a region where its operands would otherwise die, with the same pressure effect.
+Measure motion by dynamic instruction counts and spill statistics rather than by the number of moved instructions.
+
+\begin{ccwarning}[Faults move with the code]
+Hoisting a trapping operation above its guard introduces a fault on paths that previously avoided it.
+Division, remainder, and faulting loads must stay below the test that protects them unless the compiler proves the operands safe.
+Speculative motion belongs to a different chapter with explicit recovery machinery.
+\end{ccwarning}
+
+\section{Exercises}
+\label{sec:ch17-exercises}
+
+\begin{enumerate}
+  \item \label{ex:ch17-mark-chain}
+  Extend Listing~\ref{lst:ch17-loop} with \code{w = t + t} after the definition of \code{t} and \code{z = w + u} after the definition of \code{v}.
+  Run the marking phase of Algorithm~\ref{alg:ch17-licm} to a fixed point and give the pass in which each new instruction becomes invariant.
+  State which computations hoist and show the preheader and body after motion.
+  \item \label{ex:ch17-guarded-trap}
+  Give a loop containing \code{q = a / b} where \code{a} and \code{b} are loop invariant but \code{b} may be zero on some entries to the loop.
+  The loop tests \code{b} before the division on every path that reaches it.
+  Explain which hoist condition blocks the motion and show a placement, if any, that evaluates the division exactly as often as the original.
+  State what fact about \code{b} would legalize full hoisting to the preheader.
+  \item \label{ex:ch17-pre-placement}
+  Draw a CFG with an entry, a left branch computing \code{a + b}, a right branch computing nothing, and a join computing \code{a + b}.
+  Compute anticipability and availability at the join by hand.
+  Show the inserted computation, the resulting fully redundant instruction, and the final CFG after deletion, splitting the critical edge if your graph has one.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch17-further-reading}
+
+Morgan's \emph{Building an Optimizing Compiler} develops code motion with the dataflow machinery it needs~\cite{morgan-1998-optimizing}.
+Read it for the connection between availability, anticipability, and placement.
+Appel's \emph{Modern Compiler Implementation in ML} shows where motion passes sit among neighboring optimizations~\cite{appel-1998-modern}.
+Use it to understand why compilers iterate motion with redundancy removal rather than running each once.
+Safonov's \emph{Trustworthy Compilers} explains the preservation obligations that make speculative motion a separate, harder problem~\cite{safonov-2010-trustworthy}.
+Consult it before hoisting anything that can fault.

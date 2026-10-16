@@ -1,0 +1,217 @@
+\chapter{Machines, Calling Conventions, and Object Files}\label{ch:machines-conventions-object-files}
+
+The middle end works with an idealized machine that has unlimited temporaries and no fixed call rules.
+The back end has no such luxury.
+It must target real registers, real stacks, real argument-passing rules, and real file formats that loaders understand.
+This chapter builds that bridge.
+It explains what a target machine looks like to a compiler, how callers and callees agree on data exchange, and how object files carry code and metadata to the linker.
+
+\section{From IR to a Real Machine}\label{sec:ch24-machine-model}
+
+A compiler models a processor as a small set of facts: the register file, the instruction set, the addressing modes, the stack discipline, and the assembler and object format it must emit.
+\term{Register} means a fast storage location named by instructions, grouped into classes such as integer, floating-point, and vector.
+\term{Calling convention} means the contract that assigns arguments and return values to registers or stack slots, designates callee-saved versus caller-saved registers, and fixes stack alignment and cleanup duties.
+\term{Application binary interface} (ABI) extends that contract to type layout, structure padding, exception tables, and object-file details so separately compiled units interoperate.
+Two compilers that agree on the source language but disagree on the ABI produce objects that crash when linked together.
+
+Consider adding two 64-bit integers on a load-store machine with sixteen general-purpose registers.
+The IR says \code{t3 = add t1, t2} with no commitment about locations.
+The machine needs each operand in a register, the result in a register, and any spilled value reachable through a stack slot.
+If the values arrive as function arguments, the calling convention decides whether they start in registers or on the stack.
+The rest of the back end, selection, scheduling, and allocation, exists to close exactly this gap.
+A \term{stack frame} holds the return address, saved registers, spilled locals, outgoing argument space, and alignment padding for one activation.
+A \term{red zone} is a small area below the stack pointer that a leaf function may use without adjusting the pointer, where the ABI provides one.
+
+The frame layout below makes the abstract concrete for a typical 64-bit target.
+\begin{irlisting}
+; abstract frame for f(a, b) with one spill
+frame f:
+  incoming a -> reg r0, incoming b -> reg r1
+  spill s1 -> [sp + 0], alignment pad -> [sp + 8]
+  save ra -> [sp + 16], save fp -> [sp + 24]
+  call g: move args to r0, r1; call g; result in r0
+\end{irlisting}
+Every line of that sketch corresponds to a decision the back end must make explicit.
+Which registers carry \code{a} and \code{b} on entry.
+Where the spill lives and how it is addressed.
+Who saves the return address and frame pointer.
+Who cleans the outgoing argument space after the call to \code{g}.
+The calling convention answers each question the same way for every function so that separate translation units agree.
+
+\section{Calling Conventions in Detail}\label{sec:ch24-conventions}
+
+Argument passing follows a fixed algorithm: classify each argument, assign registers while they last, and spill the rest to the stack in order.
+Integer and pointer arguments usually take one register class, floating-point arguments take another, and large structures are passed by hidden pointer, by value copy, or split across registers depending on the ABI.
+Return values use a dedicated register or register pair, with a hidden first parameter for large returns.
+\term{Caller-saved register} means the caller preserves the value across a call if it still needs it.
+\term{Callee-saved register} means the callee preserves it on behalf of all callers.
+\term{Stack alignment} forces the stack pointer to a boundary such as 16 bytes at each call so vector instructions and system calls behave correctly.
+Figure~\ref{fig:ch24-frame} shows a canonical frame with each region in place.
+Table~\ref{tab:ch24-convention-choices} compares the main convention decisions and their costs.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=0.55cm]
+\node[basic block] (high) {incoming args, saved fp/ra};
+\node[basic block, below=of high] (mid) {callee-saved regs};
+\node[basic block, below=of mid] (spill) {spills and locals};
+\node[basic block, below=of spill] (out) {outgoing arg space};
+\draw[cfg edge] (high) -- (mid);
+\draw[cfg edge] (mid) -- (spill);
+\draw[cfg edge] (spill) -- (out);
+\end{tikzpicture}
+\caption{A canonical stack frame grows from saved state through spills to outgoing argument space, with alignment padding inserted where the ABI requires it.}
+\label{fig:ch24-frame}
+\end{figure}
+
+\begin{table}[htbp]
+\caption{Calling-convention decisions and what each choice costs.}
+\label{tab:ch24-convention-choices}
+\begin{tabular}{lll}
+\toprule
+Decision & Register-heavy choice & Stack-heavy choice \\
+\midrule
+Argument passing & More registers, less memory traffic & Simpler ABI, more loads \\
+Callee-saved set & Fewer caller spills & Larger prologues \\
+Return by value & Registers for small types & Hidden pointer, extra copy \\
+Variadic calls & Fixed register sequence & Stack overflow area \\
+Alignment & 16-byte boundary always & Smaller but fragile frames \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Variadic functions deserve attention because the callee does not know its arity statically.
+The convention therefore fixes how the register arguments are also mirrored to the stack or counted in a register so that \code{va\_start} can find them.
+Floating-point and vector rules interact with this design: some ABIs pass a count of vector registers used, others require the caller to store register arguments home.
+Structure passing is the other classic trap.
+A two-word structure may split across two registers on one ABI and go entirely on the stack on another.
+Bit-fields, homogeneous aggregates, and complex numbers each have their own classification pages in real ABI documents.
+The compiler implements the classification exactly, because one wrong byte offset corrupts every cross-module call.
+\begin{ccnote}[Read the ABI as a specification]
+ABI documents read like standards because they are standards.
+Implement the classification algorithm case by case and test it against the platform conformance suite.
+Guessing from one example struct invites silent miscompilation.
+\end{ccnote}
+
+Caller-saved and callee-saved choices trade prologue cost against call-site cost.
+A leaf function that uses few registers prefers caller-saved temporaries so it saves nothing.
+A deeply nested non-leaf function prefers callee-saved registers whose save cost is paid once in its prologue rather than at every call it makes.
+Register allocators know this split and bias their choices accordingly.
+The stack unwinder knows it too: exception tables record which registers were saved and where, so the runtime can restore them during propagation.
+That is why frame layout, debug information, and unwinding tables are generated together rather than by three independent passes.
+
+\section{Lowering Calls and Frames}\label{sec:ch24-algorithm}
+
+Algorithm~\ref{alg:ch24-lower-call} turns a machine-independent call into explicit moves, saves, and stack adjustments.
+It runs during instruction selection or just after, when the compiler still sees virtual registers but already knows the target ABI.
+The input is a call node with a typed argument list and a function signature.
+The output is a lowered sequence with a resolved frame layout for the enclosing function.
+Preconditions matter: types must already be laid out, structures classified, and the callee type visible enough to pick the right convention variant.
+
+\begin{algorithm}[htbp]
+\caption{Lower a call and fix the enclosing frame}\label{alg:ch24-lower-call}
+\begin{pseudocode}
+\Require call node $C$ with signature $S$, current frame $F$
+\Ensure ABI-conformant sequence replacing $C$, updated $F$
+\State classify each argument of $S$ into registers or stack slots
+\State assign return location: register pair or hidden pointer
+\State spill all live caller-saved registers around $C$
+\State reserve the outgoing area and establish the ABI stack position and alignment
+\State store stack arguments at their ABI offsets in $F$
+\State place register arguments with a parallel copy; break copy cycles using a scratch location
+\State verify stack alignment at the call point
+\State emit the call and copy the result to a fresh virtual
+\State restore spilled caller-saved registers
+\State record unwind and debug info for new frame ranges
+\end{pseudocode}
+\end{algorithm}
+
+The algorithm is linear in the number of arguments plus the number of live caller-saved values, hence $O(A + L)$ per call site, where $A$ is the argument count and $L$ is the live set size at the site.
+Whole-function frame assignment costs $O(N + E)$ for $N$ instructions and $E$ dataflow edges when liveness is available.
+The expensive part is not the classification but the spill and restore traffic it implies, which the register allocator later tries to reduce.
+The pseudocode combines logical lowering with eventual physical-register repair for exposition.
+Before allocation, represent argument locations, return locations, and call clobbers as constraints; after allocation, save only values live across the call whose assigned registers it may destroy.
+Move the result to a safe location before restoring a saved register that overlaps the return channel.
+A common refinement coalesces the argument moves with the producer instructions so that values are born in their ABI registers.
+Another refinement shares outgoing argument space among call sites instead of sizing it for the worst site plus padding each time.
+
+Several edge cases need explicit handling.
+Tail calls reuse the current frame when the callee signature permits, which the lowering pass must verify rather than assume.
+Indirect calls load the target into a designated register and may need an extra guard page or branch-target annotation on hardened platforms.
+Calls to dynamically resolved symbols route through a procedure-linkage stub instead of a direct PC-relative jump.
+Each of these variants changes the instruction pattern but not the skeleton of the algorithm.
+% TODO(cite): need a primary reference for modern ABI frame layout rules.
+
+\section{Worked Example}\label{sec:ch24-worked}
+
+We lower a concrete call by hand for a RISC-like target with eight argument registers \code{a0} through \code{a7}, return register \code{rv}, and 16-byte stack alignment.
+The source call is \code{r = f(10, 20, 30, 40, 50, 60, 70, 80, 90)} with nine integer arguments.
+The first eight fit in registers and the ninth goes on the stack.
+Assume no caller-saved values are live, so no spill code appears.
+\begin{irlisting}
+; before lowering
+r = call f(10, 20, 30, 40, 50, 60, 70, 80, 90)
+; after lowering
+mov a0, 10
+mov a1, 20
+mov a2, 30
+mov a3, 40
+mov a4, 50
+mov a5, 60
+mov a6, 70
+mov a7, 80
+store [sp + 0], 90
+call f
+mov r, rv
+\end{irlisting}
+Now check alignment.
+Suppose the stack pointer is 16-byte aligned on entry and the frame already reserves 8 bytes for a spill.
+Storing one 8-byte argument makes the used space 16 bytes, so alignment holds.
+If the frame had reserved 0 bytes instead, the lowering pass would insert 8 bytes of padding before the store.
+That padding is invisible in the IR but mandatory on the machine.
+
+Next add a callee-saved wrinkle.
+Suppose \code{f} itself uses two callee-saved registers \code{s0} and \code{s1} plus one 8-byte local.
+Its prologue stores \code{s0} and \code{s1} (16 bytes) and reserves 8 bytes for the local plus 8 bytes of padding to keep 16-byte alignment, for a 32-byte frame.
+Its epilogue restores the two registers and releases the frame before returning.
+The caller never saves \code{s0} or \code{s1}; the contract guarantees their values survive the call.
+If the allocator had picked caller-saved registers instead, each live value would need an explicit spill and reload around the call.
+Counting those bytes by hand shows why register-class choice is a size and speed decision, not just a naming decision.
+
+\section{Implementation Notes}\label{sec:ch24-implementation}
+
+Production back ends isolate machine knowledge in a target description rather than scattering conditionals through the code.
+LLVM uses TableGen records for registers, classes, calling conventions, and instruction patterns, while GCC uses machine-description files with a similar role.
+Both generate the classifier, the frame-layout logic, and parts of the selector from those descriptions.
+Adding a new ABI variant then means editing data plus a few hooks, not rewriting every call site handler.
+The complexity of the description is real, but the alternative of hand-coded per-function logic is worse.
+
+Object files close the loop between compiler and linker.
+An \term{object file} holds machine code sections, data sections, a symbol table, and relocations that name the fixups the linker or loader must apply.
+A \term{relocation} records an offset, a symbol, and a computation such as \enquote{add the symbol address plus addend} so the linker can patch the bytes once addresses are known.
+Common formats include ELF on Unix-like systems, Mach-O on Apple platforms, and COFF on Windows.
+Each carries the same ideas under different section names plus ABI tags, unwind tables, and debug sections.
+The compiler must emit the right directives for symbol visibility, thread-local storage, position independence, and exception tables, or linking succeeds and the program still fails at load time.
+
+Testing this layer means checking bytes and boundaries, not just program output.
+Conformance tests pass structures by value, exercise variadic calls, alternate register and stack arguments, and verify alignment at every call.
+Unwind tests throw through inlined and optimized frames.
+Link tests combine objects built with different optimization levels to catch ABI drift.
+Useful background on machine-level code generation structure appears in~\cite{appel-1998-modern} and see~\cite{morgan-1998-optimizing}.
+Correctness arguments for preserving observable behavior across lowering appear in~\cite{safonov-2010-trustworthy}.
+The source-level type and layout rules that feed classification are defined in~\cite{wg14-2011-c11}.
+
+\section{Exercises}\label{sec:ch24-exercises}
+
+\begin{enumerate}
+\item Lower the call \code{r = g(x, y, z)} on a target with two integer argument registers. \label{ex:ch24-lower-three} Assume all three arguments are live integers and no caller-saved values are live. Show the moves, the stack store, and the alignment check.
+\item A function uses three callee-saved registers and has 24 bytes of locals. \label{ex:ch24-frame-size} Compute the smallest 16-byte-aligned frame size, showing padding, save area, and locals separately.
+\item An object file references an external function \code{h}. \label{ex:ch24-reloc} List the symbol-table entry and the relocation the compiler must emit for a direct call, and explain what the linker patches.
+\end{enumerate}
+
+\section{Further Reading}\label{sec:ch24-reading}
+
+Machine-level organization, frame management, and code-generator structure are covered in~\cite{appel-1998-modern}.
+Calling-sequence design and target-specific optimization tradeoffs are treated in~\cite{morgan-1998-optimizing}.
+Validation of lowering against observable behavior is discussed in~\cite{safonov-2010-trustworthy}.
+Type layout, alignment, and argument-passing constraints at the language level appear in~\cite{wg14-2011-c11}.

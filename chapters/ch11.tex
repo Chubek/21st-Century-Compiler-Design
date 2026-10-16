@@ -1,0 +1,240 @@
+\chapter{Abstract Interpretation}
+\label{ch:ch11-abstract-interpretation}
+
+Testing runs a program on some inputs, while optimization must reason about all inputs at once.
+Enumerating every input is impossible, and sampling a few inputs proves nothing about the rest.
+The problem of this chapter is to execute a program over descriptions of values rather than over values themselves, and to do so with a guarantee.
+We replace concrete stores with abstract elements, concrete operations with sound counterparts, and concrete branching with joins over abstract paths.
+When the abstract run says that no division by zero occurs, no execution from the described inputs divides by zero.
+Section~\ref{sec:ch11-domains} builds the domains, Section~\ref{sec:ch11-soundness} states the guarantee, and Section~\ref{sec:ch11-worked} runs an interval analysis by hand on Figure~\ref{fig:ch11-branch-loop}.
+
+\section{Concrete runs versus abstract runs}
+\label{sec:ch11-domains}
+
+A \term{concrete state} maps each variable to one exact value, for example a 32-bit integer or a pointer.
+A \term{abstract state} maps each variable to a description that stands for many concrete values, for example an interval, a sign, or a parity class.
+The \term{abstraction function} sends each concrete set to the smallest abstract element covering it.
+The \term{concretization function} sends each abstract element back to the set of concrete states it describes.
+They form a \term{Galois connection} when $\alpha(S)\sqsubseteq a$ if and only if $S\subseteq\gamma(a)$ for every concrete-state set $S$ and abstract element $a$.
+Here $\alpha$ abstracts and $\gamma$ concretizes; the equivalence says that $\alpha(S)$ is the least abstract over-approximation of $S$.
+We write the pair once per domain and reuse it for every program the domain analyzes.
+The connection is the contract that lets an optimizer trust abstract results about concrete runs.
+
+Consider tracking the sign of \code{x} through \code{x = y * z} with unknown inputs.
+The concrete multiplication has four billion squared cases, far too many to enumerate.
+For mathematical integers, abstract multiplication has a nine-entry table over negative, zero, and positive, extended with top and bottom for unknown and impossible.
+Fixed-width arithmetic requires different rules when wraparound can change a sign.
+If \code{y} is negative and \code{z} is positive, the abstract product is negative with no case split.
+Multiplying top by zero yields zero; multiplying top by a nonzero sign yields top.
+If either side is bottom, the product is bottom, which marks the path as unreachable rather than as mysterious.
+The \enquote{execution} is an ordinary table lookup, yet its result covers all concrete executions it abstracts.
+That coverage is the whole point, and the next section makes it a theorem shape rather than a slogan.
+
+\begin{irlisting}
+; Branch then loop: abstract states must cover both arms
+; B1 reads n, B2 splits on n, B3 and B4 bound x, B5 loops
+B1: n = read_input()
+B1: br n < 0, B2, B3
+B2: x = 0 - n
+B2: jmp B4
+B3: x = n
+B3: jmp B4
+B4: i = 0
+B4: jmp B5
+B5: br i < x, B6, B7
+B6: i = i + 1
+B6: jmp B5
+B7: use i
+\end{irlisting}
+
+The listing motivates intervals over signs, because the loop bound \code{x} is nonnegative on both arms but neither arm alone proves it.
+A sign domain reports \code{x} as nonnegative only if it has a dedicated element for that property.
+For mathematical integers, the negative arm yields $[1,+\infty)$ after negation, while the other arm yields $[0,+\infty)$; their interval join is $[0,+\infty)$.
+The join at $B4$ therefore keeps exactly the fact the loop needs: the bound cannot be negative.
+A parity domain would instead report nothing useful here, because nonnegativity is invisible to it.
+No single domain serves every client, which is why this chapter treats domain choice as an engineering decision with a soundness proof obligation.
+Algorithm~\ref{alg:ch11-abstract} runs any domain that meets the obligation.
+
+\section{Soundness and what it does not promise}
+\label{sec:ch11-soundness}
+
+An abstract transfer is \term{sound} when every concrete behavior it abstracts stays inside the abstract result.
+Formally, abstracting the concrete outputs from any covered input set must sit below the abstract transfer applied to the abstraction of that input set.
+Soundness composes across blocks: sound steps chained by joins stay sound end to end.
+The fixed point computed by Algorithm~\ref{alg:ch11-abstract} therefore over-approximates every reachable concrete state at every block.
+An optimizer may delete a check that the over-approximation proves redundant, because no omitted concrete state could have needed it.
+It may not insert a behavior that only the approximation exhibits, because the approximation can contain states no execution reaches.
+An over-approximation can prove universal properties, such as every returned value being nonnegative; an abstract witness alone cannot prove that a concrete execution exists.
+
+Soundness does not imply precision, completeness, or speed.
+An analysis that reports top everywhere is sound and useless, since it rules out nothing.
+An analysis that tracks exact values along every path is precise but as expensive as testing every input.
+An analysis over a tall domain may need widening to terminate, trading precision for a bound both analyses share.
+Clients must therefore read abstract results as permissions to act when the approximation is strong, not as obligations to act whenever it is weak.
+A division guard stays when intervals cannot exclude zero, even when testing never divides by zero.
+A bounds check stays when the index interval escapes the array extent by even one abstract value.
+The compiler reports \enquote{unknown} by keeping the check, which is the safe default that soundness demands.
+A frequent misunderstanding equates bottom with failure of the analysis.
+Bottom at a block means that no concrete execution described by the entry abstraction reaches that block with those abstract inputs.
+Dead branches, contradictory guards, and empty input descriptions all produce bottom legitimately.
+An optimizer should feed bottom forward as unreachability, not restart the analysis hoping for a friendlier answer.
+A second misunderstanding treats a sound interval as a guarantee that every value inside occurs.
+The interval $[0, 10]$ for a loop counter does not promise that $7$ occurs, only that nothing outside $[0, 10]$ occurs.
+Loop peeling based on the second reading introduces behaviors the program never had.
+The safe readings all flow from the Galois connection in one direction: concrete sets inside abstract descriptions, never the reverse.
+
+\begin{algorithm}
+\caption{Abstract interpretation over a CFG with widening at loop heads}\label{alg:ch11-abstract}
+\begin{pseudocode}
+\Require reachable CFG with predecessor-free entry, monotone sound edge transfers $F_{P,B}$, widening $\nabla$, widening points meeting every cycle
+\Ensure over-approximation $X[B]$ of all reachable concrete states at each $B$
+\State $X[B] \gets \bot$ for every block $B$
+\State $X[entry] \gets$ abstraction of the known input description
+\State $W \gets$ all blocks in $G$
+\While{$W \neq \emptyset$}
+\State remove some $B$ from $W$
+\State $in \gets \join_{P \in \Pred(B)} F_{P,B}(X[P])$, or entry abstraction at entry
+\State $new \gets X[B] \join in$
+\If{$B$ is a widening point and $new \not\sqsubseteq X[B]$}
+\State $new \gets X[B] \nabla new$
+\EndIf
+\If{$new \neq X[B]$}
+\State $X[B] \gets new$
+\State add $\Succ(B)$ to $W$
+\EndIf
+\EndWhile
+\end{pseudocode}
+\end{algorithm}
+
+Algorithm~\ref{alg:ch11-abstract} is the lattice solver from the previous chapter with two abstract-interpretation additions.
+First, the seed is the abstraction of the caller-supplied input description rather than a generic extreme.
+Second, widening points apply widening when the new value climbs outside the stored value.
+Each edge transfer executes the predecessor block and refines by the condition selecting that edge; without this refinement the worked branch example would lose its bounds.
+Natural-loop headers suffice for reducible CFGs; an irreducible graph needs widening points that also meet its other cycles.
+Every other block uses the plain join, so precision is lost only where loops demand it.
+Termination follows because widening chains are finite by construction and non-head blocks move along finite joins between widenings.
+Soundness follows because seeds cover the inputs, transfers are sound, joins cover both arms, and widening only climbs to coarser covers.
+The result $X[B]$ therefore contains every concrete state that any described execution can carry into $B$.
+Section~\ref{sec:ch11-worked} checks this claim on a concrete trace below.
+
+Narrowing can recover precision after widening overshoots, at the cost of a second pass.
+Let $F$ be the global monotone equation operator, including the entry boundary, and let $X$ be the converged widened result with $F(X)\sqsubseteq X$.
+A synchronous replay $X'=F(X)$ remains an over-approximation of the least fixed point and satisfies $F(X')\sqsubseteq X'$ by monotonicity.
+An arbitrary intersection with a smaller state is not justified merely because the old state was sound.
+Descending chains need not be finite, so a fixed replay budget or a narrowing operator with a termination argument is required.
+An implementation should budget narrowing explicitly, for example one descent per loop head.
+Unbounded narrowing reintroduces the termination problem that widening solved.
+Morgan discusses how production optimizers budget such refinement passes against compile-time limits, see~\cite{morgan-1998-optimizing}.
+\section{Worked example with intervals}
+\label{sec:ch11-worked}
+
+We run intervals by hand over Figure~\ref{fig:ch11-branch-loop} with input $n$ in $[-5, 5]$.
+The domain tracks one interval per variable, with top as unbounded and bottom as empty.
+Transfer for \code{x = 0 - n} negates the interval, transfer for \code{x = n} copies it, and transfer for \code{i = i + 1} shifts both bounds up by one.
+The branch on \code{n} splits the input interval into $[-5, -1]$ on the true arm and $[0, 5]$ on the false arm.
+Negation maps the true arm to $[1, 5]$, while the false arm keeps $[0, 5]$.
+The join at $B4$ is $[0, 5]$, which proves the loop bound nonnegative on every path.
+Table~\ref{tab:ch11-intervals} records the abstract states that justify each step.
+
+\begin{figure}
+\begin{tikzpicture}
+\node[basic block] (b1) {B1: n = input};
+\node[basic block, below left=1.1cm and 0.7cm of b1] (b2) {B2: x = 0 - n};
+\node[basic block, below right=1.1cm and 0.7cm of b1] (b3) {B3: x = n};
+\node[basic block, below=2.4cm of b1] (b4) {B4: i = 0};
+\node[basic block, below=1.1cm of b4] (b5) {B5: test i less x};
+\node[basic block, below left=1.1cm and 0.7cm of b5] (b6) {B6: i = i + 1};
+\node[basic block, below right=1.1cm and 0.7cm of b5] (b7) {B7: use i};
+\draw[cfg edge] (b1) -- (b2);
+\draw[cfg edge] (b1) -- (b3);
+\draw[cfg edge] (b2) -- (b4);
+\draw[cfg edge] (b3) -- (b4);
+\draw[cfg edge] (b4) -- (b5);
+\draw[cfg edge] (b5) -- (b6);
+\draw[cfg edge] (b5) -- (b7);
+\draw[back edge] (b6) -- (b5);
+\end{tikzpicture}
+\caption{Branch followed by a loop, where the join at $B4$ must recover nonnegativity of \code{x} before the loop head at $B5$ analyzes the bound.}
+\label{fig:ch11-branch-loop}
+\end{figure}
+
+\begin{table}
+\caption{Interval facts for the branch-join prefix with $n$ in $[-5, 5]$, showing how negation and join recover a nonnegative bound.}
+\label{tab:ch11-intervals}
+\begin{tabular}{lcc}
+\toprule
+Block & Abstract entry state & Abstract exit state \\
+\midrule
+B1 & n in [-5, 5] & n in [-5, 5] \\
+B2 & n in [-5, -1] & x in [1, 5] \\
+B3 & n in [0, 5] & x in [0, 5] \\
+B4 & x in [0, 5] & i in [0, 0], x in [0, 5] \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The loop head $B5$ starts with \code{i} in $[0, 0]$ and \code{x} in $[0, 5]$.
+The first body visit shifts \code{i} to $[1, 1]$, and the head join becomes $[0, 1]$.
+Without widening the next visits produce $[0, 2]$, $[0, 3]$, and so on up to $[0, 5]$, each trip adding one abstract value.
+With widening after two climbs, the head jumps from $[0, 1]$ to $[0, +\infty)$ on the third visit.
+Recomputing the loop equation from the widened invariant refines the true edge by \code{i < x}, giving $i\in[0,4]$ at body entry and $i\in[1,5]$ after increment.
+Joining that back-edge result with the initial $[0,0]$ recovers $[0,5]$ at the header.
+This is one replay of the loop equation; a block-by-block worklist may need several removals to carry the refined result around the loop.
+The final abstract state at $B7$ has \code{i} in $[0, 5]$, which covers every concrete trip count for every input in $[-5, 5]$.
+The concrete body executes at most five times; the six values $0$ through $5$ include the final header visit that exits.
+Neither a range of counter values nor an upper bound on trips permits unconditionally executing that many body copies.
+
+A concrete check confirms coverage on two representative inputs.
+With $n = -3$ the program takes the true arm, sets \code{x} to $3$, and iterates \code{i} through $0$, $1$, $2$, $3$.
+With $n = 4$ it takes the false arm, sets \code{x} to $4$, and iterates through $0$ to $4$.
+Both traces stay inside the abstract states of Table~\ref{tab:ch11-intervals} at every block.
+No trace exhibits \code{x} negative, \code{i} above $5$, or entry to $B6$ with \code{i} outside $[0, 5]$.
+The abstract run proves these absences for the remaining inputs without executing them.
+That is the return on the extra domain machinery: one run covers the whole input interval.
+
+\section{Implementation notes and cost}
+\label{sec:ch11-implementation}
+
+An interval domain stores two bounds per variable with flags for open and unbounded ends.
+Join takes componentwise minima of low bounds and maxima of high bounds, each in constant time.
+Meet takes maxima of lows with minima of highs and yields bottom when low exceeds high.
+Transfer for addition shifts both ends, transfer for negation swaps and negates them, and transfer for multiplication takes minima and maxima over the four products of ends.
+Guards refine states by intersecting with the guard condition, for example \code{i} below \code{x} caps the high end of \code{i}.
+Memory cost is two bounds per variable per block, and time per visit is linear in the number of live variables times constant domain operations.
+Appel shows how such domains plug into the same worklist machinery as simpler flow facts, see~\cite{appel-1998-modern}.
+
+Let $V$ be the variable count and $N$ the block count.
+If block $B$ is visited $r_B$ times, scanning its incoming edges costs $O(r_B|\Pred(B)|V)$ interval operations, in addition to executing the edge transfers.
+Sum these costs over blocks and add the cost of narrowing replays.
+The widening delay alone does not bound $r_B$: nested cycles, queue order, and propagation between widening points also matter.
+Memory is $O(NV)$ intervals, excluding the CFG, with constant-size bounds assumed.
+Precision depends on where guards refine and where widening fires, not only on domain height.
+Relational domains that track facts like \code{i} below \code{x} keep bounds the non-relational domain loses, at quadratic or worse cost.
+The C standard leaves signed overflow, pointer provenance, and trap behavior to a mix of defined, undefined, and implementation choices, so the abstract transfer must encode those rules rather than ideal arithmetic, see~\cite{wg14-2011-c11}.
+For the primary development of abstraction, fixed points, and sound approximation, see Cousot and Cousot~\cite{cousot-1977-abstract}.
+
+\section{Exercises}
+\label{sec:ch11-exercises}
+
+\begin{enumerate}
+\item \label{ex:ch11-sign-table} Write the full abstract multiplication table for the sign domain with top and bottom.
+Include all nine sign pairs plus the rows and columns for top and bottom, and justify each entry by concretization coverage.
+Then exhibit one program where sign analysis proves absence of division by zero and one where it must keep the guard.
+Run both on Figure~\ref{fig:ch11-branch-loop} adapted to divide by \code{x} instead of looping on it.
+\item \label{ex:ch11-unsound-twin} Take Algorithm~\ref{alg:ch11-abstract} and replace the join at $B4$ with an intersection, keeping everything else identical.
+Show on Table~\ref{tab:ch11-intervals} that the result claims \code{x} in $[1, 5]$ and drops the concrete behavior with $n = 0$.
+Explain in safety terms why the mutated analysis is unsound and which deleted guard could then miscompile.
+Propose a one-line fix and the test that would have caught the mutation.
+\item \label{ex:ch11-widen-budget} Implement intervals for Figure~\ref{fig:ch11-branch-loop} with configurable widening delay $W$.
+Measure head visits and final bound width for $W$ set to $1$, $2$, $5$, and unbounded, with input $n$ in $[-5, 5]$.
+Add one narrowing replay and report how much width each $W$ recovers.
+Recommend a default $W$ with reasons covering time, precision, and predictability.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch11-reading}
+
+Appel presents program analysis as executable approximation with concrete transfer code, see~\cite{appel-1998-modern}.
+Morgan explains how analyses of this form feed loop and redundancy optimizations, see~\cite{morgan-1998-optimizing}.
+Safonov examines what a soundness argument must cover before a compiler may act on it, see~\cite{safonov-2010-trustworthy}.
+The C language definition determines which concrete behaviors the abstraction must cover, see~\cite{wg14-2011-c11}.

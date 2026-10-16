@@ -1,0 +1,343 @@
+\section{Total operations end where traps begin}
+\label{sec:trap-total-boundary}
+
+Every expression in Equation~\ref{eq:tiny-expression-grammar} terminates with a value in $V$.
+It has no other outcome.
+That property is what makes result equality a sufficient comparison for the folder and the stack compiler.
+An operation with that property is \term{total}: it is defined for every combination of its operand values.
+An operation that also has no observable effect is \term{pure}.
+Our tiny language is pure and total, and both preservation proofs depend on those two facts.
+This section introduces division with a defined trap and separates its failure behavior from externally visible effects.
+
+A \term{trap} is a defined failure that stops ordinary value production and reports that no value was produced.
+It is not a value in $V$.
+It is not undefined behavior in the C sense.
+It is a behavior the language definition names, such as division by zero, an out-of-range access, or an explicit assertion failure.
+The implementation must detect the condition and take the defined failure path rather than continuing with an arbitrary number.
+\index{trap}
+\index{total operation}
+\index{partial operation}
+
+Consider an extended expression form $\operatorname{div}(p,q)$.
+Its intended meaning is integer division of the dividend by the divisor.
+When the divisor is zero, there is no quotient to return.
+We therefore give the form two possible outcomes for each input.
+Let $\llbracket e\rrbracket_a$ be either a value in $V$ or the token $\text{trap}$.
+Literals and input nodes still return values.
+Addition and multiplication now propagate a child trap; only when both children return values do their original arithmetic equations apply.
+For the new form, first evaluate both children left to right.
+If either child traps, the division traps without further calculation.
+If both succeed with values $u$ and $v$, then the division traps when $v=0$ and otherwise returns the mathematical quotient $u/v$ truncated toward zero.
+\begin{equation}
+  \llbracket\operatorname{div}(p,q)\rrbracket_a=
+  \begin{cases}
+    \text{trap} & \text{if $\llbracket p\rrbracket_a=\text{trap}$},\\
+    \text{trap} & \text{if $\llbracket q\rrbracket_a=\text{trap}$},\\
+    \text{trap} & \text{if $q$ evaluates to $0$},\\
+    u/v & \text{otherwise, with $u,v$ the two values}.
+  \end{cases}
+  \label{eq:trap-div-semantics}
+\end{equation}
+The order of the first two cases matters once effects are present, so we state it now even though either order gives the same trap-or-value answer for this pure extension.
+% TODO(cite): verify the C division and trap wording against N1570 clauses before citing a paragraph number.
+The C rules for division are checked against the committee draft rather than assumed from algebra~\cite{wg14-2011-c11}.
+
+The quotient needs no modulo reduction in this domain.
+Both operands lie in $V$, so the largest dividend is $255$ and the smallest nonzero divisor is $1$.
+Every quotient therefore lies in $V$ already.
+The wraparound still matters for computing the operands.
+The divisor $249+7$ evaluates to $(249+7)\bmod256=0$, and a division by that divisor traps even though neither literal is zero on its own.
+A reader who checks only the source literals will miss the trap.
+
+Table~\ref{tab:trap-div-cases} works through the cases the laboratory checks exhaustively.
+The first two rows fold only pure additions before dividing.
+The third row folds a divisor to zero and must preserve the trap.
+The fourth row shows truncation rather than wraparound.
+The fifth row is the ordinary fee-and-rate shape with a safe divisor.
+
+\begin{table}
+  \centering
+  \caption{Division traps exactly when its evaluated divisor is zero.}
+  \label{tab:trap-div-cases}
+  \begin{tabular}{llll}
+    \toprule
+    Dividend & Divisor & Folded divisor & Outcome \\
+    \midrule
+    $x+7$ at $x=9$ ($16$) & $3+5$ ($8$) & $8$ & $2$ \\
+    $x+7$ at $x=250$ ($1$) & $3+5$ ($8$) & $8$ & $0$ \\
+    $x+7$ & $249+7$ & $0$ & $\text{trap}$ for every input \\
+    $7$ & $2$ & $2$ & $3$ \\
+    $0$ & $5$ & $5$ & $0$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The second row deserves attention because its quotient is zero for a different reason than a trap.
+At input $250$, the dividend is $1$ and the divisor is $8$, so integer division gives $0$.
+That zero is a value: execution continues normally.
+A test that treats every zero as a failure would confuse this case with the trapping row above it.
+The laboratory therefore distinguishes the Boolean success flag from the numeric result, and rejection tests check that a failed run leaves its output parameter unchanged.
+
+Listing~\ref{lst:trap-evaluator} implements the extended evaluator for this laboratory specimen.
+It does not change \code{expr.c} or \code{stack.c}.
+It follows Equation~\ref{eq:trap-div-semantics} directly, including left-to-right propagation of a child trap.
+The return value reports success or trap, and the output parameter carries a value only on success.
+This separation is the same discipline used by the stack executor, where every value in $V$ is a legitimate answer and failure needs its own channel.
+
+\begin{listing}
+  \inputminted[firstline=19,lastline=48]{c}{example-code/ch01/trap_lab.c}
+  \caption{The laboratory evaluator propagates traps left to right.}
+  \label{lst:trap-evaluator}
+\end{listing}
+
+The host arithmetic argument for this file mirrors the earlier one for addition and multiplication, with one added guard.
+Each operand passed to division lies in $V$, so the mathematical quotient is at most $255$.
+C11 guarantees that \code{unsigned int} covers at least $0$ through $65535$~\cite[Section~5.2.4.2.1]{wg14-2011-c11}.
+The quotient therefore fits before any conversion.
+The implementation uses \code{unsigned} rather than a narrow type, so the operands do not undergo a surprising promotion to a signed type.
+Most importantly, the code tests \code{b == 0U} before evaluating \code{a / b}.
+Unsigned division by zero has no defined result in C, so executing it to \enquote{see what happens} would not be a measurement but an appeal to undefined behavior.
+The guard makes the laboratory's trap a defined branch on a checked condition, not an execution of an undefined operation.
+The exhaustive test checks all $256\times256=65{,}536$ literal pairs and confirms that exactly the $256$ pairs with divisor zero report a trap.
+
+Folding must now consult the divisor before replacing anything.
+Folding $3+5$ to $8$ inside $(x+7)/(3+5)$ is still safe, because the divisor is a nonzero constant and the division itself still depends on $x$.
+Folding the whole division to a literal would be wrong, because its dividend is not constant.
+Folding $(249+7)$ to $0$ is safe as a substep, but the resulting division $(x+7)/0$ must remain a division.
+Replacing it with any literal in $V$ would turn a program that traps on every input into a program that returns normally.
+Listing~\ref{lst:trap-guarded-folder} shows the guard: a division whose folded children are both literals folds only when the divisor literal is nonzero.
+Otherwise the node is left in place for a later stage to handle as a trapping operation.
+
+\begin{listing}
+  \inputminted[firstline=50,lastline=70]{c}{example-code/ch01/trap_lab.c}
+  \caption{A division by a folded zero divisor is left unfolded.}
+  \label{lst:trap-guarded-folder}
+\end{listing}
+
+The laboratory checks both sides of that guard on every input.
+For the always-trapping tree $(x+7)/(249+7)$, source evaluation traps for all $256$ inputs before folding.
+After folding, the tree has the shape $\operatorname{div}(x+7,0)$ and still traps for all $256$ inputs.
+For the safe tree $(x+7)/(3+5)$, folding produces divisor $8$ and evaluation succeeds for all $256$ inputs with value $((a+7)\bmod256)/8$.
+At $a=9$ this gives $16/8=2$, and at $a=250$ it gives $1/8=0$.
+Hand calculation, exhaustive literal-pair checks, and whole-tree comparisons support one another here, as they did for the pure folder.
+None of them alone establishes the guarded rule.
+
+The stack machine from Section~\ref{sec:tiny-stack-translation} cannot express this new behavior without an extension.
+Its four instructions always produce a value when they satisfy the verifier.
+It has no failure status for a trapping arithmetic operation and no way to report \enquote{this program correctly stopped}.
+Compiling a trapping source expression to that target would therefore require one of two explicit decisions.
+Either the compiler rejects programs that may trap, with a diagnostic that names the untranslatable construct, or the target is extended with a checked instruction and an execution interface that reports failure separately from values.
+What the compiler must not do is emit an unchecked host division and hope the hardware trap coincides with the source language's defined trap.
+That hope confuses two different contracts.
+
+\section{Effects make order part of meaning}
+\label{sec:trap-effects-order}
+
+A pure operation can be evaluated in any order without changing the program's observations.
+An \term{effect} removes that freedom.
+Writing to a file, updating a counter that later output depends on, or sending a message all create observations beyond the returned number.
+Listing~\ref{lst:zero-effect} already showed that multiplying a call's result by zero does not make the call dispensable.
+This section makes the ordering consequence concrete with a small event log.
+\index{effect}
+\index{observable behavior!effects}
+
+The laboratory log records one tag per call in the order the calls execute.
+Listing~\ref{lst:trap-log} shows the helper: it appends \code{tag} to the log and returns \code{value} unchanged.
+The recorded sequence is the trace discussed in Section~\ref{sec:behavior-traces}.
+Two executions can return the same number with different traces, and a program that prints or checks the log can observe the difference.
+
+\begin{listing}
+  \inputminted[firstline=72,lastline=83]{c}{example-code/ch01/trap_lab.c}
+  \caption{Logging preserves the value while recording the call order.}
+  \label{lst:trap-log}
+\end{listing}
+
+Consider two calls that return $10$ and $20$.
+Evaluating the first call and then the second records $[1,2]$ and returns $30$.
+Evaluating the second call and then the first records $[2,1]$ and still returns $30$.
+The laboratory checks exactly this: both orders give $30$, but the tag sequences differ in the predicted positions.
+A transformation that swaps the two calls preserves the sum while changing the trace.
+Whether that change is allowed depends on what the language promises about the log.
+If the log models file output, the swap reorders bytes in the file.
+If the log models a debugging counter that no later observation reads, a later chapter's analysis might justify the swap, but the justification must name the unobserved property explicitly.
+
+This is why the stack compiler's left-to-right choice was flagged as a choice rather than a general permission.
+For the pure total language, evaluating $p$ before $q$ or $q$ before $p$ gives the same value and no trace, so the compiler may pick either order and document it.
+For an effectful language, the source definition must state the order or state that both orders are permitted refinements in the sense of Equation~\ref{eq:behavior-refinement}.
+The compiler may then choose an order only where the definition allows it.
+Copying the left-to-right emission template into an effectful compiler without that check is a common way to inherit a subtle bug.
+
+Duplication and deletion follow the same principle.
+Unrolling duplicates effectful instructions in the representation, but must preserve the original dynamic trace, including iteration order and the number of effects.
+Inlining a function that writes to a file moves that write to the call site, which is correct only if the language permits the write to occur there.
+Dead-code elimination must not delete a call whose effect contributes to an observation, even when its returned value is unused.
+The pure folder's deletion of $3+5$ was safe because the deleted operations had no trace by definition.
+The zero-multiplication identity in Exercise~\ref{ex:tiny-zero-identity} is safe in the tiny language for the same reason and unsafe for the C program in Listing~\ref{lst:zero-effect} for the opposite reason.
+The identity as arithmetic does not decide the matter; the effect contract does.
+
+A useful discipline is to keep the value reasoning and the trace reasoning in separate but connected statements.
+The value claim says what number is produced when execution succeeds.
+The trace claim says which events occur and in which order.
+The guarded division above needed only the first kind of extension, because its failure mode produces no trace beyond the trap itself.
+An output operation needs the second kind, because reordering two successful executions can still be wrong.
+Later analyses will exploit this separation by tracking values and effects with different abstractions rather than forcing one lattice to describe both.
+
+\section{Nontermination is a behavior, not a missing value}
+\label{sec:trap-divergence}
+
+Every program in the tiny language finishes.
+Its trees are finite, its evaluator recurses on smaller subtrees, and its stack machine executes a finite instruction sequence with no jumps.
+Real languages admit executions that never finish.
+A loop may never meet its exit condition, a recursive function may never reach its base case, or two threads may wait for each other forever.
+Such an execution is said to \term{diverge}.
+Divergence is a behavior of the program, not an absent entry in a table of results.
+A compiler that turns a diverging program into a terminating one, or vice versa, has changed what the program does even if no wrong number ever appears.
+\index{divergence}
+\index{termination}
+
+The laboratory cannot demonstrate divergence by actually diverging, since a test that never finishes proves nothing about the next transformation.
+Instead it models bounded work with an explicit fuel parameter.
+Listing~\ref{lst:trap-fuel} runs a loop that needs exactly \code{needed} steps and reports whether \code{fuel} was sufficient.
+With \code{needed}=5 and \code{fuel}=3 it returns failure and leaves its output untouched.
+With \code{needed}=5 and \code{fuel}=5 it succeeds and reports $5$.
+With \code{needed}=0 and \code{fuel}=0 it succeeds immediately.
+The tests check all three boundaries.
+
+\begin{listing}
+  \inputminted[firstline=85,lastline=97]{c}{example-code/ch01/trap_lab.c}
+  \caption{Fuel turns potential divergence into a checked failure.}
+  \label{lst:trap-fuel}
+\end{listing}
+
+Fuel is a testing device, not a semantics of the source language.
+It lets us check the surrounding logic---preservation of success, failure, and output discipline---without waiting forever.
+It does not prove that a particular source loop diverges, nor does it assign a value to a divergent execution.
+Its value is narrower: it forces the implementation to separate \enquote{finished with this answer} from \enquote{did not finish within the allowance}, in the same way the division laboratory separates a zero value from a trap.
+A common bug in both settings is to reuse zero for both outcomes and then test only the number.
+
+Divergence constrains motion in the same way traps and effects do.
+Figure~\ref{fig:trap-hoist} shows the pattern once, since the same diagram covers all three.
+On the left, a branch guards an operation that may trap, write, or diverge.
+On inputs that take the other edge, the operation never executes.
+On the right, the operation has been hoisted above the test so that it executes on every input.
+If the operation is pure and total, the hoisted program still returns the same values, and the change may be a reasonable performance decision under the cost model of Section~\ref{sec:optimization-objectives}.
+If the operation may trap on the previously skipped path, the hoisted program introduces a failure the source never had.
+If it writes, the hoisted program extends every trace with an event the source omitted on that path.
+If it diverges on that path, the hoisted program fails to reach code the source reached.
+Each variant breaks refinement in Equation~\ref{eq:behavior-refinement} by adding a behavior the source set did not contain.
+
+\begin{figure}
+  \centering
+  \begin{tikzpicture}[node distance=14mm and 12mm]
+    \node[basic block] (test) {test $c$};
+    \node[basic block,below left=of test] (yes) {risky $op$};
+    \node[basic block,below right=of test] (no) {skip};
+    \node[basic block,below right=of yes] (ret) {return $r$};
+    \draw[cfg edge] (test) -- node[above left,font=\small] {true} (yes);
+    \draw[cfg edge] (test) -- node[above right,font=\small] {false} (no);
+    \draw[cfg edge] (yes) -- (ret);
+    \draw[cfg edge] (no) -- (ret);
+    \node[basic block,right=38mm of test] (op2) {risky $op$};
+    \node[basic block,below=of op2] (test2) {test $c$};
+    \node[basic block,below=of test2] (ret2) {return $r$};
+    \draw[cfg edge] (op2) -- (test2);
+    \draw[cfg edge] (test2) -- (ret2);
+    \node[font=\sffamily\small] at (1.2,1.0) {Before};
+    \node[font=\sffamily\small] at (6.6,1.0) {After};
+  \end{tikzpicture}
+  \caption{Hoisting a risky operation above its guard adds behaviors the source lacked.}
+  \label{fig:trap-hoist}
+\end{figure}
+
+The converse motion has the opposite risk.
+Sinking an operation into one branch removes its effect from the other path.
+If the operation diverges in the source on inputs that now skip it, the transformed program terminates where the source did not.
+If it traps there, the transformed program returns where the source reported failure.
+If it writes there, the transformed program omits an event the source produced.
+Whether sinking is allowed therefore depends on a positive fact about the removed behavior on that path: that it cannot trap, cannot write, and must terminate, or that the language permits its removal.
+An analysis that establishes such a fact is useful precisely because it discharges one of these obligations.
+Without the fact, the motion is merely hopeful.
+
+Our tiny language sidesteps all of this by construction, which is why it is a good place to practice the vocabulary.
+Every operation terminates, produces a value, and leaves no trace.
+Hoisting, sinking, duplication, and deletion change only the number of interpreter steps, not the observable pair of trace and result.
+The guarded division, the event log, and the fuel counter each remove one of those guarantees in isolation so that the corresponding restriction can be studied without confronting all of them at once.
+Chapter~2 will need the full combination, since its language will include constructs that can fail, interact, and loop.
+
+\section{Fold only when the guard is known}
+\label{sec:trap-guarded-folding}
+
+The three extensions share one folding discipline.
+A pure total subexpression may be evaluated during translation whenever its operands are known.
+A subexpression that may trap, write, or diverge may be evaluated early only with an additional argument that the early evaluation preserves the program's behavior set.
+Algorithm~\ref{alg:trap-guarded-fold} states the guarded rule for the division extension.
+It traverses children first, as before, but consults the divisor before replacing a division.
+The rule for addition and multiplication is unchanged because those operations remain pure and total in the extended language.
+The rule would need further conditions if they could trap or write.
+
+\begin{algorithm}
+  \caption{Fold constants in the presence of a trapping division.}
+  \label{alg:trap-guarded-fold}
+  \begin{pseudocode}
+    \Require A finite, non-sharing tree with $\operatorname{div}$ nodes
+    \Ensure Same trap-or-value for every input $a\in V$
+    \Function{GuardedFold}{$e$}
+      \If{$e$ is a literal or the input node}
+        \State \Return $e$
+      \EndIf
+      \State $p\gets\Call{GuardedFold}{\operatorname{left}(e)}$
+      \State $q\gets\Call{GuardedFold}{\operatorname{right}(e)}$
+      \If{$p=\operatorname{lit}(u)$ and $q=\operatorname{lit}(v)$}
+        \If{$e$ is an addition}
+          \State \Return $\operatorname{lit}((u+v)\bmod256)$
+        \ElsIf{$e$ is a multiplication}
+          \State \Return $\operatorname{lit}((u\times v)\bmod256)$
+        \Else
+          \If{$v=0$}
+            \State \Return a division node with children $p,q$
+          \Else
+            \State \Return $\operatorname{lit}(u/v)$
+          \EndIf
+        \EndIf
+      \EndIf
+      \State \Return a node with $e$'s operator and children $p,q$
+    \EndFunction
+  \end{pseudocode}
+\end{algorithm}
+
+The correctness claim must also be extended.
+For the pure language, Equation~\ref{eq:tiny-fold-correctness} equated two values.
+For the extended language, the claim is that for every valid tree $e$ and every input $a$, the folded tree either traps exactly when the original traps or returns the same value.
+The leaf cases are unchanged.
+The addition and multiplication cases first propagate any child trap; when both children succeed, the earlier arithmetic argument applies.
+For a division with folded children $p'$ and $q'$, the induction assumption gives trap-or-value agreement for each child.
+If either child traps, both the retained division and the original division trap by Equation~\ref{eq:trap-div-semantics}.
+If both succeed with $u,v$ and $v=0$, the algorithm retains the division, which traps as the original does.
+If both succeed and $v\neq0$, the algorithm returns the literal $u/v$, which is exactly the retained division's value.
+No case replaces a trap with a value or a value with a different value.
+
+This proof covers the specified algorithm on valid trees.
+It does not cover an implementation that forgets the $v=0$ test, evaluates the divisor with host division before testing it, or shares divisor nodes between two parents.
+Each of those defects has a concrete shape in C.
+Forgetting the test turns the always-trapping tree into a literal and is caught by the all-inputs trap check.
+Dividing before testing executes undefined behavior on the host even when the source semantics calls for a defined trap.
+Sharing a divisor node violates the non-sharing precondition on which both the linear-time argument and the in-place mutation reasoning depend.
+The laboratory's storage rule therefore stays unchanged: the caller owns every node, disconnected nodes are not freed during the phase, and no candidate introduces sharing or cycles.
+The new operation changes which replacements are legal, not how storage is managed.
+
+The same separation of concerns from Section~\ref{sec:analysis-and-transformation} now pays for itself.
+The fact \enquote{this divisor is the nonzero literal $8$} is an analysis result with a defined scope: a particular program point after folding.
+The replacement of $3+5$ by $8$ uses that fact, and the retention of $(x+7)/0$ follows from the absence of the corresponding fact for a zero divisor.
+If a later pass changes the divisor, the fact must be recomputed or discarded.
+Continuing to use the old \enquote{nonzero} conclusion after the divisor has been rewritten would be the same mistake as continuing to use any invalidated analysis.
+Stating the guard as part of the rule makes that dependency visible to the next pass.
+
+Testing must also check the trap dimension explicitly.
+The laboratory's division-pair test asserts trap-or-value agreement for all $65{,}536$ operand pairs, not merely value agreement where both sides succeed.
+Its folding test asserts that a zero divisor keeps the division node rather than only asserting that some value is preserved.
+Its composition is deliberately limited: the pure stack compiler is not asked to compile trapping trees, since its target has no checked instruction.
+That limitation is stated as a contract boundary rather than left as a silent assumption.
+A future target with a checked division instruction will need its own prefix theorem, verifier rule for stack depth on both success and failure paths, and composition proof before the two pipelines can be connected.
+Safonov's treatment of compiler trustworthiness emphasizes that such boundaries are engineering obligations rather than incidental details~\cite{safonov-2010-trustworthy}.
+Morgan's organization of representations around execution rules makes the same point from the implementation side: the IR must expose the facts each stage needs~\cite[Chapter~4]{morgan-1998-optimizing}.
+Appel's sequence of intermediate languages shows how those exposures compose across a whole compiler~\cite{appel-1998-modern}.

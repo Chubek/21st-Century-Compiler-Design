@@ -1,0 +1,94 @@
+\chapter{The Core Object Model}
+\label{ch:pebble-objects}
+
+A graph editor must distinguish changing an instruction from changing its identity.
+If deleting value 4 renumbers every later value, a diagnostic that refers to value 7 may silently begin naming a different computation.
+PebbleIR starts with stable slots and makes the cost of retaining them explicit.
+
+\section{Function-local identity}
+\label{sec:pebble-identity}
+A \term{value ID} is an integer from 1 through the function's allocated slot count.
+Zero means no value.
+A block ID runs from zero through the block count minus one; block zero is entry.
+An ID is meaningful only with its owning function.
+The pair consisting of function identity and ID is the reference, even when the C interface passes the two pieces separately.
+
+The \code{Pir} object contains value records, terminators, counts, and a revision.
+A value record names its opcode, result type, owning block, two operands, immediate, and two predecessor fields.
+Unused fields must be zero in a verified function.
+This canonical form prevents two encodings of the same instruction from accumulating different stale data.
+Table~\ref{tab:pebble-model} relates the containers to their jobs.
+
+\begin{table}[htbp]
+\caption{The executable object model has one ownership boundary: the function.}
+\label{tab:pebble-model}
+\centering
+\begin{tabular}{ll}
+\toprule
+Object & Responsibility \\
+\midrule
+\code{Pir} & Own slots, blocks, and revision \\
+\code{PirValue} & Describe one result or a tombstone \\
+\code{PirTerm} & End one block and identify successor blocks \\
+\code{PirFacts} & Record derived predecessor and dominator sets \\
+\code{PirVm} & Own a separate lowered instruction array \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+There is no module implementation yet because there are no symbols or calls to resolve.
+A module extension should own a table of functions with stable function IDs, a symbol-to-function map, and explicit declaration signatures.
+Adding only a vector of function pointers would leave cross-function references and destruction order unspecified.
+Keep function-local IDs local when introducing that outer layer.
+
+\section{Order without pointers}
+\label{sec:pebble-order}
+Within a block, live records execute in increasing ID order.
+This allows construction to interleave records from different blocks, but ordinary same-block operands must have smaller IDs than their uses.
+Phis are special: their operands are used on incoming edges, so a loop phi can refer to a later-allocated latch value.
+The verifier requires phis to precede ordinary instructions within their block.
+
+Algorithm~\ref{alg:pebble-enumerate} is the actual block-enumeration strategy.
+It is intentionally simple.
+For $B$ blocks and $N$ allocated slots, enumerating the whole function this way costs $O(BN)$ rather than $O(N)$.
+At eight blocks and 128 slots, that cost is acceptable for an inspectable specimen.
+An extensible implementation can replace it with per-block ID sequences while preserving the identity contract.
+
+\begin{algorithm}[htbp]
+\caption{Enumerating one block without moving value records.}
+\label{alg:pebble-enumerate}
+\begin{pseudocode}
+\Require function $F$ and valid block ID $b$
+\Ensure live values of $b$ in execution order
+\For{$i\gets1$ to $F.count$}
+\If{$F.values[i]$ is live and its owner block is $b$}
+\State yield $i$
+\EndIf
+\EndFor
+\State yield the separate terminator of $b$
+\end{pseudocode}
+\end{algorithm}
+
+\section{A worked deletion}
+\label{sec:pebble-tombstone}
+The running expression allocates IDs 1 through 7.
+ID 6 adds constants at IDs 4 and 5.
+After folding, ID 6 becomes constant 8 and the now-unused IDs 4 and 5 become \term{tombstones}.
+IDs 6 and 7 remain 6 and 7.
+The count remains seven because it measures allocated identity slots, not live instructions.
+The printer preserves the tombstones so reparsing preserves the same IDs.
+
+This choice makes deletion cheap but eventually exhausts the slot limit in an edit-heavy client.
+Compaction is a separate transformation: build an old-to-new map, rewrite every operand and terminator, verify the new object, and retire all old handles.
+Silently compacting during deletion would violate the promise that made stable IDs useful.
+
+\section{Exercises}
+\label{sec:pebble-three-exercises}
+\begin{enumerate}
+\item \label{ex:pebble-id-owner} Two functions both contain value 3. Explain why a numeric ID alone cannot detect a mistaken cross-function operand.
+\item \label{ex:pebble-compact} Compact live IDs $\{1,2,3,6,7\}$ into consecutive IDs. Rewrite operands of old value 7, which multiplies old values 3 and 6.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:pebble-three-reading}
+Morgan discusses representations in the context of transformations that repeatedly change them; read with ownership and identity obligations in mind~\cite{morgan-1998-optimizing}.

@@ -1,0 +1,220 @@
+\chapter{Interprocedural Analysis}
+\label{ch:ch22-interprocedural-analysis}
+
+\section{One Function Is Not the Program}
+\label{sec:ch22-one-function}
+
+Every analysis so far has worked inside a single procedure.
+It assumes unknown values at entry, treats calls as barriers that destroy facts, and hopes the damage stays small.
+Real programs defeat that hope constantly.
+Constants flow through arguments, objects escape through parameters, and the hottest facts live one call away from where they are used.
+A load that looks redundant becomes provably redundant only when the callee is known not to store to the address.
+A branch that looks unpredictable folds once the caller passes a constant.
+\term{Interprocedural analysis} reasons across procedure boundaries so that optimization sees the whole program instead of one function at a time.
+The price is scope: the analyzer must handle many procedures, many call sites, recursion, separate compilation, and code it cannot see.
+The reward is that summaries computed once per procedure answer questions at every call site cheaply.
+This chapter builds the call graph, defines what flows across it, computes procedure summaries with a worklist, and explains the precision ladder from context insensitivity to full sensitivity.
+It generalizes the dataflow of earlier chapters and supplies the summaries that Chapters~\ref{ch:ch20-alias-analysis} and~\ref{ch:ch21-memory-optimization} need at call boundaries.
+
+\section{Call Graphs}
+\label{sec:ch22-call-graphs}
+
+A \term{call graph} has one node per procedure and one edge per possible caller-to-callee transfer.
+Direct calls contribute exact edges: the callee is named in the IR, so the edge is certain.
+Indirect calls through function pointers, virtual methods, or callbacks contribute possible edges for every procedure whose address could flow to the call site.
+Resolving those edges needs pointer analysis from Chapter~\ref{ch:ch20-alias-analysis}, which creates a productive cycle: better points-to sets give a smaller call graph, and a smaller call graph gives cheaper interprocedural facts.
+Listing~\ref{lst:ch22-calls} shows a program whose graph is small enough to draw completely.
+
+\begin{irlisting}[caption={Three procedures and a main program with direct calls and one global store each.},label={lst:ch22-calls}]
+h(): store g1 = 1
+     ret
+g(): call h()
+     store g2 = 2
+     ret
+f(): call g()
+     ret
+main: call f()
+      x = load g1
+      y = load g2
+      ret x + y
+\end{irlisting}
+
+The graph has the edges $main \to f$, $f \to g$, and $g \to h$, with no cycles and no indirect calls.
+Recursion would add a cycle, mutual recursion a strongly connected component, and separate compilation would add unknown nodes for code outside the analyzed units.
+Unknown code forces sound approximations: a call to an unseen procedure is treated as reading and writing everything it could reach.
+Engineers call this the \enquote{worst case} summary, and it is the default every sound whole-program analysis needs.
+That treatment is always safe and often imprecise, which is why whole-program builds and link-time analysis exist.
+Figure~\ref{fig:ch22-call-graph} draws the graph for Listing~\ref{lst:ch22-calls}.
+The analysis propagates facts along these edges in reverse topological order when the graph is acyclic, and iterates to a fixed point when cycles appear.
+
+\begin{figure}
+  \centering
+  \begin{tikzpicture}[node distance=16mm and 22mm]
+    \node[basic block] (ch22main) {main};
+    \node[basic block,below=of ch22main] (ch22f) {f};
+    \node[basic block,below=of ch22f] (ch22g) {g};
+    \node[basic block,below=of ch22g] (ch22h) {h};
+    \draw[cfg edge] (ch22main) -- (ch22f);
+    \draw[cfg edge] (ch22f) -- (ch22g);
+    \draw[cfg edge] (ch22g) -- (ch22h);
+  \end{tikzpicture}
+  \caption{Direct calls give an exact acyclic call graph, so summaries propagate bottom-up from the leaves.}
+  \label{fig:ch22-call-graph}
+\end{figure}
+
+\section{Summaries: May-Modify and Friends}
+\label{sec:ch22-summaries}
+
+A \term{procedure summary} describes a procedure's observable behavior once, so every caller can reuse the description.
+The most widely used summary is the \term{may-modify} set, also called may-mod: the globals and address-taken locations the procedure or anything it calls might write.
+Its dual is the \term{may-reference} set of locations it might read.
+Constant-propagation summaries map input facts to output facts, alias summaries describe how pointer arguments connect to results, and purity summaries record that a procedure touches nothing observable at all.
+Summaries compose along call edges: the summary of a caller includes its own direct effects plus the summaries of its callees.
+That composition rule turns interprocedural analysis into a fixed-point problem over the call graph.
+Algorithm~\ref{alg:ch22-maymod} computes may-modify sets for globals with a worklist over callers.
+
+\begin{algorithm}
+  \caption{May-modify summaries over the call graph}\label{alg:ch22-maymod}
+  \begin{pseudocode}
+    \Require fixed sound call graph, conservative direct store sets $Direct(P)$ including external effects
+    \Ensure least fixed point of may-modify sets $Mod(P)$
+    \State $Mod(P) \gets Direct(P)$ for every procedure $P$
+    \State $W \gets$ all procedures
+    \While{$W \neq \emptyset$}
+      \State remove some $P$ from $W$
+      \State $New \gets Direct(P) \cup \bigcup_{Q \text{ called by } P} Mod(Q)$
+      \If{$New \neq Mod(P)$}
+        \State $Mod(P) \gets New$
+        \State add every caller of $P$ to $W$
+      \EndIf
+    \EndWhile
+  \end{pseudocode}
+\end{algorithm}
+
+The algorithm assumes direct store sets are known from a local scan and that the call graph is fixed during solving.
+Represent an unknown callee by a synthetic node whose direct set contains every tracked location it may modify.
+Initialize that node before iteration; omitting its edge or assigning it an empty set would make every transitive caller's summary unsound.
+Recursion is handled naturally: cycles keep the worklist nonempty until the component stabilizes.
+The result is the least fixed point, meaning the smallest sets satisfying all the inclusion rules, which is the most precise sound answer the rule system admits.
+Clients read the summaries at call sites.
+A redundant-load analysis keeps its available set across a call to $P$ except for locations in $Mod(P)$.
+A dead-store analysis instead needs a may-reference summary: a read-only callee can observe a preceding store even when $Mod(P)$ is empty.
+Conversely, membership in $Mod(P)$ does not prove that the call overwrites the location on every path.
+An inliner uses small summaries to estimate the benefit of replacing the call with the body.
+
+\section{Worked Example: Mod Sets Bottom-Up}
+\label{sec:ch22-worked-mod}
+
+We run Algorithm~\ref{alg:ch22-maymod} on Listing~\ref{lst:ch22-calls} by hand.
+The direct store sets from scanning each body are $Direct(h) = \{g1\}$, $Direct(g) = \{g2\}$, $Direct(f) = \emptyset$, and $Direct(main) = \emptyset$.
+Initialization copies these into the summaries: $Mod(h) = \{g1\}$, $Mod(g) = \{g2\}$, $Mod(f) = \emptyset$, and $Mod(main) = \emptyset$.
+Processing in reverse topological order visits $h$ first.
+Procedure $h$ calls nothing, so $New = \{g1\} = Mod(h)$ and nothing changes.
+Next comes $g$, which calls $h$: $New = \{g2\} \cup Mod(h) = \{g1, g2\}$, which differs from $Mod(g)$, so $Mod(g)$ becomes $\{g1, g2\}$ and $g$'s caller $f$ joins the worklist.
+Next comes $f$, which calls $g$: $New = \emptyset \cup Mod(g) = \{g1, g2\}$, so $Mod(f)$ becomes $\{g1, g2\}$ and $main$ joins the worklist.
+Finally $main$ calls $f$: $New = \emptyset \cup Mod(f) = \{g1, g2\}$, so $Mod(main) = \{g1, g2\}$.
+A final sweep changes nothing, and the fixed point is reached after one pass per procedure because the graph is acyclic.
+Table~\ref{tab:ch22-mod} records the direct sets, the callee contributions, and the final summaries.
+
+\begin{table}
+  \centering
+  \caption{May-modify sets for Listing~\ref{lst:ch22-calls} computed bottom-up over the call graph.}
+  \label{tab:ch22-mod}
+  \begin{tabular}{llll}
+    \toprule
+    Procedure & Direct stores & Callees add & Final summary \\
+    \midrule
+    $h$ & $g1$ & none & $\{g1\}$ \\
+    $g$ & $g2$ & $g1$ from $h$ & $\{g1, g2\}$ \\
+    $f$ & none & $g1, g2$ from $g$ & $\{g1, g2\}$ \\
+    $main$ & none & $g1, g2$ from $f$ & $\{g1, g2\}$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The payoff is visible in \code{main}: after \code{call f()}, both globals are possibly written, so no load in \code{main} crosses the call unless its address is known distinct from both.
+Had $f$ modified nothing, its empty summary would let every available load survive the call, which is exactly the precision interprocedural analysis buys.
+Now introduce one complication to test understanding: if $g$ called itself recursively, the reverse-topological order would not exist.
+The worklist would then process $g$ repeatedly, growing $Mod(g)$ until the self-edge contributed nothing new, and termination would still follow from monotonic growth over a finite universe.
+
+\section{Context Sensitivity and Its Cost}
+\label{sec:ch22-context}
+
+One summary per procedure merges all call sites, and merging loses facts.
+A helper called with \code{\&x} in one place and \code{\&y} in another gets a combined summary mentioning both, so neither caller recovers its precise case.
+\term{Context sensitivity} keeps call sites apart.
+\term{Call-site cloning} analyzes separate contexts for selected call sites, reducing caller merging without making the underlying abstraction exact.
+Recursion requires a context bound or another finite representation.
+\term{Summary-based sensitivity} parameterizes one summary by abstract inputs, instantiating it per call site without re-analyzing the body.
+\term{Context insensitivity} accepts the merge and stays cheap.
+Table~\ref{tab:ch22-sensitivity} compares the options.
+
+\begin{table}
+  \centering
+  \caption{Context-sensitivity choices trade caller precision against analysis cost.}
+  \label{tab:ch22-sensitivity}
+  \begin{tabular}{lll}
+    \toprule
+    Choice & Precision & Cost driver \\
+    \midrule
+    Insensitive & Merged over callers & One summary per procedure \\
+    Cloning & Selected contexts separated & Copies scale with contexts \\
+    Summaries & Per-caller instantiation & Summary size and instantiation \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Flow sensitivity adds an orthogonal axis: a flow-sensitive analysis tracks facts per program point inside each procedure, while a flow-insensitive one merges each procedure into one fact set.
+The cheapest combination, insensitive in both axes, already resolves the common cases of direct calls with global effects.
+The most expensive combination is reserved for precision-critical clients like strong alias answers in security checking.
+Most compilers land in the middle: flow-sensitive within procedures, context-insensitive across them, with selective cloning for tiny leaf helpers.
+Separate compilation bounds every choice.
+Code outside the analyzed units gets conservative summaries, and link-time analysis exists to shrink that unknown region.
+% TODO(cite): primary references for context-sensitivity designs and whole-program analysis frameworks.
+Soundness also requires care with callbacks, dynamic loading, and reflection-like features where the call graph itself is incomplete.
+An edge the graph omits is a fact the analysis never propagates, which is unsound rather than merely imprecise.
+
+\section{Implementation Notes}
+\label{sec:ch22-implementation}
+
+Let $P$ count procedures, $C$ call edges, and $V$ tracked locations.
+A delta solver that sends each newly discovered location across each edge once takes $O(PV+CV)$ membership work with constant-time insertion.
+The displayed solver recomputes whole unions instead; its cost includes repeated callee scans and $\lceil V/w\rceil$ words per bitset operation on a word size $w$.
+Do not assign the delta solver's bound to a full-union implementation.
+Processing in reverse topological order reaches the fixed point in one pass for acyclic graphs, and strongly connected components need iteration bounded by the height of the location lattice.
+Call-graph construction for direct calls is linear in program size.
+Indirect calls cost whatever the underlying pointer analysis costs, which dominates the budget in object-oriented programs with many virtual targets.
+Production compilers bound context sensitivity with budgets: clone only small callees, inline the tiny ones outright, and summarize the rest.
+They invalidate summaries incrementally when a procedure changes, reprocessing only its callers transitively rather than recomputing the world.
+They also layer analyses by demand: compute cheap insensitive summaries for everything, then refine only the procedures on hot paths or the queries that clients actually ask.
+% TODO(cite): engineering reports on scaling whole-program analysis to large codebases.
+A teaching compiler should implement the acyclic worklist first, add cycle iteration with a counter that proves termination on recursive tests, and only then experiment with cloning.
+Keep the unknown-code policy explicit and conservative from the start, because every later refinement inherits its soundness from that default.
+
+\section{Exercises}
+\label{sec:ch22-exercises}
+
+\begin{enumerate}
+  \item \label{ex:ch22-cycle-fixpoint}
+  Extend Listing~\ref{lst:ch22-calls} so that \code{g} calls \code{f} in addition to \code{h}, creating a cycle between \code{f} and \code{g}.
+  Run Algorithm~\ref{alg:ch22-maymod} with a worklist until no set changes, showing each update in order.
+  Give the final summaries and explain why reverse topological order alone no longer suffices.
+  \item \label{ex:ch22-merge-loss}
+  Write a procedure \code{write} that stores through its pointer parameter, called once with \code{\&x} and once with \code{\&y}.
+  Compute the context-insensitive may-modify summary of \code{write} and state what each caller can conclude about the other variable.
+  Show the two per-caller summaries that cloning would produce, and give the load elimination in one caller that cloning enables and merging defeats.
+  \item \label{ex:ch22-unknown-call}
+  Add to \code{main} a call to an externally defined procedure with no visible body that returns no value.
+  State the conservative may-modify summary the compiler must assume and justify it from the soundness rule for unseen code.
+  Explain which loads in \code{main} survive that call under available-load analysis and which do not.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch22-further-reading}
+
+Safonov's \emph{Trustworthy Compilers} discusses modular reasoning and the obligations procedures owe their callers~\cite{safonov-2010-trustworthy}.
+Read it for why summaries are contracts rather than mere caches.
+Morgan's \emph{Building an Optimizing Compiler} connects interprocedural facts to the optimizations they enable~\cite{morgan-1998-optimizing}.
+Use it to see how summaries flow into motion, numbering, and code generation.
+Appel's \emph{Modern Compiler Implementation in ML} organizes these analyses inside a complete compiler~\cite{appel-1998-modern}.
+Consult it when deciding where summary computation belongs in the pass pipeline.

@@ -1,0 +1,90 @@
+\chapter{An Executable Reference Interpreter}
+\label{ch:pebble-interpreter}
+
+A representation specification becomes easier to challenge when it can run.
+The interpreter is our first executable consumer of every operation and terminator.
+It is deliberately direct: verification first, one register slot per value, explicit phi capture, and explicit dispatch.
+It is not a performance model of the final machine.
+
+\section{Execution without hidden control state}
+\label{sec:pebble-interpreter-loop}
+\code{pir\_run} accepts a function, a byte input, and a block-entry budget.
+It rejects out-of-domain inputs and malformed functions.
+Registers begin at zero as a host initialization measure, but valid execution must not depend on those defaults.
+Dominance and phi-edge checks ensure that each used value comes from a definition on the executed path.
+
+Algorithm~\ref{alg:pebble-run} follows the block semantics from Chapter~\ref{ch:pebble-semantics}.
+Each phi prefix reads from the register state established before that block entry.
+Only after all incoming values have been captured are the phi result registers updated.
+
+\begin{algorithm}[htbp]
+\caption{Interpreting a verified function with an explicit block budget.}
+\label{alg:pebble-run}
+\begin{pseudocode}
+\Require function $F$, byte input $x$, nonnegative budget $K$
+\Ensure return value, invalid-program result, or budget exhaustion
+\State verify $F$; reject on failure
+\State $B\gets0$; $P\gets$ no predecessor; $steps\gets0$
+\While{$steps<K$}
+\State increment $steps$
+\State capture phi inputs of $B$ selected by $P$ into scratch storage
+\State publish phi results and evaluate ordinary instructions of $B$
+\If{the terminator returns $v$} \State \Return the current value of $v$ \EndIf
+\State $P\gets B$; choose the successor of $B$ from its terminator
+\EndWhile
+\State \Return budget exhaustion
+\end{pseudocode}
+\end{algorithm}
+
+\section{Three independent traces}
+\label{sec:pebble-interpreter-traces}
+For the running expression at input 9, values 1 through 7 are 9, 7, 16, 3, 5, 8, and 128.
+The function returns after one block entry.
+After optimization, values 4 and 5 are dead and value 6 is directly 8; the observable answer and block count remain unchanged.
+
+For the diamond at input 12, entry chooses the right arm.
+That arm computes 24, and the join phi selects its operand labeled by predecessor 2.
+The return is 24 after three block entries.
+The unused left-arm slots' host initialization must not influence the selected result.
+
+For the summation loop at input 3, the dynamic block sequence is
+$0,1,2,1,2,1,2,1,3$.
+There are nine block entries, three body executions, and result 3.
+A budget of eight exhausts just before entering the exit block; a budget of nine permits the return.
+That off-by-one case is important because a budget measures interpreter transitions, not source-loop iterations.
+
+\section{Reference does not mean infallible}
+\label{sec:pebble-oracles}
+The IR interpreter and optimizer share the representation, so their agreement alone can conceal a shared misunderstanding.
+The generated-expression tests additionally evaluate a separate source tree using its own recursion.
+The loop tests compare with direct C computations of the mathematical recurrence, reduced to bytes.
+The lowered VM provides a different execution mechanism, including explicit edge-copy sequences.
+Agreement among these paths is stronger evidence than rerunning one interpreter under two names.
+
+Still, finite agreement is not a general proof.
+The tests enumerate all 256 input bytes for each chosen program, but they do not enumerate all possible CFGs or expressions.
+The local semantic arguments remain necessary, especially when an extension introduces memory, traps, or nondeterministic observations.
+
+\section{Cost and interface boundaries}
+\label{sec:pebble-run-cost}
+With $N$ allocated slots and $K$ executed block entries, the reference interpreter uses $O(KN)$ table-scan work after verification.
+Register and scratch arrays use $O(N)$ storage.
+Each ordinary operation takes constant time for this fixed byte domain.
+The interpreter's fuel bounds its own dispatch loop because each block scan is bounded and its operations terminate.
+That reasoning would need revision if an instruction could call an unbounded external function.
+
+The VM counts individual instructions instead of block entries.
+Comparisons between the two interpreters must use budgets known to be sufficient or distinguish exhaustion from semantic disagreement.
+Equal numeric budgets are not equal work and do not define a cross-interpreter equivalence relation.
+
+\section{Exercises}
+\label{sec:pebble-twelve-exercises}
+\begin{enumerate}
+\item \label{ex:pebble-loop-budget} Derive the summation loop's block-entry count as a function of input $x$, including entry, the final header visit, and exit.
+\item \label{ex:pebble-zero-registers} Why does initializing every register to zero not make a missing definition harmless? Construct a result that would be silently wrong without verification.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:pebble-twelve-reading}
+Appel's executable approach to language implementation is useful when designing a small semantic oracle~\cite{appel-1998-modern}.
+Safonov helps distinguish validation evidence from a complete correctness claim~\cite{safonov-2010-trustworthy}.

@@ -1,0 +1,91 @@
+\chapter{Types, Constants, and Operations}
+\label{ch:pebble-operations}
+
+An opcode name is not an instruction specification.
+The specification must also say which operands exist, what they mean, when they are read, and which result type is produced.
+Otherwise a parser, verifier, and interpreter can each implement a plausible but incompatible version of \code{add}.
+
+\section{A closed instruction set}
+\label{sec:pebble-op-table}
+Table~\ref{tab:pebble-ops} is the semantic core.
+Input is allowed at most once, in entry, and has type \code{u8}.
+Constants carry their result type explicitly.
+Both phi inputs have the result's type, and their predecessor labels describe edges rather than operand evaluation order.
+
+\begin{table}[htbp]
+\caption{PebbleIR's live value-producing operations have complete operand contracts.}
+\label{tab:pebble-ops}
+\centering
+\begin{tabular}{llll}
+\toprule
+Operation & Inputs & Result & Meaning \\
+\midrule
+input & none & u8 & Function argument \\
+const & immediate & u8 or i1 & Typed literal \\
+add & u8, u8 & u8 & Sum modulo 256 \\
+mul & u8, u8 & u8 & Product modulo 256 \\
+lt & u8, u8 & i1 & Unsigned strict comparison \\
+phi & two same-type values & same type & Predecessor-selected value \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Terminators do not define values.
+A return consumes one byte value; a jump names one successor; a branch consumes one boolean and names two distinct successors.
+Edges into entry are prohibited.
+The distinct-successor restriction keeps phi inputs keyed by predecessor blocks rather than by individual parallel edges.
+Relaxing it would require a decision about edge identity throughout the representation, not only a change to the branch parser.
+
+\section{Constants have types too}
+\label{sec:pebble-constants}
+The literal 1 can inhabit either type, but a \code{u8} constant 1 cannot directly supply an \code{i1} use.
+For example, comparing byte constants 7 and 9 produces boolean true; folding that comparison must produce an \code{i1} constant, not a byte constant with the same bits.
+The optimizer retains the original result type while replacing the opcode and clearing operands.
+
+The implementation does not intern constants globally.
+Two identical literals may occupy different slots and have different dominance regions.
+Global interning would need either function-entry materialization or a separation between literal objects and instructions that materialize them.
+Sharing the payload is a storage decision; sharing a dominating definition is a control-flow decision.
+
+\begin{algorithm}[htbp]
+\caption{Checking an operation against its semantic signature.}
+\label{alg:pebble-signature}
+\begin{pseudocode}
+\Require a structurally bounded value record $v$
+\Ensure compatible types and canonical fields, or rejection
+\State dispatch on the validated opcode
+\State require the documented result type and operand count
+\State require zero in fields unused by that opcode
+\State require each operand ID to name a live value
+\State compare operand types with the signature
+\State separately check where each operand is available
+\end{pseudocode}
+\end{algorithm}
+
+Algorithm~\ref{alg:pebble-signature} separates type validity from dominance.
+Both are necessary.
+A correctly typed byte value from the left branch is not available on the right branch merely because its ID exists.
+The verifier therefore validates all record headers before it follows operand IDs and before it computes availability queries over those records.
+
+\section{Adding an opcode is a cross-client change}
+\label{sec:pebble-op-extension}
+Suppose the next client requests subtraction.
+First define whether it wraps, traps, or has an undefined case.
+For a byte-wrapping subtraction, specify the result as $(a+256-b)\bmod256$ and justify the host expression's range.
+Then update the enum, textual name table, structural verifier, type rules, interpreter, constant folder, lowering, VM handler, and tests.
+The current implementation deliberately has no subtraction; this procedure is an extension exercise, not a claim of an implemented opcode.
+
+A generated opcode table could reduce duplicated signature metadata.
+It would not generate a sound semantic implementation automatically.
+In particular, a flag such as \enquote{pure} must describe behavior, not simply mirror a developer's wish to remove an instruction.
+
+\section{Exercises}
+\label{sec:pebble-four-exercises}
+\begin{enumerate}
+\item \label{ex:pebble-bool} Fold \code{lt 7,9} and explain which type and immediate the replacement needs. Why does constant byte 1 fail the branch contract?
+\item \label{ex:pebble-sub} Work out wrapping subtraction for $(a,b)=(0,1)$ and $(255,255)$, and bound the proposed host intermediate $a+256-b$.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:pebble-four-reading}
+The C standard's rules for promotions and unsigned arithmetic explain why source and host types must be considered separately~\cite[Sections~6.3.1.1 and~6.2.5]{wg14-2011-c11}.

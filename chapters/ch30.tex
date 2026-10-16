@@ -1,0 +1,245 @@
+\chapter{Interpreter Design}\label{ch:interpreter-design}
+
+An interpreter must decide what a program means before any machine code exists.
+It reads a representation of the program and carries out each operation directly.
+That directness makes interpreters the fastest route to a working language and the slowest route to a fast program.
+This chapter shows how to build one that is correct, predictable, and ready to support later optimization.
+We treat the interpreter as an executable definition of the language semantics.
+Every shortcut taken here becomes a commitment that later passes must respect.
+
+\section{What an Interpreter Promises}\label{sec:ch30-promise}
+
+A \term{interpreter} executes a program representation step by step without first translating it to native code.
+The representation may be source text, an abstract syntax tree, or a compact bytecode.
+The interpreter keeps explicit state for control, data, and environments.
+Each step reads the current program point, performs the denoted action, and advances.
+The observable result must match the language definition for every supported construct.
+That promise covers values, effects, errors, and termination behavior.
+A \term{tree-walking interpreter} traverses syntax nodes directly.
+A \term{bytecode interpreter} dispatches on encoded instructions in a loop.
+Both satisfy the same contract when they implement the same language.
+They differ in startup cost, per-step cost, and preparation cost.
+Consider a statement that adds two variables and stores the result.
+A tree walker finds the assignment node, evaluates the right subtree, and updates the environment.
+A bytecode interpreter fetches two loads, an add, and a store from an array.
+The tree walker pays for pointer chasing and dispatch on node kinds.
+The bytecode interpreter pays for decoding operands and threading control through one loop.
+Neither cost matters until programs run long enough for dispatch overhead to dominate.
+The choice therefore depends on how often each program runs and how quickly it must start.
+
+\section{Structure of a Tree-Walking Interpreter}\label{sec:ch30-tree-walking}
+
+A tree walker gives each syntactic form a node with an evaluation rule.
+Evaluation takes a node and an \term{environment} that maps names to values or locations.
+It returns a value, possibly after updating a store.
+Recursive calls handle subexpressions in a defined order.
+The order matters as soon as expressions can fail, diverge, or perform effects.
+Figure~\ref{fig:ch30-eval-flow} shows how an evaluation request flows from a statement node through expression nodes to environment operations and back.
+The diagram keeps control recursion separate from data lookup.
+That separation simplifies later changes to scoping, assignment, and error reporting.
+Environments deserve care because most interpreter bugs live there.
+A flat map from names to values suffices for straight-line examples.
+Nested scopes, functions, and closures need a chain of frames or a persistent mapping.
+Assignment must update the frame where the name was bound, not the innermost frame.
+A common mistake copies the environment on every call and loses updates to captured variables.
+Another mistake shares one mutable map across unrelated activations and leaks bindings between calls.
+We avoid both with an explicit rule.
+Name resolution finds the nearest binding frame for a name.
+Assignment writes to that frame.
+Function creation captures the current frame chain for later calls.
+This rule is short enough to test directly.
+An interpreter loop also needs disciplined errors and termination control.
+Division by zero, undefined names, and arity mismatches should name the offending construct and its source location.
+The evaluator threads locations through every node so failures point at user code, not interpreter internals.
+A recursion bound or an explicit value stack lets runaway programs fail cleanly.
+These mechanisms are not decorations.
+They define the observable behavior that compiled code must later reproduce.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=1.1cm and 1.4cm]
+\node[basic block] (stmt) {assign node\\ \code{x = a + b}};
+\node[basic block, below=of stmt] (add) {add node\\ \code{a + b}};
+\node[basic block, below left=of add] (vara) {lookup\\ \code{a}};
+\node[basic block, below right=of add] (varb) {lookup\\ \code{b}};
+\node[basic block, below=of add, yshift=-1.6cm] (env) {environment\\ find, then update};
+\draw[cfg edge] (stmt) -- (add);
+\draw[cfg edge] (add) -- (vara);
+\draw[cfg edge] (add) -- (varb);
+\draw[cfg edge] (vara) -- (env);
+\draw[cfg edge] (varb) -- (env);
+\end{tikzpicture}
+\caption{Evaluation of one assignment flows from the statement node to operand lookups and then to a single environment update, which keeps resolution and mutation in one place.}
+\label{fig:ch30-eval-flow}
+\end{figure}
+
+\section{Dispatch: the Cost Center}\label{sec:ch30-dispatch}
+
+Every interpreter spends most of its time deciding what to do next.
+That decision is called \term{dispatch}.
+A tree walker dispatches on node type at each recursive call.
+A bytecode loop dispatches on opcode at each iteration.
+Table~\ref{tab:ch30-dispatch} compares dispatch strategies by portability, effort, and branch behavior.
+The table reports qualitative trade-offs rather than measured times.
+Actual speed depends on the host compiler, the instruction set, and the program mix.
+A switch inside a loop is the most portable choice.
+Each iteration fetches an opcode and selects a case.
+Computed jumps and threaded code reduce branch pressure but need host-specific support.
+Direct call threading turns each handler into a small function and chains calls.
+Subroutine threading emits native calls to handlers for straight-line sequences.
+The progression trades portability for fewer unpredictable branches.
+All strategies preserve the same semantics when handlers are unchanged.
+We therefore fix handlers first and change dispatch only after profiling.
+Algorithm~\ref{alg:ch30-bytecode-loop} shows the portable switch-dispatch loop reused by later chapters.
+It assumes programs are arrays of records with an opcode and up to two operands.
+It requires every opcode to have a handler and each handler to advance the program counter exactly once.
+The loop checks errors, fuel exhaustion, and explicit halts on every iteration.
+These checks look expensive in source form.
+In practice they compile to a few predictable tests around handler bodies.
+More importantly, they give the interpreter a defined stopping behavior that tests can observe.
+
+\begin{table}[htbp]
+\centering
+\caption{Dispatch strategies trade portability against branch cost, so handlers should be fixed before dispatch is tuned.}
+\label{tab:ch30-dispatch}
+\begin{tabular}{llll}
+\toprule
+Strategy & Portability & Effort & Branch behavior \\
+\midrule
+Tree switch & High & Low & One branch per node type \\
+Loop switch & High & Low & One branch per opcode \\
+Computed jump & Medium & Medium & Indirect branch per opcode \\
+Direct threading & Low & Medium & Chained handler jumps \\
+Call threading & Medium & High & Native calls to handlers \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{algorithm}[htbp]
+\caption{Bytecode dispatch loop with explicit errors and fuel}\label{alg:ch30-bytecode-loop}
+\begin{pseudocode}
+\Require decoded program $P$ of $n$ instructions, state $S$, integer fuel $F\ge0$, terminating handlers
+\Ensure halts with result, error, or out-of-fuel
+\State $pc \gets 0$
+\State $fuel \gets F$
+\While{$pc \neq n$}
+\If{$pc < 0$ or $pc > n$}
+\State \Return invalid program counter
+\EndIf
+\If{$fuel = 0$}
+\State \Return out-of-fuel
+\EndIf
+\State $fuel \gets fuel - 1$
+\State $op \gets P[pc].opcode$
+\If{$op$ is undefined}
+\State \Return error at $pc$
+\EndIf
+\State execute checked handler on $S$; return any reported error immediately
+\State accept its next $pc$ only if it is a valid target or the permitted end $n$
+\EndWhile
+\State \Return result in $S$
+\end{pseudocode}
+\end{algorithm}
+
+This model treats $pc=n$ as successful fall-through; a format requiring an explicit halt must reject that transition instead.
+Handlers check stack arity, operand kinds, indices, and arithmetic errors before publishing their next state.
+Fuel bounds dispatches, not elapsed time: a handler that blocks forever or performs unbounded work defeats a wall-clock termination guarantee.
+
+\section{Worked Example: Tracing One Assignment}\label{sec:ch30-worked}
+
+We now trace the assignment \code{x = a + b} under concrete bindings.
+This is a \term{hand-computed trace}, not a machine run.
+Every value below follows from the previous step by the stated rules.
+Suppose the environment maps $a$ to $6$ and $b$ to $9$.
+Suppose $x$ is already bound in the current frame.
+The tree walker visits the assignment node first.
+It evaluates the right subtree before touching $x$.
+It visits the addition node and evaluates $a$ to $6$.
+It evaluates $b$ to $9$.
+It adds the two values to get $15$.
+It resolves $x$ to the current frame and stores $15$ there.
+The final environment maps $a$ to $6$, $b$ to $9$, and $x$ to $15$.
+The bytecode version performs the same steps in linear form.
+The listing below uses abstract loads, an add, and a store.
+Each instruction carries its operand inline so no decoding subtlety arises.
+\begin{irlisting}
+; x = a + b with a = 6 and b = 9
+load a        ; stack: [6]
+load b        ; stack: [6, 9]
+add           ; stack: [15]
+store x       ; env(x) = 15
+\end{irlisting}
+We step the dispatch loop of Algorithm~\ref{alg:ch30-bytecode-loop} with fuel $F = 10$.
+The initial stack is empty and $pc = 0$.
+After the first load, the stack holds $[6]$ and $pc = 1$.
+After the second load, the stack holds $[6, 9]$ and $pc = 2$.
+The add pops $9$ and $6$, pushes $15$, and sets $pc = 3$.
+The store pops $15$, writes it to the frame for $x$, and sets $pc = 4$.
+The loop exits because $pc$ equals the program length.
+Fuel remaining is $6$, which confirms the trace consumed exactly four steps.
+Both interpreters agree on the final store.
+That agreement is the property tests should check.
+If a later optimization changes dispatch, encoding, or evaluation order, this trace still defines the expected outcome.
+
+\section{Values, Frames, and Error Paths}\label{sec:ch30-values}
+
+A first interpreter should represent values with a tagged union or a small class hierarchy.
+Integers, booleans, strings, and references need distinct tags even in a tiny language.
+Operations check tags before computing and report a type error on mismatch.
+That check belongs in the handler, not in dispatch.
+Frames hold bindings, a return address, and a saved stack base.
+Calls push a frame and reset the operand window.
+Returns restore both and deliver one result value.
+A frequent defect confuses the operand stack with the frame stack.
+Keeping them as separate structures prevents a deep expression from corrupting return addresses.
+Error paths need the same attention as value paths.
+\begin{ccnote}[Testing errors]
+Every error the definition allows needs a test that triggers it.
+A missing test usually means the handler takes an undefined path instead of reporting cleanly.
+\end{ccnote}
+An implementation should test undefined names, arity mismatches, division guards, and stack underflow independently.
+Each test asserts the diagnostic and the program point, not only the failure.
+The \enquote{clean failure} rule keeps the suite deterministic.
+No test may hang, crash the harness, or depend on host-specific output.
+Fuel and depth limits enforce that rule mechanically.
+
+\section{Implementation Notes and Complexity}\label{sec:ch30-implementation}
+
+Represent program points as node pointers or integer indices, never as raw host addresses.
+Represent environments as linked frames with hash maps for bindings.
+These choices make inspection, printing, and testing straightforward.
+The asymptotic cost is easy to state.
+Evaluating an expression tree with $N$ nodes costs $O(N)$ handler steps when each node does constant work.
+A bytecode loop over $I$ executed instructions costs $O(I)$ dispatches plus handler work.
+Environment lookup costs $O(D)$ where $D$ is the static nesting depth for a frame chain.
+A hash map per frame keeps each hop near constant time for typical programs.
+Memory use grows with the value stack, the environment chain, and cached source locations.
+Production systems depart from this baseline in measured steps.
+They add inline caches for name and method lookup.
+They specialize hot handlers for common types.
+They replace tree walking with bytecode to shorten dispatch.
+Each change keeps handler semantics fixed and measures the dispatch saving separately.
+A common pitfall fuses these steps prematurely.
+Fused handlers with ad hoc type tests are harder to verify than a slow interpreter with exact semantics.
+Another pitfall omits fuel or stack limits for simplicity.
+Without a limit, a diverging test hangs the suite instead of failing cleanly.
+The interpreter doubles as the reference semantics for later chapters.
+Its bytecode form supports the virtual machine of the next chapter.
+Its environment discipline supports closures and objects later.
+Its error and fuel behavior supports the testing discipline of the final chapters.
+% TODO(cite): need a primary reference for threaded dispatch measurements.
+
+\section{Exercises}\label{sec:ch30-exercises}
+
+\begin{enumerate}
+\item Trace the program \code{x = 2 + 3 + 4} under left-to-right evaluation and list the stack after every step, then repeat under right-to-left evaluation and state which final store, if any, differs.\label{ex:ch30-eval-order}
+\item Implement the dispatch loop of Algorithm~\ref{alg:ch30-bytecode-loop} for four opcodes, add an out-of-fuel test with $F = 2$ on a four-instruction program, and report the program counter and stack at failure.\label{ex:ch30-fuel-test}
+\item Extend a tree walker with one new binary operator, define its error behavior on two concrete inputs, and write tests that distinguish a missing handler from a wrong handler result.\label{ex:ch30-new-operator}
+\end{enumerate}
+
+\section{Further Reading}\label{sec:ch30-reading}
+
+Appel presents interpreter structure as part of a larger compiler pipeline~\cite{appel-1998-modern}.
+Morgan discusses how interpreter and runtime organization constrains later optimization~\cite{morgan-1998-optimizing}.
+Safonov treats language definition and trustworthy execution as engineering obligations~\cite{safonov-2010-trustworthy}.
+The C rules for expression evaluation and sequencing are defined in the language standard draft~\cite{wg14-2011-c11}.

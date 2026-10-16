@@ -1,0 +1,187 @@
+\chapter{Intermediate Representations}
+\label{ch:intermediate-representations}
+
+Trees are faithful to the source but awkward for optimization.
+They nest deeply, mix control with computation, and hide the order in which values are produced.
+This chapter lowers checked trees into an \term{intermediate representation}, which is a simpler language designed for analysis and transformation.
+The chosen form is \term{three-address code}: a flat list of instructions where each instruction performs at most one operation on explicitly named values.
+Later chapters build control-flow graphs, dataflow facts, and optimizations on top of this flat form.
+
+\section{Flattening a tree}
+\label{sec:ch06-flattening-tree}
+
+Consider the assignment \code{x = a + b * c} with \code{a} holding $2$, \code{b} holding $3$, and \code{c} holding $4$.
+The tree nests the multiplication inside the addition, so an optimizer must dig to find the inner operation.
+The flat form names each intermediate value and lists one operation per line.
+\begin{irlisting}
+t1 = b * c;
+t2 = a + t1;
+x = t2
+\end{irlisting}
+Each line does exactly one thing: multiply, add, or copy.
+The fresh names \code{t1} and \code{t2} are \term{temporaries}, which are compiler-generated variables that never appear in the source.
+Evaluating the three lines in order gives \code{t1} the value $12$, \code{t2} the value $14$, and \code{x} the value $14$.
+The tree and the flat list compute the same result through the same operations in the same order.
+What changed is only the packaging: nesting became sequencing, and implicit intermediate values became named ones.
+Control constructs flatten the same way by naming the places where execution continues.
+An \code{if} becomes a conditional branch to two labeled instruction runs followed by a join.
+A \code{while} becomes a label, a conditional exit branch, a body run, and a backward jump.
+Table~\ref{tab:ch06-opcodes} lists the instruction set Mini lowering uses, with the effect of each opcode.
+\begin{table}
+\caption{Three-address instructions used by Mini lowering with the effect of each opcode.}
+\label{tab:ch06-opcodes}
+\centering
+\begin{tabular}{ll}
+\toprule
+Instruction & Effect \\
+\midrule
+\code{t = a op b} & applies one arithmetic or comparison to named values \\
+\code{t = a} & copies one named value or constant \\
+\code{t = const} & materializes a literal integer \\
+\code{label L} & marks a position that branches can target \\
+\code{br c, L1, L2} & continues at \code{L1} if \code{c} is true, else \code{L2} \\
+\code{jmp L} & continues unconditionally at \code{L} \\
+\code{print a} & appends the named value to the output \\
+\bottomrule
+\end{tabular}
+\end{table}
+Every instruction mentions its operands by name rather than by nesting.
+That uniformity is the whole point: an analysis can walk one list and see every operation, every value, and every transfer of control.
+\section{Lowering expressions and statements}
+\label{sec:ch06-lowering}
+
+Lowering walks the tree and appends instructions to a growing list.
+Expression lowering takes a tree node and returns the name holding its value, emitting instructions for any nested operations first.
+A number emits a materialization into a fresh temporary.
+A variable needs no instruction since its name already holds the value.
+An addition lowers its left child to a name, lowers its right child to a name, and emits one \code{add} into a fresh temporary.
+Statement lowering takes a tree node and two labels for normal and abnormal continuation, though Mini needs only the normal one.
+An assignment lowers its right-hand side to a name and emits a copy into the target.
+A print lowers its operand and emits a print of the resulting name.
+Conditionals and loops emit the branch and label skeleton around recursively lowered bodies.
+Figure~\ref{fig:ch06-lowering-stages} shows the three stages as a pipeline of blocks.
+\begin{figure}
+\centering
+\begin{tikzpicture}[node distance=2.2cm]
+\node[basic block] (tree) {checked tree};
+\node[basic block, right of=tree] (flat) {flat list};
+\node[basic block, right of=flat] (split) {labeled blocks};
+\draw[cfg edge] (tree) -- node[above, font=\sffamily\scriptsize] {lower} (flat);
+\draw[cfg edge] (flat) -- node[above, font=\sffamily\scriptsize] {split} (split);
+\end{tikzpicture}
+\caption{Lowering flattens the checked tree into one list and then splits the list at labels into blocks.}
+\label{fig:ch06-lowering-stages}
+\end{figure}
+The first arrow runs the lowering walk and produces one flat instruction list.
+The second arrow cuts that list at every label and jump target to form the blocks that the next chapter connects into a graph.
+Keeping the two steps separate matters because optimizations apply at different levels.
+Peephole cleanup works on the flat list, while anything involving branches needs the blocks.
+A temporary is fresh by construction: a counter supplies \code{t1}, \code{t2}, and so on, and no source variable ever collides with them.
+Labels are fresh the same way, drawn from a second counter.
+Freshness guarantees that lowering one subtree can never disturb the values of another.
+Temporaries also make value flow visible to later passes.
+A use of \code{t3} refers to exactly the instruction that defined \code{t3}, because no other instruction ever assigns that name.
+Source variables lack this property: \code{x} may be assigned in many places, so finding which assignment reaches a use requires analysis.
+This single-assignment discipline for temporaries previews static single assignment, which a later chapter adopts for all values.
+Until then, temporaries give optimizers a convenient subset of names that already behave simply.
+Reusing a temporary for two unrelated values would save names but destroy this property.
+Lowering therefore spends names freely and leaves reuse to a later copy-coalescing pass that can prove each reuse safe.
+
+\section{The lowering algorithm}
+\label{sec:ch06-lowering-algorithm}
+
+Algorithm~\ref{alg:ch06-lower} lowers Mini expressions to three-address code with fresh temporaries.
+\begin{algorithm}
+\caption{Lowering Mini expressions to three-address code.}
+\label{alg:ch06-lower}
+\begin{pseudocode}
+\Require expression tree node $N$, instruction list $C$, counters for temporaries and labels
+\Ensure name holding the value of $N$ with its computation appended to $C$
+\Function{Lower}{$N, C$}
+\If{$N$ is a constant}
+\State make a fresh temporary, emit a materialization, and \Return it
+\ElsIf{$N$ is a variable}
+\State \Return the resolved binding identifier with $C$ unchanged
+\ElsIf{$N$ is an operator node}
+\State lower the left child to a name $A$
+\State lower the right child to a name $B$
+\State make a fresh temporary $T$, emit one operation $T = A$ op $B$, and \Return $T$
+\EndIf
+\EndFunction
+\end{pseudocode}
+\end{algorithm}
+The algorithm assumes the tree is checked, so every variable is bound and every operator has correctly kinded children.
+Distinct declarations need distinct IR identities even when they share a source spelling; otherwise lowering destroys lexical shadowing.
+Mini expressions do not assign to variables, so a name returned for the left operand remains valid while the right operand is evaluated.
+An extension with effectful expressions must instead capture values whose storage can change during sibling evaluation.
+It guarantees that the returned name holds the value of $N$ after the appended instructions run in order.
+Lowering children before emitting the parent operation preserves the evaluation order of the tree exactly.
+Each operator node emits exactly one computation instruction plus whatever its children emit.
+Constants and copies are explicit rather than folded, because later simplification passes deserve their own clearly stated rules.
+Statement lowering follows the same pattern with labels: it threads the instruction list through each child and emits branches around the results.
+The conditional case makes two fresh labels for the two arms plus a join label, and the loop case makes a head label plus an exit label.
+
+\section{Worked example}
+\label{sec:ch06-worked-example}
+
+We now lower two statements completely by hand and count the results.
+\begin{irlisting}
+x = (a + b) * (c - d);
+if x > 0 then print x else print 0
+\end{irlisting}
+Suppose the environment binds \code{a} to $1$, \code{b} to $2$, \code{c} to $10$, and \code{d} to $4$.
+Lowering the expression starts with the left sum: no instructions for the variables, then \code{t1 = a + b}.
+The right difference gives \code{t2 = c - d}.
+The outer product gives \code{t3 = t1 * t2}.
+The assignment gives \code{x = t3}.
+That is $4$ instructions with $3$ fresh temporaries for the first statement.
+Executing them yields \code{t1} equal to $3$, \code{t2} equal to $6$, \code{t3} equal to $18$, and \code{x} equal to $18$.
+Following the literal-materialization rule, lowering the test emits \code{t4 = 0} and \code{t5 = x > t4}, which is true.
+It emits a branch on \code{t4} to the arm labels, one print per arm, and a join label.
+The true arm emits \code{print x} and a jump to the join; the false arm emits \code{t6 = 0} followed by \code{print t6} and falls through.
+The result uses three labels (two arms and one join), six temporaries, and eleven executable instructions, excluding labels.
+Running it prints $18$ and leaves \code{x} at $18$.
+Each of the four source operators produces one computation instruction; the two literal occurrences produce the other two temporaries.
+
+\section{Implementation notes}
+\label{sec:ch06-implementation}
+
+Instructions are usually stored as records in a resizable array or a doubly linked list.
+Arrays give compact iteration and cheap indexing for analyses that sweep the whole list.
+Linked lists give cheap insertion for passes that add or remove instructions while walking.
+Many compilers use both views: a list for editing and a cached array for sweeping, rebuilt when the list changes.
+Operand names are small integers rather than strings in any serious implementation.
+A symbol table maps source names to numbers once, and temporaries take numbers from a range that source names never use.
+This numbering makes equality a single integer comparison and keeps use-def chains cheap to maintain.
+Constants may be stored inline in the instruction or in a shared table depending on how often passes compare them.
+The running time of lowering is $O(V)$, where $V$ is the number of checked tree nodes.
+Each node is visited once, emits a bounded number of instructions, and allocates at most one temporary and a share of at most two labels.
+Memory use is $O(I)$, where $I$ is the number of emitted instructions, plus the input tree while lowering runs.
+Production intermediate forms add explicit types on every temporary, source positions on every instruction, and memory operations that this chapter omits.
+Typed temporaries let later passes check their own output instead of trusting it.
+Positions keep diagnostics precise after the source text is long gone.
+A common pitfall is reusing one counter for temporaries and labels, which eventually collides a value name with a label name.
+Another is emitting a conditional branch before lowering its test, which inverts the evaluation order the tree promised.
+Both are avoided by generating each name exactly once at the point its value becomes known.
+\begin{ccnote}[One operation per line]
+The three-address discipline exists so that every analysis sees every operation in order.
+Any lowering that hides two operations inside one instruction owes the rest of the compiler a justification for the exception.
+\end{ccnote}
+
+\section{Exercises}
+\label{sec:ch06-exercises}
+
+\begin{enumerate}
+\item \label{ex:ch06-lower-count} Lower \code{y = a * b + c * d;} with Algorithm~\ref{alg:ch06-lower}. List every emitted instruction, count the temporaries, and evaluate the result with \code{a} at $2$, \code{b} at $3$, \code{c} at $4$, and \code{d} at $5$. Confirm the value $26$ and exactly $3$ temporaries.
+\item \label{ex:ch06-while-shape} Lower \code{while n > 0 do n = n - 1;} by hand. Draw the labels, branches, and join in the style of Table~\ref{tab:ch06-opcodes} and count the instructions. State how many labels are fresh and which instructions the loop body contributes.
+\item \label{ex:ch06-order-proof} Argue that Algorithm~\ref{alg:ch06-lower} preserves the evaluation order of the tree for an expression with two nested operators. Give a concrete two-operator program where emitting the parent operation before a child would print a different result, and show both orders.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch06-further-reading}
+
+Appel introduces intermediate representations as the bridge between checked trees and machine-oriented analysis.
+That bridge is exactly the role the flat list plays here, see~\cite{appel-1998-modern}.
+Morgan shows how backend engineering depends on a clean, uniform instruction form for selection, scheduling, and allocation, see~\cite{morgan-1998-optimizing}.
+Safonov explains why each lowering step should preserve meaning observably, so that testing can check every representation against the interpreter, see~\cite{safonov-2010-trustworthy}.
+The C language definition illustrates how source-level evaluation rules constrain every legal intermediate form of a real language, see~\cite{wg14-2011-c11}.

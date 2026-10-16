@@ -1,0 +1,84 @@
+\chapter{Building IR Safely}
+\label{ch:pebble-builders}
+
+A construction interface is not a verifier with fewer checks.
+Its job is to make ordinary construction convenient while preventing local mistakes from corrupting storage.
+Some legal programs require temporary holes: the header of a loop refers to a value that its latch has not yet constructed.
+The interface must admit that state without letting execution mistake it for a complete program.
+
+\section{Construction and verified states}
+\label{sec:pebble-building-state}
+\code{pir\_init} creates an empty object.
+\code{pir\_block} appends a block and returns its index, or the distinct failure sentinel \code{PIR\_BLOCKS}.
+\code{pir\_value} appends a value in an existing, unterminated block and returns its nonzero ID.
+\code{pir\_term} sets or replaces the block terminator.
+The final operation of construction is \code{pir\_verify}.
+
+The two ID spaces deliberately have different failure conventions.
+Zero is a valid block ID and an invalid value ID.
+A client that writes \enquote{if the block ID is zero, fail} rejects the entry block and may accept the actual failure sentinel.
+The tests check block identities explicitly rather than converting IDs to booleans.
+
+\section{Build the running expression}
+\label{sec:pebble-build-example}
+Algorithm~\ref{alg:pebble-build-expression} constructs the specimen in source evaluation order.
+Its seven values are input, constant 7, the first addition, constants 3 and 5, their addition, and the multiplication.
+The return consumes value 7.
+There is no separate copy instruction for each source subexpression because each computed value already has an ID.
+
+\begin{algorithm}[htbp]
+\caption{Building the running expression with checked allocation.}
+\label{alg:pebble-build-expression}
+\begin{pseudocode}
+\Require fresh temporary function $F$
+\Ensure verified expression function, or failure before publication
+\State create entry block 0, checking its block sentinel
+\State $v_1\gets input$; $v_2\gets const\ 7$
+\State $v_3\gets add\ v_1,v_2$
+\State $v_4\gets const\ 3$; $v_5\gets const\ 5$
+\State $v_6\gets add\ v_4,v_5$; $v_7\gets mul\ v_3,v_6$
+\State reject if any returned value ID is zero
+\State terminate block 0 with $ret\ v_7$
+\State verify $F$ before publishing it
+\end{pseudocode}
+\end{algorithm}
+
+The source compiler in the repository generalizes this pattern with recursive descent.
+It always emits input first, even when the expression is constant.
+Dead-code elimination later removes that unused input.
+The front end therefore has one simple rule instead of an early special case for every constant-only program.
+
+\section{Backpatching a loop}
+\label{sec:pebble-backpatch}
+The loop fixture first allocates blocks for entry, header, body, and exit.
+It creates a header phi with the entry operand filled and the latch operand temporarily zero.
+It then creates the body increment, fills the pending operand, increments the revision, and verifies the complete function.
+No analysis is published while that hole exists.
+This is \term{backpatching}: recording an obligation now and resolving it when the referenced object becomes available.
+
+The public teaching structs allow the fixture to perform the backpatch directly.
+A production library should hide that access behind a construction token or an edit session that records the pending edges and refuses to seal while obligations remain.
+Do not claim that the current builders make every representable C object valid; they make bounded construction possible, and the verifier establishes validity afterward.
+
+\section{Diagnostics as an interface}
+\label{sec:pebble-diagnostics}
+Failures return a status and a bounded diagnostic string.
+The current messages identify a category such as \enquote{operand does not dominate its use}.
+They do not yet carry source spans, value IDs, or an explanation path through the graph.
+That is sufficient for the tests, but a user-facing compiler should attach the failed value and block, retain source locations from construction, and display the original use alongside its unavailable definition.
+
+Local allocation is constant time.
+A successful expression build takes linear time in syntax-tree size before verification, with recursion bounded by the parser's explicit nesting limit.
+Whole-function transaction copying costs the function object's storage size, including unused capacity in this fixed-array version.
+That copying cost is a deliberate price for failure atomicity.
+
+\section{Exercises}
+\label{sec:pebble-six-exercises}
+\begin{enumerate}
+\item \label{ex:pebble-builder-order} Why does appending a value after installing a terminator fail, although replacing that terminator is permitted?
+\item \label{ex:pebble-pending-phi} A loop is verified before its latch operand has been backpatched. Which invariant rejects it, and why must a zero operand not be interpreted as constant zero?
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:pebble-six-reading}
+Appel's treatment of intermediate-code construction gives useful context for separating translation bookkeeping from later analysis~\cite{appel-1998-modern}.

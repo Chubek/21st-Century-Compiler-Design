@@ -1,0 +1,174 @@
+\chapter{Dominance and Loops}
+\label{ch:dominance-loops}
+
+Knowing the shape of the graph is not the same as understanding it.
+An optimizer must answer sharper questions: does every path to a block pass through the loop test, and which blocks belong to the loop itself.
+This chapter defines \term{dominance}, computes it with a simple fixed-point iteration, and uses it to identify loops exactly.
+Every loop optimization in the rest of the book rests on the two definitions given here.
+
+\section{Who must run first}
+\label{sec:ch08-must-run-first}
+
+Consider a test block that guards a loop body.
+Intuitively the test runs before each body iteration on every possible execution.
+Dominance makes that intuition precise: a block $A$ \term{dominates} a block $B$ when every path from the entry to $B$ passes through $A$.
+We write $A \in \dom(B)$ for the set of dominators of $B$.
+Every block dominates itself, since the trivial path from the entry that ends at $B$ trivially passes through $B$ only when reached, and the entry dominates everything because every path starts there.
+The interesting cases sit between: in a loop, the head dominates the body, but the body never dominates the head.
+Strict dominance excludes the block itself, and the \term{immediate dominator} $\idom(B)$ is the closest strict dominator of $B$.
+Linking every block except the entry to its immediate dominator forms the \term{dominator tree}, which summarizes all must-pass-through facts in $N - 1$ edges for $N$ blocks.
+Figure~\ref{fig:ch08-cfg-domtree} shows a five-block loop graph beside its dominator tree.
+\begin{figure}
+\centering
+\begin{tikzpicture}[node distance=1.5cm]
+\node[basic block] (e) {B1 entry};
+\node[basic block, below of=e] (h) {B2 head};
+\node[basic block, below left of=h, xshift=-0.8cm] (a) {B3 left};
+\node[basic block, below right of=h, xshift=0.8cm] (b) {B4 right};
+\node[basic block, below of=h, yshift=-2.2cm] (x) {B5 exit};
+\draw[cfg edge] (e) -- (h);
+\draw[cfg edge] (h) -- (a);
+\draw[cfg edge] (h) -- (b);
+\draw[cfg edge] (a) -- (x);
+\draw[cfg edge] (b) -- (x);
+\draw[back edge] (x) -- (h);
+\end{tikzpicture}
+\caption{A five-block loop graph whose head dominates both arms while neither arm dominates the other.}
+\label{fig:ch08-cfg-domtree}
+\end{figure}
+The entry reaches the head, the head branches to two arms, both arms join at the exit block, and the exit returns to the head along the dashed edge.
+The head dominates both arms because every path from the entry to either arm passes through it.
+Neither arm dominates the other because each is reachable without the other.
+The exit block is dominated by the head and the entry but by neither arm.
+Table~\ref{tab:ch08-domsets} records the full dominator sets that Section~\ref{sec:ch08-worked-example} computes by hand.
+\begin{table}
+\caption{Dominator sets for the five-block graph of Figure~\ref{fig:ch08-cfg-domtree}.}
+\label{tab:ch08-domsets}
+\centering
+\begin{tabular}{ll}
+\toprule
+Block & Dominators \\
+\midrule
+B1 entry & B1 \\
+B2 head & B1, B2 \\
+B3 left & B1, B2, B3 \\
+B4 right & B1, B2, B4 \\
+B5 exit & B1, B2, B5 \\
+\bottomrule
+\end{tabular}
+\end{table}
+Each row contains the block itself plus exactly the blocks that every entry path must cross.
+The head appears in every row except the entry because all flow passes through it.
+The arms appear only in their own rows, which is the set-theoretic way of saying they are optional relative to each other.
+\section{Computing dominators}
+\label{sec:ch08-computing-dominators}
+
+Dominators are the greatest solution of a simple system of set equations.
+The entry is dominated only by itself, and every other block is dominated by itself plus the blocks that dominate all of its predecessors.
+Intuitively, a block $A$ survives in $\dom(B)$ only when $A$ equals $B$ or when every predecessor already contains $A$.
+Algorithm~\ref{alg:ch08-dom} starts with an overestimate and removes blocks until nothing changes.
+\begin{algorithm}
+\caption{Iterative computation of dominator sets.}
+\label{alg:ch08-dom}
+\begin{pseudocode}
+\Require control-flow graph with entry $E$ and reachable block set $V$
+\Ensure $\dom(B)$ for every block $B$
+\Function{Dominators}{$E, V$}
+\State set $\dom(E)$ to $\{E\}$ and every other $\dom(B)$ to $V$
+\State $changed \gets true$
+\While{$changed$}
+\State $changed \gets false$
+\ForAll blocks $B$ other than $E$
+\State $new \gets \{B\} \cup \bigcap_{P\in\Pred(B)}\dom(P)$
+\If{$new \neq \dom(B)$} \State $\dom(B)\gets new$; $changed\gets true$ \EndIf
+\EndFor
+\EndWhile
+\State \Return all $\dom(B)$ sets
+\EndFunction
+\end{pseudocode}
+\end{algorithm}
+The algorithm assumes every block is reachable from the entry along at least one path.
+Exclude unreachable blocks and their edges first; an unreachable cycle can have nonempty predecessor sets and still have no path from entry.
+It guarantees the greatest fixed point of the equations, which coincides with the path-based definition of dominance.
+Starting from the full set $V$ everywhere means the first updates only remove blocks, never add them.
+Removal is monotone: once a block leaves a set it never returns, so the loop must terminate.
+Each iteration processes every edge once to intersect predecessor sets, exactly like the propagation pattern of the previous chapter.
+Production compilers often replace this iteration with the Lengauer-Tarjan method, which is faster on large graphs.
+% TODO(cite): add the primary reference for the Lengauer-Tarjan dominator algorithm when the bibliography grows.
+The iterative version stays because it fits on one page, obviously matches the definition, and is fast enough for the graphs in this book.
+
+\section{Natural loops}
+\label{sec:ch08-natural-loops}
+
+Dominance turns the informal idea of a loop into a checkable definition.
+A \term{back edge} is an edge from a block $T$ to a block $H$ where $H$ dominates $T$.
+The target $H$ is the \term{loop header} and the source $T$ is the \term{loop tail}.
+The \term{natural loop} of that edge contains $H$, $T$, and every block that can reach $T$ without passing through $H$.
+It is found by walking backward from $T$ along predecessors and stopping at $H$.
+In Figure~\ref{fig:ch08-cfg-domtree} the dashed edge runs from $B5$ to $B2$, and Table~\ref{tab:ch08-domsets} shows $B2$ in $\dom(B5)$.
+The edge therefore qualifies, with header $B2$ and tail $B5$.
+Walking backward from $B5$ reaches $B3$ and $B4$ through the join, then $B2$ itself, so the natural loop is $\{B2, B3, B4, B5\}$.
+That set matches the visual loop: the head, both arms, and the exit block that jumps back.
+Some graphs defeat this definition.
+An \term{irreducible} graph has a loop with two entries, so no single header dominates the whole loop.
+No back edge qualifies and the loop has no natural loop under this definition.
+Such graphs arise from unstructured jumps and from some generated code.
+Compilers either restructure the graph first or analyze irreducible regions with more general methods.
+Mini programs built from structured statements always produce reducible graphs, so every loop the Mini front end creates has a natural loop.
+
+\section{Worked example}
+\label{sec:ch08-worked-example}
+
+We now run Algorithm~\ref{alg:ch08-dom} on Figure~\ref{fig:ch08-cfg-domtree} by hand.
+The predecessor sets are $\Pred(B1) = \emptyset$, $\Pred(B2) = \{B1, B5\}$, and $\Pred(B3) = \{B2\}$.
+In addition $\Pred(B4) = \{B2\}$ and $\Pred(B5) = \{B3, B4\}$.
+Initialization sets $\dom(B1) = \{B1\}$ and every other set to all five blocks $\{B1, B2, B3, B4, B5\}$.
+Round one updates in order: $\dom(B2)$ becomes $\{B2\}$ union the intersection of $\{B1\}$ and all five blocks, which is $\{B1, B2\}$.
+Next $\dom(B3)$ becomes $\{B3\}$ union $\dom(B2)$, which is $\{B1, B2, B3\}$.
+Next $\dom(B4)$ becomes $\{B4\}$ union $\dom(B2)$, which is $\{B1, B2, B4\}$.
+Next $\dom(B5)$ becomes $\{B5\}$ union the intersection of $\dom(B3)$ and $\dom(B4)$, which share $\{B1, B2\}$, giving $\{B1, B2, B5\}$.
+Round two recomputes $\dom(B2)$ as $\{B2\}$ union the intersection of $\dom(B1)$ and $\dom(B5)$.
+Since $\dom(B1) = \{B1\}$ and $\dom(B5) = \{B1, B2, B5\}$, the result is $\{B1, B2\}$, unchanged.
+The remaining blocks recompute identically: $B3$ stays $\{B1, B2, B3\}$, $B4$ stays $\{B1, B2, B4\}$, and $B5$ stays $\{B1, B2, B5\}$.
+No set changed in round two, so the iteration stops after $2$ rounds with the sets of Table~\ref{tab:ch08-domsets}.
+The immediate dominators read off directly: $\idom(B2) = B1$, $\idom(B3) = B2$, $\idom(B4) = B2$, and $\idom(B5) = B2$.
+The dominator tree is therefore $B1$ above $B2$ above $B3$, $B4$, and $B5$ as three children.
+The back-edge check then finds exactly one natural loop $\{B2, B3, B4, B5\}$, as claimed in Section~\ref{sec:ch08-natural-loops}.
+The hand computation uses $5$ blocks, $6$ edges, $2$ rounds, and $8$ set intersections in total.
+
+\section{Implementation notes}
+\label{sec:ch08-implementation}
+
+Dominator sets are usually bit vectors with one bit per block.
+Intersection becomes a loop of machine-word AND operations, and equality becomes a word comparison.
+Numbering blocks in reverse postorder makes predecessors settle before their successors on most graphs, so convergence takes very few rounds.
+Two or three rounds suffice for structured code, and the book graphs converge in at most as many rounds as the deepest nesting.
+The running time of the naive iteration is $O(R \cdot (N + E) \cdot W)$, where $R$ is the number of rounds, $N$ is the block count, $E$ is the edge count, and $W$ is the cost of one set intersection.
+With bit vectors $W$ is $N$ divided by the machine word size, and $R$ is bounded by $N$ in the worst case but tiny in practice.
+Memory use is $O(N^2)$ bits for one set per block, which is one bit vector of length $N$ for each of the $N$ blocks.
+Immediate dominators are derived by comparing set sizes: $\idom(B)$ is the strict dominator with the largest set.
+Natural loops are collected by the backward walk described in Section~\ref{sec:ch08-natural-loops}, visiting each loop edge once.
+A common bug is running the iteration before deleting unreachable blocks, which lets dead predecessors shrink live dominator sets incorrectly.
+Another is forgetting that the entry needs no predecessors: seeding $\dom(E)$ to $\{E\}$ and never updating it keeps the base case stable.
+Later chapters consume these results directly: loop-invariant motion needs headers, construction of static single assignment needs dominance frontiers, and control dependence needs the postdominator mirror image.
+\begin{ccwarning}[Dominance needs reachability]
+The equations assume every block is reachable from the entry.
+Delete unreachable blocks before iterating, or their phantom predecessors will corrupt the sets of live code.
+\end{ccwarning}
+
+\section{Exercises}
+\label{sec:ch08-exercises}
+
+\begin{enumerate}
+\item \label{ex:ch08-recompute} Recompute Table~\ref{tab:ch08-domsets} with the update order $B5, B4, B3, B2$ instead of the order used in Section~\ref{sec:ch08-worked-example}. Give the sets after each round, count the intersections, and confirm the same fixed point in the same number of rounds.
+\item \label{ex:ch08-find-loops} Add an edge from $B4$ to $B3$ in Figure~\ref{fig:ch08-cfg-domtree} and rerun Algorithm~\ref{alg:ch08-dom}. List the back edges, the header and tail of each, and the natural loop of each. State which loops are nested and which share their header.
+\item \label{ex:ch08-irreducible} Draw a three-block graph with entry $B1$ branching to $B2$ and $B3$ plus edges $B2$ to $B3$ and $B3$ to $B2$. Compute all dominator sets, show that neither cycle edge qualifies as a back edge, and explain why the cycle has no natural loop.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch08-further-reading}
+
+Appel uses dominators and loops as the scaffolding for dataflow analysis and code motion, which shows why this chapter precedes all optimization chapters, see~\cite{appel-1998-modern}.
+Morgan covers loop handling as a practical backend concern, where headers and back edges decide what the optimizer may safely move, see~\cite{morgan-1998-optimizing}.
+Safonov treats such structural analyses as checkable claims about the program rather than folklore about its shape, see~\cite{safonov-2010-trustworthy}.
+The C language definition specifies the loop statements whose lowering produces the back edges analyzed here, see~\cite{wg14-2011-c11}.

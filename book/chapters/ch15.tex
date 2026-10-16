@@ -1,0 +1,104 @@
+\chapter{Lowering and Execution}
+\label{ch:pebble-lowering}
+
+An interpreter can implement a phi directly because it remembers the predecessor block.
+A simpler register machine should not need to know what a phi is.
+Lowering turns path-dependent selection into ordinary moves executed on the selected edge, then translates block targets into instruction addresses.
+
+\section{A target with explicit storage}
+\label{sec:pebble-vm}
+The VM has input, constant, add, multiply, compare, move, jump, branch, and return instructions.
+Registers 1 through 128 correspond to IR value IDs.
+Registers 129 through 256 are scratch locations used to sequence edge copies.
+There is no physical register allocation: this is a virtual-register target with enough bounded storage for every value.
+The target is useful for validating lowering before instruction constraints and spills complicate the argument.
+
+The VM decoder is not a serialized-bytecode loader.
+\code{pir\_vm\_run} executes an initialized \code{PirVm} normally produced by verified lowering.
+It checks opcode, register, immediate, and target bounds while executing, but it does not independently prove that arbitrary hand-written VM code defines each register before use.
+Those static properties are guaranteed by the lowering contract for its output.
+
+\section{Copy on the edge, not on both paths}
+\label{sec:pebble-edge-lowering}
+For each edge $P\to B$, collect the incoming operand of every phi in $B$ labeled by $P$.
+The required assignment is a parallel bundle from those sources to the phi result registers.
+Algorithm~\ref{alg:pebble-edge-copies} sequences the bundle without cycle detection by using one scratch slot per destination.
+It spends extra moves to make the proof simple.
+
+\begin{algorithm}[htbp]
+\caption{Lowering a phi bundle into two phases of moves.}
+\label{alg:pebble-edge-copies}
+\begin{pseudocode}
+\Require verified edge $P\to B$, distinct scratch register $s_v$ for each phi $v$ in $B$
+\Ensure sequential moves implement the edge's parallel assignment
+\ForAll{phis $v$ in $B$}
+\State emit $s_v\gets$ the source register selected by predecessor $P$
+\EndFor
+\ForAll{phis $v$ in $B$}
+\State emit $v\gets s_v$
+\EndFor
+\State emit a jump to $B$'s first ordinary target instruction
+\end{pseudocode}
+\end{algorithm}
+
+All sources are read before any destination is overwritten, so the resulting bundle preserves swaps and longer cycles.
+For the swap fixture, the back edge first saves old \code{a} and old \code{b}, then publishes both new values.
+Two loop iterations return the initial pair rather than collapsing it to one repeated value.
+The test exercises the IR interpreter and the lowered VM against the same direct swap expectation.
+
+For a conditional branch, lowering emits two edge-specific stubs.
+The VM branch selects one stub, which performs only that edge's copies and jumps to its destination.
+Thus even a critical edge has its own execution point without modifying the source IR graph.
+Figure~\ref{fig:pebble-edge-stubs} shows the arrangement.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=11mm and 10mm]
+\node[basic block] (b) {VM branch};
+\node[basic block,below left=of b] (t) {True-edge copies};
+\node[basic block,below right=of b] (f) {False-edge copies};
+\node[basic block,below=of t] (bt) {True target body};
+\node[basic block,below=of f] (bf) {False target body};
+\draw[cfg edge] (b)--(t); \draw[cfg edge] (b)--(f);
+\draw[cfg edge] (t)--(bt); \draw[cfg edge] (f)--(bf);
+\end{tikzpicture}
+\caption{Target-side edge stubs execute only the copy bundle selected by the branch.}
+\label{fig:pebble-edge-stubs}
+\end{figure}
+
+\section{Addresses after layout}
+\label{sec:pebble-fixup}
+Ordinary instructions are emitted block by block.
+Each block records its first target instruction index, before its ordinary instructions or terminator are emitted.
+Forward jumps temporarily hold a block number.
+After all blocks are laid out, a fixup pass replaces every such number with the recorded instruction index.
+Conditional stub addresses are known during emission and already use instruction indices.
+The distinction is internal to the builder; no partly fixed-up VM is published.
+
+For the optimized running expression there are five value-producing instructions and one return, hence six dispatches.
+The target returns 128 for input 9 at budget six and exhausts at budget five.
+This test checks the target's fuel boundary separately from the IR interpreter's one-block boundary.
+
+\section{What comes after this target}
+\label{sec:pebble-target-cost}
+For $N$ allocated IR slots, $B$ blocks, and $P$ live phis, the current scans cost $O(BN)$.
+Each phi has two incoming edges and produces two moves per edge, so edge copying emits $4P$ moves.
+Ordinary instructions contribute at most $N-P$, and terminator scaffolding contributes at most $3B$ instructions.
+The loose total bound is therefore $N+3P+3B$, before any target cleanup.
+Capacity checks still guard every emission so changes to these assumptions cannot silently corrupt storage.
+
+A physical target would add register classes, allocation, spills, calling conventions, and machine encodings.
+It should reuse the verified edge-copy semantics rather than inventing a second interpretation of phi selection.
+Linear scan is a reasonable next allocation experiment, but its interval and instruction-constraint assumptions need their own contract~\cite{poletto-1999-linear-scan}.
+
+\section{Exercises}
+\label{sec:pebble-fifteen-exercises}
+\begin{enumerate}
+\item \label{ex:pebble-copy-bundle} Sequence the parallel bundle $a\gets b$, $b\gets a$, $c\gets a$ using distinct scratch locations. Trace it from $(a,b,c)=(4,9,0)$.
+\item \label{ex:pebble-fixup} A forward jump names block 3, which is eventually laid out at instruction 27. Explain what must be changed at fixup and why block 3 is not itself a valid final address by convention.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:pebble-fifteen-reading}
+Appel provides a complete backend context for the transition from abstract values to machine storage~\cite{appel-1998-modern}.
+Poletto and Sarkar describe linear scan's allocation strategy and its compilation-cost motivation~\cite{poletto-1999-linear-scan}.

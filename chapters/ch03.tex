@@ -1,0 +1,206 @@
+\chapter{Lexical Analysis}
+\label{ch:lexical-analysis}
+
+Every compiler begins with raw characters and must decide where words start and end.
+Feeding characters directly to the parser tangles two different jobs: recognizing words and recognizing sentence structure.
+This chapter separates the first job into a \term{lexer}, also called a scanner, which converts the character stream into a stream of \term{tokens}.
+Each token pairs a kind, such as number or identifier, with the exact text that produced it and the position where it appeared.
+The parser of the next chapter then works on tokens and never looks at individual characters.
+
+\section{Words before sentences}
+\label{sec:ch03-words-before-sentences}
+
+Consider the Mini line \code{y = x * 10 + 3;}.
+A human reader sees six words at a glance: the name \code{y}, the symbol \code{=}, the name \code{x}, the symbol \code{*}, the number \code{10}, the symbol \code{+}, the number \code{3}, and the terminator \code{;}.
+That is actually eight words, and the ease of the mistake shows why scanning deserves explicit rules.
+Spaces carry no meaning in Mini beyond separating words that would otherwise merge.
+Removing all spaces gives \code{y=x*10+3;}, which must scan to the same eight tokens.
+The character sequence \code{10} is a single number token rather than two one-digit tokens.
+The name \code{x} and the number \code{10} stay distinct even though they touch the symbol \code{*} on both sides.
+A \term{lexeme} is the exact slice of source text that produced a token.
+The lexeme of the number token is the two-character string \code{10}, and its value is the integer $10$.
+Keeping lexemes lets later phases report errors with the original spelling and lets the parser convert number text to values exactly once.
+Table~\ref{tab:ch03-token-kinds} lists the token kinds of Mini with examples and the rule that recognizes each kind.
+\begin{table}
+\caption{Token kinds of Mini with example lexemes and recognition rules.}
+\label{tab:ch03-token-kinds}
+\centering
+\begin{tabular}{lll}
+\toprule
+Kind & Example lexemes & Recognition rule \\
+\midrule
+Identifier & \code{x}, \code{total2} & letter followed by letters or digits \\
+Number & \code{10}, \code{007} & one or more digits \\
+Operator & \code{+}, \code{<=}, \code{=} & longest match from the operator set \\
+Keyword & \code{if}, \code{while}, \code{print} & exact reserved spelling \\
+Punctuation & \code{;}, \code{(}, \code{)} & single fixed character \\
+End of input & none & position past the last character \\
+\bottomrule
+\end{tabular}
+\end{table}
+Keywords use the same characters as identifiers, so the table order matters.
+The scanner first gathers the longest run of letters and digits and then checks the reserved-word list.
+The lexeme \code{while} is therefore a keyword token, while \code{while2} is an identifier token.
+Similarly, \code{print} is a keyword but \code{printer} is an identifier.
+This two-step rule, gather then classify, keeps one code path for both cases.
+Numbers work the same way: the scanner gathers the longest digit run and converts it afterward.
+Leading zeros are allowed and carry no special meaning in Mini, so \code{007} denotes the integer $7$.
+\section{Longest match wins}
+\label{sec:ch03-longest-match}
+
+Operators create ambiguities that only a longest-match rule resolves cleanly.
+The characters \code{<=} could scan as \code{<} followed by \code{=}, or as the single operator \code{<=}.
+Mini chooses the single operator because the \term{maximal munch} rule says the scanner always takes the longest valid token at each position.
+The same rule groups \code{==} as one comparison rather than two assignments and keeps \code{!} separate where Mini has no \code{!=} operator.
+Maximal munch also explains why spaces sometimes matter to humans but never to the scanner.
+The input \code{x<=10} and the input \code{x <= 10} both yield the tokens \code{x}, \code{<=}, and \code{10}.
+In the first input the scanner still prefers \code{<=} over \code{<} because it looks ahead one character before committing.
+Figure~\ref{fig:visual-lexeme-spans} makes the consumed character ranges explicit.
+A half-open span $[b,e)$ includes the character at $b$ and excludes the character at $e$, so its length is $e-b$.
+Adjacent tokens can share an endpoint without sharing a character.
+
+\input{figures/lexeme-spans}
+
+Comments and whitespace are skipped by the same loop that emits tokens.
+Mini uses \code{\#} to start a comment that runs to the end of the line.
+The scanner discards comments and blank space silently but still counts lines and columns so that token positions stay accurate.
+Figure~\ref{fig:ch03-word-dfa} shows the scanner state machine for words as a small flowchart of states.
+\begin{figure}
+\centering
+\begin{tikzpicture}
+\node[basic block] (start) at (0,0) {start};
+\node[basic block] (word) at (3,1.2) {in word};
+\node[basic block] (num) at (3,-1.2) {in number};
+\node[basic block] (emitw) at (6.8,1.2) {emit id or keyword};
+\node[basic block] (emitn) at (6.8,-1.2) {emit number};
+\draw[cfg edge] (start) -- node[above, font=\sffamily\scriptsize] {letter} (word);
+\draw[cfg edge] (start) -- node[below, font=\sffamily\scriptsize] {digit} (num);
+\draw[cfg edge] (word) -- node[above, font=\sffamily\scriptsize] {other} (emitw);
+\draw[cfg edge] (num) -- node[below, font=\sffamily\scriptsize] {other} (emitn);
+\draw[back edge] (word) to[out=120,in=60,looseness=6]
+  node[above,font=\sffamily\scriptsize] {letter or digit} (word);
+\draw[back edge] (num) to[out=300,in=240,looseness=6]
+  node[below,font=\sffamily\scriptsize] {digit} (num);
+\end{tikzpicture}
+\caption{Word scanning stays in one state while word characters continue and emits a token when anything else appears.}
+\label{fig:ch03-word-dfa}
+\end{figure}
+The start state dispatches on the first character.
+Letters enter the word state and digits enter the number state.
+Each state loops on its continuing characters along the dashed edge and leaves when anything else appears.
+Leaving the word state emits either an identifier or a keyword depending on the reserved-word check.
+Operators need the same longest-match treatment with one or two characters of lookahead, which Section~\ref{sec:ch03-scanner} implements directly.
+
+\section{The scanner}
+\label{sec:ch03-scanner}
+
+Listing~\ref{lst:visual-decimal} implements the number-token component in C11.
+The caller supplies a character array and its length; a terminating null byte is not required.
+The cursor starts at the first digit and advances only after a successful scan.
+For the span in Figure~\ref{fig:visual-lexeme-spans}, it starts at $3$, reads $10$, and stops at $5$.
+The first nondigit belongs to the next token and remains unconsumed.
+
+\begin{listing}[htbp]
+  \inputminted{c}{example-code/visual-labs/decimal.c}
+  \caption{Checked decimal scanning leaves the cursor and value unchanged when no digits fit the host unsigned type.}
+  \label{lst:visual-decimal}
+\end{listing}
+
+The overflow test rearranges $10n+d\leq\code{UINT\_MAX}$ into a comparison that does not first perform the potentially overflowing multiplication.
+This helper bounds literals by the host \code{unsigned} range; a language with arbitrary-precision literals needs a different accumulator.
+A complete lexer should distinguish malformed input from overflow in its diagnostic, whereas the helper returns only success or failure.
+The tests in \code{example-code/visual-labs/} check leading zeros, token boundaries, the largest representable value, and overflow with unchanged outputs.
+
+Algorithm~\ref{alg:ch03-scan} turns the full source text into a token list in a single left-to-right pass.
+\begin{algorithm}
+\caption{Maximal-munch scanning of Mini source text.}
+\label{alg:ch03-scan}
+\begin{pseudocode}
+\Require source characters $S$ of length $L$
+\Ensure token list $T$ with kinds, lexemes, and positions, or a lexical error
+\Function{Scan}{$S$}
+\State set position $P$ to $0$ and token list $T$ to empty
+\While{$P$ is below $L$}
+\If{the character at $P$ is blank or begins a comment} \State advance past whitespace or the complete comment
+\ElsIf{the character at $P$ starts a word} \State gather the longest letter-and-digit run
+\State classify it as a keyword or an identifier and append the token
+\ElsIf{the character at $P$ is a digit} \State gather the longest digit run and append a number token
+\ElsIf{the character at $P$ starts an operator} \State take the longest valid operator and append it
+\Else \State \Return a lexical error naming the character and its position
+\EndIf
+\EndWhile
+\State append the end-of-input token and \Return $T$
+\EndFunction
+\end{pseudocode}
+\end{algorithm}
+The algorithm assumes the source is available as an indexed character array with known length.
+It assumes nothing about line structure, because line and column numbers are derived from the same scan.
+Each successful iteration advances $P$, including iterations that skip whitespace or comments; otherwise it reports an error.
+Check lookahead against $L$ and report an unterminated delimited comment at its opening position rather than searching past the buffer.
+The gather steps in the word and number cases correspond exactly to the looping edges of Figure~\ref{fig:ch03-word-dfa}.
+Classification after gathering implements the reserved-word check of Table~\ref{tab:ch03-token-kinds}.
+The operator case peeks at the next character to prefer two-character operators such as \code{<=} over their one-character prefixes.
+A character that starts nothing, such as \code{@} or an unassigned control character, produces a lexical error.
+The error names the offending character and its line and column so the programmer can find it immediately.
+Scanning stops at the first such error rather than guessing how the rest of the line was intended.
+\section{Worked example}
+\label{sec:ch03-worked-example}
+
+We now scan the line \code{sum = a1 + 24 * (b - 3);} completely by hand.
+The line has $24$ characters, counting the six blanks and the final semicolon.
+Positions below count from $0$ at the line start.
+Scanning begins at position $0$ with the letter \code{s}, so the scanner gathers the longest word \code{sum} over positions $0$ through $2$.
+The gathered word is not reserved, so position $3$ yields the identifier token \code{sum} spanning columns $0$--$2$.
+Position $3$ is blank and position $4$ holds \code{=}, which has no two-character extension in Mini, so position $4$ yields the operator token \code{=}.
+Position $6$ holds the letter \code{a} and gathers \code{a1} over positions $6$--$7$, yielding an identifier token.
+Position $9$ holds \code{+} with no longer match, yielding the operator token \code{+}.
+Position $11$ holds the digit \code{2} and gathers \code{24} over positions $11$--$12$, yielding a number token with value $24$.
+Position $14$ holds \code{*}, position $16$ holds \code{(}, position $17$ holds the identifier \code{b}, and position $19$ holds \code{-}.
+Position $21$ holds the digit \code{3}, yielding a number token with value $3$.
+Position $22$ holds \code{)} and position $23$ holds \code{;}.
+The full token list is therefore \code{sum}, \code{=}, \code{a1}, \code{+}, \code{24}, \code{*}, \code{(}, \code{b}, \code{-}, \code{3}, \code{)}, \code{;}, which is $12$ tokens plus the end-of-input marker.
+The scanner consumed $24$ characters, skipped $6$ blanks, gathered $3$ words or numbers, and matched $9$ single-character operators or punctuation marks.
+A second short trace checks longest match: the input \code{x<=10} has $5$ characters and yields $3$ tokens.
+The scanner sees \code{<} at position $1$, peeks at \code{=} in position $2$, and emits the single operator \code{<=} rather than two tokens.
+Without the peek it would emit \code{<} and \code{=}, and the parser would reject the result.
+These counts show the shape of the general cost analysis in Section~\ref{sec:ch03-implementation}: each character is examined a constant number of times.
+
+\section{Implementation notes}
+\label{sec:ch03-implementation}
+
+A hand-written scanner implements Algorithm~\ref{alg:ch03-scan} with a position index and a small helper for each token kind.
+Table-driven scanners store the transitions of Figure~\ref{fig:ch03-word-dfa} in arrays and share one driver loop across many languages.
+Hand-written scanners are easier to debug and give better error messages, while table-driven scanners are easier to generate from declarative rules.
+Production compilers use both: generated tables for large keyword sets and hand-written code for tricky cases such as string escapes and number bases.
+Mini needs only the hand-written form, since its token set fits on one page.
+Buffering matters when inputs are large.
+Reading the whole file into memory is simplest and easily fast enough for typical sources.
+Streaming with a two-block buffer and sentinel characters avoids rescanning at buffer boundaries for very large inputs.
+Either way the scanner must track line starts so that columns in error messages are correct after skipped comments.
+The running time is $O(C)$, where $C$ is the number of source characters.
+Each character is classified once, gathered at most twice (once while extending a lexeme and once while checking the following character), and never revisited.
+Memory use beyond the input is $O(K)$, where $K$ is the length of the longest lexeme, plus the output token list itself.
+Keyword-table probing takes expected constant time after hashing; reading and hashing a lexeme of length $K$ costs $O(K)$ unless its hash was accumulated during scanning.
+A common pitfall is forgetting the reserved-word check after gathering a word, which silently turns keywords into identifiers.
+Another is converting number lexemes with a routine that overflows on long digit runs; Mini implementations should reject or saturate runs that exceed the integer range with a clear diagnostic.
+\begin{ccwarning}[Tokens must round-trip positions]
+Every token must record the exact line and column where its lexeme began.
+A scanner that reports errors without positions forces every later phase to guess, and those guesses compound into useless messages.
+\end{ccwarning}
+
+\section{Exercises}
+\label{sec:ch03-exercises}
+
+\begin{enumerate}
+\item \label{ex:ch03-scan-line} Scan the line \code{while x2<=100 do x2 = x2 + 1;} by hand. List every token with its kind, lexeme, and character span. State how many characters were consumed, how many blanks were skipped, and where maximal munch changed the result.
+\item \label{ex:ch03-keyword-split} Explain why \code{printer} scans as one identifier while \code{print} scans as a keyword, using the gather-then-classify rule. Give two more Mini inputs where removing a single space changes the token stream and two where it does not.
+\item \label{ex:ch03-bad-char} Run Algorithm~\ref{alg:ch03-scan} on the input \code{x = 5 @ 6;} and write the exact lexical error it reports, including the character and its position. Then propose the recovery rule you would add for an interactive mode and argue why batch compilation should keep stopping instead.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch03-further-reading}
+
+Appel presents scanning as the first phase of a realistic compiler pipeline and shows how tokens feed parsing without character-level coupling, see~\cite{appel-1998-modern}.
+Morgan places lexical concerns inside the broader front-end engineering task, which explains why error positions and token interfaces matter as much as matching speed, see~\cite{morgan-1998-optimizing}.
+The C language definition pins down the analogous translation phases, trigraphs aside, with exact rules for how source characters become preprocessing tokens, see~\cite{wg14-2011-c11}.
+Safonov frames front-end correctness as part of overall compiler trustworthiness, which justifies rejecting bad characters loudly instead of guessing, see~\cite{safonov-2010-trustworthy}.

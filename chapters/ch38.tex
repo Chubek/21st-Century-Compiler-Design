@@ -1,0 +1,212 @@
+\chapter{Building and Measuring an Optimizing Compiler}\label{ch:building-measuring-optimizing-compiler}
+
+A collection of passes is not yet a compiler.
+Passes must run in an order that respects their contracts, share facts without corruption, and stop within budget.
+Then the result must be measured honestly, because an unverified speedup claim is a defect in the engineering record.
+This chapter assembles the pipeline and the measurement discipline together.
+We specify pass ordering, fact management, and a reproducible checklist that reports conditions instead of inventing numbers.
+
+\section{From Passes to a Pipeline}\label{sec:ch38-pipeline}
+
+A pipeline is a sequence of passes joined by contracts.
+Each pass declares what it needs, what it preserves, and what it establishes.
+The driver orders passes so every need is established earlier and no later pass silently breaks an earlier guarantee.
+Figure~\ref{fig:ch38-pipeline} shows the canonical shape used in this book.
+Front-end passes build a valid intermediate form.
+Middle-end passes analyze and transform in alternating layers.
+Back-end passes lower, allocate, and emit with machine facts checked at each step.
+Table~\ref{tab:ch38-ordering} lists common ordering rules with the defect each rule prevents.
+Analysis before transformation prevents stale facts from guiding rewrites.
+Cleanup before measurement prevents dead code from timing the benchmark.
+Lowering late prevents machine details from blocking portable optimization.
+Each rule exists because violating it once produced a real wrong-code or slow-code outcome.
+\term{Phase ordering} is the problem of choosing the sequence; \term{fact invalidation} is the discipline of dropping facts a transformation may have broken.
+A pass that moves stores must drop alias facts it cannot re-derive.
+A pass that splits edges must update dominance information or mark it stale.
+The safest policy recomputes cheap facts and versions expensive ones.
+Every fact carries the pass and revision that produced it.
+Any consumer checks the version before trusting the content.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=0.9cm and 1.2cm]
+\node[basic block] (fe) {front end\\ valid IR};
+\node[basic block, right=of fe] (mid) {middle end\\ analyze, transform};
+\node[basic block, right=of mid] (be) {back end\\ lower, allocate, emit};
+\node[basic block, below=of mid] (check) {contract checks\\ at each handoff};
+\draw[cfg edge] (fe) -- (mid);
+\draw[cfg edge] (mid) -- (be);
+\draw[cfg edge] (mid) -- (check);
+\draw[cfg edge] (check) -- (mid);
+\end{tikzpicture}
+\caption{Passes flow from language form through optimization to machine form with contract checks at each handoff, so ordering defects surface where they occur.}
+\label{fig:ch38-pipeline}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{Ordering rules pair each sequence constraint with the defect it prevents.}
+\label{tab:ch38-ordering}
+\begin{tabular}{lll}
+\toprule
+Rule & Order & Prevents \\
+\midrule
+Analyze then change & Facts before rewrites & Stale-fact miscompilation \\
+Clean then measure & Cleanup before timing & Dead-code timing noise \\
+Lower late & Machine detail last & Blocked portable passes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Managing Facts Across Passes}\label{sec:ch38-facts}
+
+Facts flow between passes through a shared structure with explicit ownership.
+Each analysis publishes its result with a version stamp.
+Each transformation declares which stamps it preserves, updates, or destroys.
+Algorithm~\ref{alg:ch38-pipeline-run} gives the driver loop that enforces this discipline.
+It assumes every pass declares its needs, preserves, and destroys sets over named facts.
+It requires contract checks at each handoff, reusing the gates of the previous chapter.
+It runs passes in order, recomputes missing facts on demand, and stops at the first contract violation with the suspect named.
+Preservation claims are checked, not trusted.
+A pass that claims to preserve dominance but moves a store through a join faces the validator before the next pass runs.
+Budgets bound the whole run.
+An optimization budget caps total compile time and code growth.
+A pass that exceeds its share yields to the remaining pipeline rather than starving it.
+Determinism is a further requirement.
+The same input with the same flags and the same environment must produce the same output.
+Nondeterministic iteration orders, unseeded hashes, and parallel pass schedules all threaten that property.
+We fix iteration orders, seed every random choice, and log the seeds with the build record.
+
+\begin{algorithm}[htbp]
+\caption{Contract-checked pipeline driver with fact versions}\label{alg:ch38-pipeline-run}
+\begin{pseudocode}
+\Require pass list $P_1 \dots P_k$, input program $T$, fact store $S$
+\Ensure output passing the enabled checks, or the first detected contract violation
+\ForAll{$i$ from $1$ to $k$}
+\State check entry contract of $P_i$ on $T$ and $S$
+\If{entry check fails}
+\State \Return violation at entry of $P_i$
+\EndIf
+\State run $P_i$ on $T$ and update $S$ \Comment{drop destroyed facts}
+\State check exit contract of $P_i$ on $T$ and $S$
+\If{exit check fails}
+\State \Return violation at exit of $P_i$
+\EndIf
+\EndFor
+\State \Return $T$ with build record
+\end{pseudocode}
+\end{algorithm}
+
+\section{Worked Example: Ordering Three Passes}\label{sec:ch38-worked}
+
+We order folding, dead-code elimination, and register allocation for a small body.
+The body computes \code{t1 = 3 + 5}, \code{t2 = t1 + x}, and \code{t3 = t1 + 0}, then returns \code{t2}.
+Folding runs first because it needs only well-formed trees and establishes new constants.
+Hand evaluation gives $t1 = 8$ in every execution.
+Folding without operand substitution leaves \code{t1 = 8}, \code{t2 = t1 + x}, and \code{t3 = t1 + 0}, then returns \code{t2}.
+Dead-code elimination removes \code{t3} because its result is unused; that fact does not require constant folding.
+It keeps \code{t1} because \code{t2} still uses it.
+If constant propagation instead substitutes $8$ into \code{t2}, the now-unused \code{t1} can also be deleted.
+Register allocation runs last because it needs the final live ranges.
+Live analysis gives \code{t1} live across one use and \code{t2} live to the return.
+Two registers or one register plus forwarding suffice; the exact choice is target-specific.
+Reversing the first two passes removes \code{t3} just as safely in this example.
+Folding can expose additional dead paths in other programs, which motivates repeating cleanup after it.
+Running allocation first spends effort on an unused definition that cleanup could have removed earlier.
+The listing below pins the final body for tests.
+\begin{irlisting}
+; after fold, eliminate, allocate: order matters
+t1 = 8            ; folded from 3 + 5
+t2 = add t1, x    ; kept, used by return
+ret t2            ; t3 removed as dead
+\end{irlisting}
+Each step preserves the return value $8+x$ under the IR's arithmetic rules.
+A differential test should compare that result against the original program; this is a hand-worked example, not a report of an implemented pipeline.
+
+\section{A Reproducible Measurement Checklist}\label{sec:ch38-checklist}
+
+Performance claims require a measurement method that others can repeat.
+This section gives a checklist, not numbers.
+No timing figures appear here because none were collected for this chapter.
+Any claim about speedup needs a fresh run recorded under the headings below.
+The checklist has three phases: preparation, execution, and checking.
+Preparation fixes everything except the variable under test.
+Execution collects observations under stated conditions.
+Checking validates the observations before any conclusion is drawn.
+\begin{ccnote}[Report conditions]
+A measurement without its conditions is an anecdote.
+Record the full environment with every result so others can reproduce or refute it.
+\end{ccnote}
+Preparation steps come first.
+Select the benchmark programs and inputs, and record their versions and sources.
+Fix the compiler flags, the optimization levels, and the complete build record.
+Fix the machine, operating system, and library versions under test.
+Disable or document background load, frequency scaling, and competing processes.
+Pre-build all binaries and verify checksums before timing begins.
+Decide the warm-up policy for just-in-time systems and document steady-state criteria.
+Execution steps come next.
+Run each configuration repeatedly with a fixed repetition count chosen in advance.
+Randomize run order across configurations to spread interference evenly.
+Record wall time, CPU time, and any allocator or collector statistics the platform exposes.
+Record failures, timeouts, and discarded runs with their reasons rather than silently dropping them.
+Keep raw logs; never keep only averages.
+Checking steps come last.
+Verify that contract checks passed on every measured build.
+Verify checksums of binaries and inputs before accepting any observation.
+Summarize with distributions and counts, not single best runs.
+Report the machine, flags, inputs, repetitions, warm-up, and raw-data location alongside every figure.
+State threats explicitly: what could still differ between configurations and what was done about each item in Table~\ref{tab:ch38-threats}.
+The \enquote{conditions not numbers} rule keeps the record honest.
+It is always acceptable to report that an experiment has not been run.
+It is never acceptable to present an expected speedup as a measured one.
+
+\begin{table}[htbp]
+\centering
+\caption{Common measurement threats pair each risk with its mitigation in the checklist.}
+\label{tab:ch38-threats}
+\begin{tabular}{ll}
+\toprule
+Threat & Mitigation \\
+\midrule
+Background load & Document and isolate machine \\
+Frequency scaling & Fix or record governor policy \\
+Cold caches & Documented warm-up excluded \\
+Single best run & Fixed repetitions, full logs \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Implementation Notes and Complexity}\label{sec:ch38-implementation}
+
+Driver cost is linear in the pass count plus the cost of contract checks.
+If each enabled structural check is linear in the current IR size $N_i$, total check cost is $O(\sum_{i=1}^{k}N_i)$, or $O(kN)$ when every size is bounded by $N$.
+Dominance recomputation, semantic equivalence checking, and other nonlocal validators need their own bounds; the driver does not make arbitrary contracts linear-time checkable.
+Fact recomputation adds the cost of analyses rerun after destructive passes.
+Version stamps keep that cost explicit: every dropped fact names the pass that dropped it.
+Production drivers add pass groups, function-granular scheduling, and parallel execution with deterministic merge.
+They cache analysis results across functions and invalidate by revision.
+They record the full build description: pass list, order, flags, seeds, versions, and input checksums.
+A common pitfall adds a pass without declaring its destroyed facts.
+Later passes then trust stale information and miscompile quietly.
+Another pitfall tunes the pipeline against one benchmark and reports only that result.
+The checklist prevents the second failure by requiring named benchmarks, fixed repetitions, and stated threats.
+We treat the build record as part of the output.
+A binary without its record is unrepeatable and therefore unmeasurable.
+Figure~\ref{fig:ch38-pipeline} and Algorithm~\ref{alg:ch38-pipeline-run} together define the minimum a driver must implement.
+Everything else is tuning with evidence.
+% TODO(cite): need a primary reference for pipeline-driver determinism practices.
+
+\section{Exercises}\label{sec:ch38-exercises}
+
+\begin{enumerate}
+\item Order four passes (fold, inline, dead-code, allocate) for a call-heavy body, justify each position with Table~\ref{tab:ch38-ordering}, and name the facts each pass destroys.\label{ex:ch38-order-passes}
+\item Write a build record for a hypothetical experiment you have not run, listing every checklist field with explicitly empty result slots and a statement that no numbers are claimed.\label{ex:ch38-record-empty}
+\item Design a threat analysis for comparing two optimization levels on one machine, covering each row of Table~\ref{tab:ch38-threats} with a concrete mitigation you can perform.\label{ex:ch38-threat-plan}
+\end{enumerate}
+
+\section{Further Reading}\label{sec:ch38-reading}
+
+Appel presents complete compiler pipelines from source to machine code~\cite{appel-1998-modern}.
+Morgan discusses pass organization and its effect on optimization quality~\cite{morgan-1998-optimizing}.
+Safonov treats measurement and validation as trustworthiness practices~\cite{safonov-2010-trustworthy}.
+The C standard draft defines conformance and observable behavior for C-facing claims~\cite{wg14-2011-c11}.

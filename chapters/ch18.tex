@@ -1,0 +1,212 @@
+\chapter{Loop Analysis}
+\label{ch:ch18-loop-analysis}
+
+\section{Seeing Loops in Graphs}
+\label{sec:ch18-seeing-loops}
+
+Optimizers spend most of their effort on loops because programs spend most of their time in loops.
+Motion, unrolling, tiling, vectorization, and parallelization all begin by answering the same preliminary questions.
+Where does each loop start, which blocks belong to it, how do loops nest, and what changes from one iteration to the next.
+Guessing from source syntax is unreliable, because lowering turns structured loops into flat branches and irreducible control flow can defeat syntax entirely.
+\term{Loop analysis} answers these questions on the control-flow graph itself.
+It defines a loop as a graph shape, finds every instance of that shape, organizes the results into nesting, and characterizes how values evolve across iterations.
+The definitions must be exact, because every later transformation trusts them.
+A block wrongly assigned to a loop gets its code moved to the wrong place.
+A missed back edge hides an entire loop from optimization.
+This chapter builds the standard pipeline: dominators identify back edges, back edges identify natural loops, nesting organizes them, and induction analysis describes iteration.
+It uses the loop facts in Chapter~\ref{ch:ch19-loop-transformations} and supplies the regions that Chapter~\ref{ch:ch17-code-motion} requires.
+
+\section{Back Edges and Natural Loops}
+\label{sec:ch18-back-edges}
+
+A \term{back edge} is an edge $u \to h$ whose target $h$ dominates its source $u$.
+Domination means every path from the entry to $u$ passes through $h$, so control cannot reach $u$ without first passing $h$.
+Returning to $h$ therefore repeats a region that starts at $h$, which is exactly the intuition a loop should capture.
+The \term{loop header} is the target $h$, and the source $u$ is often called the latch.
+Given a back edge $u \to h$, the \term{natural loop} consists of $h$ plus every block that can reach $u$ without passing through $h$.
+That definition is constructive: start from $u$, walk predecessors, stop at $h$, and collect everything visited.
+The header dominates every block in its loop, which follows from the back-edge property and makes the header the single entry of the loop.
+Single entry matters enormously.
+It provides a single entry at which a preheader can be inserted.
+A preheader can execute even when a header test skips the body, so hoisting still requires a speculation-safety or must-execute argument.
+Some graphs contain loops with several entries, usually produced by unstructured jumps.
+Those \term{irreducible} loops have no single header, and most loop optimizations decline to handle them.
+Compilers either leave such regions alone or restructure them first, accepting that rare shapes get slower code.
+Listing~\ref{lst:ch18-nested} shows the running example for this chapter: two nested counted loops after lowering.
+
+\begin{irlisting}[caption={Two nested loops with headers at blocks 2 and 3 and back edges from 4 and 5.},label={lst:ch18-nested}]
+1: goto 2
+2: i = phi(0, inext) ; outer header
+   if i < 10 goto 3 else goto 6
+3: j = phi(0, jnext) ; inner header
+   if j < 20 goto 4 else goto 5
+4: body(i, j)
+   jnext = j + 1
+   goto 3
+5: inext = i + 1
+   goto 2
+6: ret
+\end{irlisting}
+
+The inner back edge runs from block $4$ to block $3$, and the outer back edge runs from block $5$ to block $2$.
+The inner header differs from the outer header, and the inner loop body sits strictly inside the outer one.
+Algorithm~\ref{alg:ch18-natural-loops} turns these observations into a procedure.
+
+\begin{algorithm}
+  \caption{Natural loop discovery from back edges}\label{alg:ch18-natural-loops}
+  \begin{pseudocode}
+    \Require entry-reachable CFG, dominator sets $\dom(B)$ for every block $B$
+    \Ensure the set of natural loops, each as a header plus member blocks
+    \State $Loops \gets$ empty set
+    \For{each edge $u \to h$ in the CFG}
+      \If{$h \in \dom(u)$}
+        \State $Body \gets \{h, u\}$
+        \State $Work \gets \{u\}\setminus\{h\}$
+        \While{$Work \neq \emptyset$}
+          \State remove some $x$ from $Work$
+          \For{each predecessor $p \in \Pred(x)$}
+            \If{$p \notin Body$}
+              \State add $p$ to $Body$ and to $Work$
+            \EndIf
+          \EndFor
+        \EndWhile
+        \State add $(h, Body)$ to $Loops$
+      \EndIf
+    \EndFor
+  \end{pseudocode}
+\end{algorithm}
+
+The algorithm assumes dominator sets are already computed, since testing $h \in \dom(u)$ is the heart of back-edge detection.
+The predecessor walk never passes through the header, because the header is already in $Body$ and visited blocks are not re-added.
+Each walk therefore collects exactly the blocks that reach the latch without leaving through the header.
+
+\section{Worked Example: Dominators to Loops}
+\label{sec:ch18-worked-loops}
+
+We run Algorithm~\ref{alg:ch18-natural-loops} on Listing~\ref{lst:ch18-nested} by hand.
+First we compute dominator sets with the entry dominating itself and every other block dominated by the intersection of its predecessors plus itself.
+Only block $1$ dominates the entry, so $\dom(1) = \{1\}$; the entry itself dominates every reachable block.
+Block $2$ is reachable only through block $1$, so $\dom(2) = \{1, 2\}$.
+Block $3$ is reachable only through block $2$, so $\dom(3) = \{1, 2, 3\}$.
+Block $4$ is reachable only through block $3$, so $\dom(4) = \{1, 2, 3, 4\}$.
+Block $5$ is reachable only through block $3$, so $\dom(5) = \{1, 2, 3, 5\}$.
+Block $6$ is reachable only through block $2$, so $\dom(6) = \{1, 2, 6\}$.
+We check every edge for the domination property.
+The edge $4 \to 3$ qualifies because $3 \in \dom(4)$, and the edge $5 \to 2$ qualifies because $2 \in \dom(5)$.
+No other edge targets a dominator of its source: edge $3 \to 5$ fails because $5 \notin \dom(3)$, and edge $2 \to 3$ fails because $3 \notin \dom(2)$.
+For the inner back edge, the walk starts with $Body = \{3, 4\}$ and $Work = \{4\}$.
+Block $4$ has the single predecessor $3$, which is already in $Body$, so the walk ends with the inner loop $\{3, 4\}$.
+For the outer back edge, the walk starts with $Body = \{2, 5\}$ and $Work = \{5\}$.
+Block $5$ has predecessor $3$, which joins $Body$ and $Work$.
+Block $3$ has predecessors $2$ and $4$, of which $2$ is already present and $4$ joins both sets.
+Block $4$ has predecessor $3$, already present, so the walk ends with the outer loop $\{2, 3, 4, 5\}$.
+Table~\ref{tab:ch18-dom-loops} summarizes the dominators, the back-edge test, and the resulting membership.
+Nesting follows by inclusion: the inner loop is strictly contained in the outer one, so the \term{loop nesting tree} has the outer loop as parent.
+Figure~\ref{fig:ch18-nested} draws the graph so the nesting is visible.
+
+\begin{table}
+  \centering
+  \caption{Dominator sets, back-edge tests, and loop membership for Listing~\ref{lst:ch18-nested}.}
+  \label{tab:ch18-dom-loops}
+  \begin{tabular}{llll}
+    \toprule
+    Block & Dominators & Back edge & Loop membership \\
+    \midrule
+    1 & 1 & none & none \\
+    2 & 1, 2 & target of 5 to 2 & outer header \\
+    3 & 1, 2, 3 & target of 4 to 3 & outer, inner header \\
+    4 & 1, 2, 3, 4 & source of 4 to 3 & outer, inner \\
+    5 & 1, 2, 3, 5 & source of 5 to 2 & outer \\
+    6 & 1, 2, 6 & none & none \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}
+  \centering
+  \begin{tikzpicture}[node distance=12mm and 20mm]
+    \node[basic block] (ch18n1) {1: goto 2};
+    \node[basic block,below=of ch18n1] (ch18n2) {2: outer header};
+    \node[basic block,below left=of ch18n2] (ch18n3) {3: inner header};
+    \node[basic block,below=of ch18n3] (ch18n4) {4: body};
+    \node[basic block,below right=of ch18n2] (ch18n5) {5: outer latch};
+    \node[basic block,below=of ch18n5] (ch18n6) {6: ret};
+    \draw[cfg edge] (ch18n1) -- (ch18n2);
+    \draw[cfg edge] (ch18n2) -- (ch18n3);
+    \draw[cfg edge] (ch18n2) -- (ch18n6);
+    \draw[cfg edge] (ch18n3) -- (ch18n4);
+    \draw[cfg edge] (ch18n3) -- (ch18n5);
+    \draw[cfg edge] (ch18n4) -- (ch18n3);
+    \draw[back edge] (ch18n5) -- (ch18n2);
+  \end{tikzpicture}
+  \caption{The inner loop sits inside the outer loop, and each back edge returns to the header that dominates its source.}
+  \label{fig:ch18-nested}
+\end{figure}
+
+\section{Trip Counts and Induction Variables}
+\label{sec:ch18-induction}
+
+Knowing where a loop is matters less than knowing how it behaves.
+A \term{trip count} says how many times the loop iterates, and an \term{induction variable} is a variable that steps by a fixed amount each iteration.
+The outer loop of Listing~\ref{lst:ch18-nested} counts \code{i} from $0$ to $9$ in steps of $1$, so its trip count is $10$.
+The inner loop counts \code{j} from $0$ to $19$, so its trip count is $20$ and the body runs $200$ times in total.
+Both counts follow from the bounds and steps visible in the IR, and both are exact because the bounds are constants and the steps never change.
+A \term{basic induction variable} is defined once per iteration by adding or subtracting a loop-invariant amount, like \code{inext = i + 1}.
+A \term{derived induction variable} is an affine function of a basic one, like \code{u = i * 4} from Chapter~\ref{ch:ch17-code-motion}.
+Derived variables matter because address arithmetic is usually derived from a counter, and recognizing the derivation lets later passes replace multiplication with addition.
+The analysis walks SSA definitions inside the loop and classifies each one.
+Definitions from outside constants are invariant, single-step updates of loop-carried values are basic, and affine combinations of classified values are derived.
+Anything else is simply variant, and the analysis says so rather than guessing.
+Derived variables deserve one more observation.
+The expression \code{u = i * 4} multiplies a basic induction variable by a constant, which strength reduction later rewrites into an addition stepped by four each iteration.
+That rewrite is only valid because the analysis proved the affine form first.
+Without the proof, replacing a multiplication by an accumulation changes overflow behavior on targets where the two differ.
+Trip counts need the same honesty.
+A data-dependent bound can admit a symbolic exact count, while an early exit or possible counter overflow may invalidate the simple counted-loop formula.
+When the available reasoning cannot establish a count, report \enquote{unknown}; lack of a constant is not proof that no exact symbolic count exists.
+An unknown static count can still permit unrolling or tiling with runtime bounds and a cleanup loop.
+Motion and redundancy removal need their own legality facts rather than an exact trip count.
+
+\section{Implementation Notes}
+\label{sec:ch18-implementation}
+
+The set-based dominator iteration costs $O(R(N+E)W)$ for $R$ rounds, $N$ blocks, $E$ edges, and cost $W$ per set operation.
+Reverse-postorder traversal can reduce the number of rounds but does not remove the set-operation cost.
+% TODO(cite): primary reference for near-linear dominator computation.
+Each back edge triggers one predecessor walk bounded by $O(E)$, so loop discovery over $b$ back edges costs $O(b \cdot E)$ in the worst case and far less in practice.
+Sorting $L$ discovered loops costs $O(L\log L)$, but constructing a nesting forest also requires membership or containment queries.
+Merge natural loops with a common header under a documented convention before assigning parent loops; sorting alone does not establish containment.
+Induction analysis is linear in the number of SSA definitions inside loops.
+Production compilers reuse one dominator computation across many clients rather than recomputing it per analysis.
+They also maintain the loop tree incrementally across transformations, repairing only the affected subtrees instead of rediscovering every loop.
+Irreducible flow needs a policy, not just an algorithm.
+The common choice marks irreducible regions, skips loop transformations there, and keeps the code correct at the price of missing rare optimizations.
+Guard this choice with a counter in the compiler's statistics so that an unexpected spike of irreducible loops points back to the frontend pass that created them.
+
+\section{Exercises}
+\label{sec:ch18-exercises}
+
+\begin{enumerate}
+  \item \label{ex:ch18-find-loops}
+  Add the edge $5 \to 3$ to Listing~\ref{lst:ch18-nested} alongside the existing $5 \to 2$.
+  Recompute the dominator sets, test every edge with the back-edge condition, and run Algorithm~\ref{alg:ch18-natural-loops} by hand.
+  State the resulting loop set and nesting, and explain which edge, if any, fails the domination test.
+  \item \label{ex:ch18-irreducible}
+  Draw a CFG with entry $A$, blocks $B$ and $C$ each branching to each other, entries $A \to B$ and $A \to C$, and a shared exit.
+  Compute dominator sets and show that neither $B \to C$ nor $C \to B$ is a back edge.
+  Explain why no natural loop covers the cycle, and state what an optimizer that only handles natural loops should do with this region.
+  \item \label{ex:ch18-classify-iv}
+  Given a loop with header definitions \code{i = phi(0, i2)}, \code{k = phi(0, k2)}, \code{i2 = i + 2}, \code{k2 = k + i2}, \code{m = k * 3}, and \code{n = load p}, classify each of \code{i}, \code{k}, \code{m}, and \code{n} as invariant, basic induction, derived induction, or variant.
+  Justify each classification from the definitions in Section~\ref{sec:ch18-induction}.
+  Give the trip count when the exit tests \code{i2 < 100}, showing the arithmetic.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch18-further-reading}
+
+Morgan's \emph{Building an Optimizing Compiler} develops control-flow analysis including loops and their use in optimization~\cite{morgan-1998-optimizing}.
+Read it for how loop structure connects to the transformations that consume it.
+Appel's \emph{Modern Compiler Implementation in ML} covers the graph algorithms behind this chapter in implementable form~\cite{appel-1998-modern}.
+Use it when turning the pseudocode here into working code.
+Safonov's \emph{Trustworthy Compilers} discusses the obligations that transformations over these structures must meet~\cite{safonov-2010-trustworthy}.
+Consult it for why a wrong loop membership is a correctness bug rather than a missed opportunity.

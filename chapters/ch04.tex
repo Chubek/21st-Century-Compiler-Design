@@ -1,0 +1,173 @@
+\chapter{Parsing}
+\label{ch:parsing}
+
+Tokens tell the compiler which words appear, but not how they combine.
+The text \code{2 + 3 * 4} and the text \code{(2 + 3) * 4} contain similar tokens yet denote different computations.
+This chapter builds a \term{parser} that converts the token stream into the abstract syntax trees defined two chapters ago.
+The parser enforces the grammar of Mini: which token orders form valid programs and how each valid order groups into a tree.
+Everything after parsing works on trees and never re-examines grouping.
+
+\section{Grouping decides meaning}
+\label{sec:ch04-grouping-meaning}
+
+Consider the expression \code{2 + 3 * 4}.
+Two groupings are possible: \code{(2 + 3) * 4}, which equals $20$, and \code{2 + (3 * 4)}, which equals $14$.
+Mini follows the ordinary mathematical convention that multiplication binds tighter than addition, so the correct tree is the second one.
+A \term{grammar} writes such conventions as rules.
+Each rule names a syntactic category and lists the token patterns that build it.
+Mini expressions use three levels: sums, products, and atoms.
+A sum is a product followed by any number of \code{+} or \code{-} steps, and a product is an atom followed by any number of \code{*} or division steps.
+An atom is a number, a variable, or a parenthesized expression.
+Because sums are built from products but not the reverse, multiplication always groups first.
+Parentheses override the default by making a full expression act as one atom.
+Table~\ref{tab:ch04-grammar} summarizes the syntactic categories; its verbal rows are an overview rather than a complete executable grammar.
+\begin{table}
+\caption{The Mini grammar with one rule per syntactic category and grouping fixed by rule layering.}
+\label{tab:ch04-grammar}
+\centering
+\begin{tabular}{ll}
+\toprule
+Category & Forms \\
+\midrule
+Program & statement followed by more statements \\
+Statement & assignment, let binding, print, conditional, loop, or block \\
+Assignment & identifier, \code{=}, expression \\
+Expression & product, then any number of add or subtract steps \\
+Product & atom, then any number of multiply or divide steps \\
+Atom & number, variable, or parenthesized expression \\
+Conditional & \code{if} test \code{then} branch \code{else} branch \\
+Loop & \code{while} test \code{do} body \\
+\bottomrule
+\end{tabular}
+\end{table}
+The grammar separates two questions that beginners often mix.
+Whether a token order is valid is a question about the rules.
+How a valid order groups is a question about the layering of expression and product.
+The layered rules answer both at once: they accept exactly the valid orders and they admit exactly one grouping per order.
+An \term{ambiguous} grammar would admit two trees for one token stream, and Mini avoids that by construction.
+Associativity is the remaining choice: \code{10 - 3 - 2} groups as \code{(10 - 3) - 2}, which is $5$, because each layer collects repeated operators from left to right.
+\section{Recursive descent}
+\label{sec:ch04-recursive-descent}
+
+A \term{recursive-descent parser} turns each grammar rule into one function.
+The function for expressions calls the function for products, which calls the function for atoms, mirroring the grammar layering directly.
+Each function consumes exactly the tokens of its category and returns the corresponding subtree.
+A shared cursor holds the current token, and a helper advances it after each match.
+When the next token cannot start the expected construct, the parser reports a syntax error naming the expected category and the token found.
+Figure~\ref{fig:ch04-parse-tree} shows the tree that these functions build for \code{2 + 3 * 4}.
+\begin{figure}
+\centering
+\begin{tikzpicture}[node distance=1.1cm]
+\node[basic block] (plus) {Add};
+\node[basic block, below left of=plus, xshift=-1.4cm] (two) {Num 2};
+\node[basic block, below right of=plus, xshift=1.4cm] (mul) {Mul};
+\node[basic block, below left of=mul, xshift=-1.0cm] (three) {Num 3};
+\node[basic block, below right of=mul, xshift=1.0cm] (four) {Num 4};
+\draw[cfg edge] (plus) -- (two);
+\draw[cfg edge] (plus) -- (mul);
+\draw[cfg edge] (mul) -- (three);
+\draw[cfg edge] (mul) -- (four);
+\end{tikzpicture}
+\caption{The parse tree for \code{2 + 3 * 4} groups the multiplication first, so evaluation yields $14$.}
+\label{fig:ch04-parse-tree}
+\end{figure}
+The root is the addition because sums sit at the top layer of the grammar.
+Its right child is the multiplication, which sits one layer down and therefore binds tighter.
+Evaluating this tree gives $3 \times 4 = 12$ and then $2 + 12 = 14$, matching the convention.
+The alternative tree with multiplication at the root would evaluate to $20$ and corresponds to the parenthesized input \code{(2 + 3) * 4}.
+Parentheses work by recursion: the atom function sees \code{(}, parses a full expression inside, and expects \code{)}.
+The inner expression can contain any operators because it re-enters the top layer.
+This single recursive call is the whole secret of nested grouping.
+
+\section{The parser}
+\label{sec:ch04-parser}
+
+Algorithm~\ref{alg:ch04-parse} parses Mini expressions with correct precedence and left associativity.
+\begin{algorithm}
+\caption{Recursive-descent parsing of Mini expressions with layered precedence.}
+\label{alg:ch04-parse}
+\begin{pseudocode}
+\Require token list $T$ with a cursor at position $P$
+\Ensure syntax tree for one expression with the cursor past its last token, or a syntax error
+\Function{ParseExpr}{$T$}
+\State set $Left$ to the result of parsing one product
+\While{the cursor shows an add or subtract operator}
+\State consume the operator and parse the next product as $Right$
+\State set $Left$ to a new node combining $Left$ and $Right$
+\EndWhile
+\State \Return $Left$
+\EndFunction
+\end{pseudocode}
+\end{algorithm}
+The algorithm assumes the cursor starts at the first token of an expression and that the product and atom parsers follow the same contract.
+It guarantees that it consumes exactly the tokens of one expression: no fewer, so the tree is complete, and no more, so the caller keeps its place.
+The loop collects repeated additions from left to right, which produces left-leaning trees for chains such as \code{10 - 3 - 2}.
+Each iteration wraps the tree built so far as the left child of the new node, so earlier operators sit lower and evaluate first.
+The product parser is a copy of this shape with multiply and divide operators calling the atom parser.
+The displayed routine parses arithmetic sums.
+To parse comparisons, wrap it with a routine that accepts at most one comparison operator and a second sum; this makes \code{x + 1 < y * 2} compare two arithmetic operands.
+Parenthesized atoms call the full comparison parser, so \code{1 + (2 > 3)} parses and is rejected later by type checking.
+The statement parser handles assignments, \code{let}, \code{print}, \code{if}, \code{while}, and blocks.
+The caller must require the appropriate delimiter or end of input after a parsed expression; accepting a valid prefix does not validate the entire token stream.
+Error reporting names the construct being parsed, the token found, and its position from the lexer.
+Recovery in a batch compiler skips to the next statement boundary so that one mistake does not hide the rest.
+An interactive mode may instead reparse the single line, since the cost of a retry is tiny.
+
+\section{Worked example}
+\label{sec:ch04-worked-example}
+
+We now parse \code{2 + 3 * 4 - 1} step by step with Algorithm~\ref{alg:ch04-parse}.
+The token list is \code{2}, \code{+}, \code{3}, \code{*}, \code{4}, \code{-}, \code{1}, which is $7$ tokens.
+The cursor starts at position $0$.
+Parsing the first product consumes only token $0$, because the next token is \code{+} rather than a multiplicative operator.
+The value of $Left$ is the leaf \code{Num 2} and the cursor rests at position $1$.
+The loop sees \code{+} and consumes it, moving the cursor to position $2$.
+It parses the next product starting at token $2$: the atom \code{3} is followed by \code{*}, so the product loop consumes tokens $2$ through $4$ and builds \code{Mul(3, 4)}.
+The expression loop wraps the tree into \code{Add(2, Mul(3, 4))} and the cursor rests at position $5$.
+The loop sees \code{-} and consumes it, moving the cursor to position $6$.
+It parses the final product, which is the single atom \code{1}, and wraps the tree into \code{Sub(Add(2, Mul(3, 4)), 1)}.
+The loop then sees the end of input and returns.
+The final tree has $3$ operator nodes and $4$ leaves, built in $7$ token advances and $7$ node constructions, of which $3$ construct operators.
+Evaluating it gives $2 + 12 - 1 = 13$.
+The count generalizes: parsing $K$ tokens performs exactly $K$ advances and builds at most $K$ nodes, which anticipates the linear bound of Section~\ref{sec:ch04-implementation}.
+A second check confirms associativity: parsing \code{10 - 3 - 2} builds \code{Sub(Sub(10, 3), 2)}.
+The inner subtraction evaluates to $7$ and the outer to $5$.
+A right-leaning tree would instead give $10 - 1 = 9$, which Mini never builds for this input.
+
+\section{Implementation notes}
+\label{sec:ch04-implementation}
+
+Each grammar rule becomes one function, so the parser stays proportional in size to Table~\ref{tab:ch04-grammar}.
+The call stack mirrors the nesting of the input: deeply nested parentheses mean deep recursion.
+Inputs generated by tools can nest thousands deep, so production parsers either raise the stack limit explicitly or rewrite nesting iteratively.
+Left recursion needs care: a rule that calls itself before consuming any token would loop forever.
+The layered grammar of this chapter already removes left recursion by using loops instead of self-calls for operator chains.
+Error messages should quote the offending token and state what the parser expected at that point.
+Messages that only say \enquote{syntax error} waste the positions the lexer worked to provide.
+The running time is $O(K)$, where $K$ is the number of tokens.
+Each token is examined once to decide the current step and consumed once when matched, and each loop iteration builds one tree node.
+Memory use is $O(K + D)$, where $K$ bounds the size of the finished tree and $D$ is the maximum recursion depth reached while parsing nested constructs.
+Generated parser tools trade the hand-written clarity of this section for automatic table construction from declarative grammars.
+They handle more grammar shapes but produce harder-to-read errors unless the grammar author adds recovery rules.
+For a language the size of Mini, the hand-written form of Algorithm~\ref{alg:ch04-parse} is shorter, clearer, and easier to extend with positions and recovery.
+\begin{ccnote}[One tree per input]
+A deterministic parser must build exactly one tree for each valid token stream.
+If two groupings ever seem possible, the grammar is ambiguous and the fix belongs in the grammar, not in a tie-breaking hack inside the parser.
+\end{ccnote}
+
+\section{Exercises}
+\label{sec:ch04-exercises}
+
+\begin{enumerate}
+\item \label{ex:ch04-trace-parse} Parse \code{x = 4 + 2 * 3;} with the rules of Table~\ref{tab:ch04-grammar}. Draw the resulting tree in the style of Figure~\ref{fig:ch04-parse-tree}, evaluate it with \code{x} unbound elsewhere, and state the final value. Confirm that the tree has $2$ operator nodes and $3$ leaves.
+\item \label{ex:ch04-assoc} Parse \code{100 - 10 - 10 - 10} and show that Algorithm~\ref{alg:ch04-parse} builds a left-leaning tree evaluating to $70$. Write the right-leaning tree for the same tokens, evaluate it, and explain which grammar change would produce it.
+\item \label{ex:ch04-error} Give three Mini token streams that are each invalid for a different reason: a missing operand, a missing terminator, and a misplaced keyword. For each one, state the exact position where parsing fails and the message your implementation should emit.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch04-further-reading}
+
+Appel develops parsing from grammars through recursive descent to table-driven methods, which places Algorithm~\ref{alg:ch04-parse} at the start of a well-marked road, see~\cite{appel-1998-modern}.
+Morgan treats the front end as production engineering, where grammar clarity and error quality decide how fast users find their mistakes, see~\cite{morgan-1998-optimizing}.
+The C language definition shows the same ideas at full scale, with a grammar whose precedence and associativity rules every C programmer relies on, see~\cite{wg14-2011-c11}.
+Safonov connects front-end rigor to end-to-end trust in the compiler, which is why this chapter rejects ambiguity instead of papering over it, see~\cite{safonov-2010-trustworthy}.

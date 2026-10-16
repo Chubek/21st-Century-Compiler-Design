@@ -1,0 +1,235 @@
+\chapter{Lattices and Fixed Points}
+\label{ch:ch10-lattices-fixed-points}
+
+Iteration can loop forever when its update rule has no notion of progress.
+A dataflow solver that grows and shrinks the same set on alternate visits never settles.
+A constant propagator that flips a variable between two values on each pass never reports.
+The problem of this chapter is to give iteration a mathematical frame in which termination and safety follow from the shape of the value domain.
+We build that frame from ordered sets with well-behaved combinations, and we show that every analysis from the previous chapter is an instance of it.
+The frame also predicts exactly which analyses terminate quickly, which need help on loops, and which answers a client may trust.
+Section~\ref{sec:ch10-order} introduces the order, Section~\ref{sec:ch10-transfer} adds monotone transfer functions, and Section~\ref{sec:ch10-worked} computes a fixed point by hand on the graph in Figure~\ref{fig:ch10-loop}.
+
+\section{Partial orders and lattices}
+\label{sec:ch10-order}
+
+A \term{partial order} is a set equipped with a relation $\sqsubseteq$ that is reflexive, antisymmetric, and transitive.
+Reflexive means every element sits below itself, antisymmetric means two elements below each other are equal, and transitive means steps compose.
+Program facts fit naturally, but an analysis must specify its order explicitly.
+Under a concretization-based precision order, moving up admits more behaviors; under the reversed order, moving down does so.
+The extremal solution sought by a solver depends on that choice.
+This reversal of intuition causes most beginner errors with lattices, so we keep information order and safety direction explicit throughout.
+
+A \term{lattice} is a partial order in which every pair of elements has a greatest lower bound and a least upper bound.
+The greatest lower bound is the \term{meet}, written $\meet$.
+The least upper bound is the \term{join}, written $\join$.
+Their meanings depend on the order: under subset inclusion they are intersection and union, while reversing the order exchanges them.
+A finite lattice also has a \term{top} element above everything and a \term{bottom} element below everything.
+Top and bottom name order-theoretic extrema, not universal meanings such as unknown or contradiction.
+In the flat meet-based examples below, top is the unvisited identity and bottom represents conflicting evidence.
+Table~\ref{tab:ch10-lattices} lists the small lattices used in this book with their orders, meets, and heights.
+
+Consider the constant lattice for one variable, with top above every integer constant and every constant above bottom.
+Two equal constants meet to themselves, because both sides agree.
+Two different constants meet to bottom, because no single constant describes both paths.
+Join behaves dually, sending distinct constants to top; in this reversed precision order it is meet, not join, that conservatively combines execution paths.
+The \term{height} of this lattice is three, since the longest chain from top to bottom passes through one constant.
+Height matters because it bounds how many times a block fact can change during iteration.
+A height-three scalar cell changes strictly at most twice; a product containing many cells can have a much longer chain.
+Counting elements in a chain, a subset lattice over $U$ facts has height $U+1$.
+Algorithm~\ref{alg:ch10-fixedpoint} exploits exactly this bound.
+
+\begin{irlisting}
+; Loop that strains an analysis without a lattice argument
+; B1 initializes i, B2 tests, B3 steps, B4 exits
+B1: i = 0
+B1: jmp B2
+B2: br i < 10, B3, B4
+B3: i = i + 1
+B3: jmp B2
+B4: use i
+\end{irlisting}
+
+The loop listing shows why finiteness alone does not guarantee speed.
+The fact \code{i = 0} holds on entry to the first iteration and fails on every later iteration.
+An analysis that tracks exact values would visit $B2$ once per trip around the loop.
+An analysis over the constant lattice instead meets $0$ with $1$, then with bottom, and stops after two changes.
+The answer \enquote{bottom} at the loop head means that no single constant describes \code{i} there.
+That answer is weak but safe, and it arrives in bounded time.
+A client that needs the trip count must use a richer domain, such as intervals from the next chapter, and pay the corresponding height cost.
+The lattice makes the trade between precision and cost explicit before anyone runs the solver.
+
+\section{Monotone transfer and fixed points}
+\label{sec:ch10-transfer}
+
+A \term{transfer function} maps incoming lattice values to outgoing lattice values for one block.
+It is \term{monotone} when $x \sqsubseteq y$ implies $f(x) \sqsubseteq f(y)$, so more precise inputs yield more precise outputs.
+It is \term{distributive} when it preserves meets exactly, a stronger property that some frameworks need for maximal precision.
+Every gen-kill function from the previous chapter is monotone, and most are distributive over their set lattices.
+Constant folding transfer is monotone but not distributive, which is why constant propagation can miss facts that a hypothetical path-by-path execution would find.
+Monotonicity is the property the solver actually needs, and distributivity is the property a precision argument might additionally want.
+We require the first everywhere and invoke the second only when we claim strongest-fixed-point results.
+
+A \term{fixed point} of the whole system is an assignment of one lattice value to each block that satisfies every equation simultaneously.
+The Knaster--Tarski theorem gives least and greatest fixed points of a monotone map over a complete lattice.
+Finite-height iteration reaches the appropriate extreme; on infinite-height lattices, ordinary countable Kleene iteration needs additional continuity assumptions to reach a fixed point at its limit.
+We start every block at bottom for a least-fixed-point computation that grows, or at top for a greatest-fixed-point computation that shrinks.
+We then apply transfers and meets until nothing moves.
+Each application can only move values monotonically along chains of bounded height, so the process stops.
+The limit satisfies the equations by construction, and minimality or maximality follows from starting at the extreme and moving monotonically.
+Safonov treats this discipline as part of what makes an optimizing compiler worthy of trust, see~\cite{safonov-2010-trustworthy}.
+A \term{widening} operator accelerates convergence on lattices of infinite or embarrassing height, such as intervals over machine integers.
+Widening jumps to a coarser value after a few iterations, for example from $[0,1]$ to $[0, +\infty)$, and thereby forces termination.
+It sacrifices precision deliberately, and a companion \term{narrowing} pass may recover some of it afterward.
+This chapter uses widening only on loop heads, where unbounded growth originates.
+An implementation must document where widening fires, because two compilers that widen differently report different facts from the same equations.
+The alternative of iterating to the exact limit is not available when the limit needs unboundedly many steps.
+Section~\ref{sec:ch10-implementation} returns to this engineering choice with concrete thresholds.
+
+\begin{algorithm}
+\caption{Generic lattice fixed-point iteration with a worklist}\label{alg:ch10-fixedpoint}
+\begin{pseudocode}
+\Require reachable CFG $G$ with predecessor-free entry, finite-height lattice, monotone transfers, $s=\top$, entry boundary
+\Ensure assignment $X[B]$ that satisfies all equations and is extremal from start $s$
+\State $X[B] \gets s$ for every block $B$
+\State $W \gets$ all blocks in $G$
+\While{$W \neq \emptyset$}
+\State remove some $B$ from $W$
+\State $in \gets \meet_{P \in \Pred(B)} \Tf{P}(X[P])$, or boundary where $B$ has no predecessor
+\State $new \gets in$
+\If{$new \neq X[B]$}
+\State $X[B] \gets new$
+\State add $\Succ(B)$ to $W$
+\EndIf
+\EndWhile
+\end{pseudocode}
+\end{algorithm}
+
+Algorithm~\ref{alg:ch10-fixedpoint} generalizes the bit-vector solver to any finite-height lattice.
+It seeds every block with the extremal start value, then repeatedly folds predecessor contributions through transfers and the meet.
+A change at one block schedules its successors, exactly as in the gen-kill case.
+Termination follows from finiteness of height: each block value moves monotonically and can move at most $H$ times, where $H$ is the lattice height.
+Correctness follows from the same equation check as before, now stated over abstract values rather than bit sets.
+The algorithm never inspects what the lattice elements mean.
+Backward analyses reverse the dependency direction; ascending analyses use the dual order; infinite-height interval analyses additionally need a convergence strategy.
+Morgan describes optimizer architectures that exploit exactly this sharing across passes, see~\cite{morgan-1998-optimizing}.
+
+The seeding direction is part of the specification, not an implementation detail.
+A least-fixed-point computation starts at bottom and climbs by joins, suitable for may questions such as reachability.
+A greatest-fixed-point computation starts at top and descends by meets, suitable for must questions such as availability.
+Swapping the seeds computes the wrong extreme or diverges from the intended safety direction.
+A useful sanity check runs the solver twice on a tiny graph, once from each extreme, and confirms that the two answers bracket each other in the order.
+When they coincide, the equations determine a unique fixed point and the seeding debate dissolves.
+When they differ, the client must state which extreme its safety proof assumes.
+\section{Worked example with a sign lattice}
+\label{sec:ch10-worked}
+
+We now iterate a sign analysis over the loop in Figure~\ref{fig:ch10-loop} by hand.
+Each variable takes a value in the flat sign lattice with elements top, negative, zero, positive, and bottom.
+The order places top above every sign, every sign above bottom, and no order between distinct signs.
+The meet of equal signs is that sign, the meet of distinct signs is bottom, and the meet with top returns the other side.
+Block $B1$ sets \code{i} to zero, block $B3$ adds one, block $B2$ tests the bound, and block $B4$ consumes the result.
+Table~\ref{tab:ch10-lattices} summarizes this lattice alongside two others, and Table~\ref{tab:ch10-trace} traces the iteration values at the loop head.
+
+\begin{figure}
+\begin{tikzpicture}
+\node[basic block] (b1) {B1: i = 0};
+\node[basic block, below=1.1cm of b1] (b2) {B2: test i less 10};
+\node[basic block, below left=1.1cm and 0.7cm of b2] (b3) {B3: i = i + 1};
+\node[basic block, below right=1.1cm and 0.7cm of b2] (b4) {B4: use i};
+\draw[cfg edge] (b1) -- (b2);
+\draw[cfg edge] (b2) -- (b3);
+\draw[cfg edge] (b2) -- (b4);
+\draw[back edge] (b3) -- (b2);
+\end{tikzpicture}
+\caption{A counting loop whose head merges the first-entry value with values carried around the back edge, which forces the sign of \code{i} to bottom.}
+\label{fig:ch10-loop}
+\end{figure}
+
+\begin{table}
+\caption{Three small lattices compared by elements, combination operators, and longest chain height.}
+\label{tab:ch10-lattices}
+\begin{tabular}{lccc}
+\toprule
+Lattice & Elements & Meet and join & Height \\
+\midrule
+Bit-vector subsets & all subsets of facts & union and intersection & facts count + 1 \\
+Constant flat & top, constants, bottom & agree or bottom & 3 \\
+Sign flat & top, neg zero pos, bottom & agree or bottom & 3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}
+\caption{Sign of \code{i} at the loop head across Kleene iterates, from the empty start to stabilization at bottom.}
+\label{tab:ch10-trace}
+\begin{tabular}{lcc}
+\toprule
+Iterate & Incoming values at B2 & Meet result \\
+\midrule
+First & zero from B1 only & zero \\
+Second & zero and positive & bottom \\
+Third & zero and bottom & bottom \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+We seed every block with top, the identity for this meet, and treat the boundary as the value flowing from $B1$ on first entry.
+The first visit to $B2$ sees only the entry edge carrying zero, so $X[B2]$ becomes zero.
+Processing $B3$ applies the add-one transfer to zero and yields positive on the back edge.
+The second visit to $B2$ meets zero from $B1$ with positive from $B3$ and drops to bottom.
+The third visit meets zero with bottom and stays at bottom, so no successor is enqueued for that edge again.
+The solver stops with $X[B2] = \bot$, $X[B3] = \bot$, and $X[B4] = \bot$.
+The hand computation uses two strict head changes and one unchanged visit.
+Height bounds strict changes, not visits: several predecessors can schedule a block even when their combined contribution leaves its value unchanged.
+A bit-vector problem on the same graph would instead stabilize after at most one change per fact per block.
+The \enquote{loss} from zero to bottom is the solver discovering that the loop head genuinely sees two different signs.
+
+Starting from bottom instead would immediately lose the first-iteration zero fact in this meet-based solver.
+Bottom means conflicting signs in the chosen reversed order, not an unvisited predecessor.
+An implementation must record the lattice order and initialization convention rather than assigning a universal meaning to the words top and bottom.
+Section~\ref{sec:ch10-transfer} states the rule, and the exercises ask you to exhibit a system where the two extremes differ.
+
+\section{Implementation notes and cost}
+\label{sec:ch10-implementation}
+
+A lattice implementation needs only three operations plus iteration: meet, join, and equality, with transfer functions supplied per analysis.
+A flat lattice stores one tag plus one payload, so all three operations are constant time.
+A bit-vector lattice stores one bit per fact, so operations cost one pass over machine words.
+An interval lattice stores two bounds, so meet is max of lows with min of highs and join is the reverse, each constant time.
+The generic solver calls these operations without knowing which lattice it serves.
+This separation keeps the trusted core small: the worklist logic is reviewed once, while each domain supplies its own small, testable operators.
+Appel keeps the solver and the domain in the same explicit correspondence between theory and code, see~\cite{appel-1998-modern}.
+
+Let $N$ be the block count, $E$ the edge count, $H$ the lattice height, and $\Delta$ the maximum in-degree.
+Each block value changes strictly at most $H-1$ times, giving $O(N+EH)$ worklist visits with duplicate-free queue membership.
+Each visit may scan all predecessors, so the displayed algorithm uses $O((N+EH)(\Delta+1))$ lattice operations and predecessor-transfer evaluations.
+Storage is $O(N)$ lattice elements in addition to the CFG; the size of an element and the cost of a transfer must also be counted.
+A scalar flat lattice has $H=3$, but a product of $V$ flat cells has height $2V+1$.
+A subset lattice over $U$ facts has height $U+1$.
+Intervals over mathematical integers have infinite ascending chains; widening supplies convergence rather than a universal fixed visit bound.
+The C standard permits implementations to define overflow, trap, and rounding behavior within stated latitude, so interval bounds must model those choices explicitly, see~\cite{wg14-2011-c11}.
+The abstract-interpretation framework of Cousot and Cousot relates fixed-point construction to sound approximation; its assumptions matter when moving beyond finite-height domains~\cite{cousot-1977-abstract}.
+
+\section{Exercises}
+\label{sec:ch10-exercises}
+
+\begin{enumerate}
+\item \label{ex:ch10-height-proof} Prove that each stored block value in Algorithm~\ref{alg:ch10-fixedpoint} changes strictly at most $H-1$ times on a lattice of height $H$.
+Explain why this does not bound worklist visits by $H$, and derive a whole-graph visit bound by counting initial insertions and successor notifications.
+Identify the two strict changes and the unchanged visit in Table~\ref{tab:ch10-trace}.
+\item \label{ex:ch10-two-extremes} Construct a two-block CFG with a monotone but non-distributive transfer where least and greatest fixed points differ.
+Give the lattice, the transfer table, both fixed points, and the safety direction each one serves.
+Explain which client should use which extreme, using one concrete optimization decision that flips between them.
+\item \label{ex:ch10-widen-loop} Implement the sign analysis from Section~\ref{sec:ch10-worked} over Figure~\ref{fig:ch10-loop} with widening disabled.
+Extend the loop bound from $10$ to $1000$ and count head visits to stabilization.
+Then replace signs with intervals, rerun without widening, and report how the visit count grows with the bound.
+Add widening after two changes and report the new count with its precision loss.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch10-reading}
+
+Appel connects fixed-point iteration to working optimizer code without hiding the termination argument, see~\cite{appel-1998-modern}.
+Morgan shows how shared solver infrastructure serves many optimization passes, see~\cite{morgan-1998-optimizing}.
+Safonov treats monotone frameworks as part of a compiler correctness case, see~\cite{safonov-2010-trustworthy}.
+The C language definition bounds what value domains may assume about arithmetic and conversion, see~\cite{wg14-2011-c11}.

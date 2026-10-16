@@ -1,0 +1,131 @@
+\chapter{Tiny Language Reference}
+\label{ch:app-a-tiny-reference}
+
+This appendix collects the definitions of the tiny expression language and its stack machine in one place, repeating no proofs and introducing no new language features, so a reader can check any domain rule, equation, compilation rule, or verification condition without searching the opening chapter.
+If this appendix and the opening chapter ever disagree, the chapter governs and this appendix needs a correction.
+
+\section{Values and trees}
+\label{sec:app-a-values-trees}
+
+The value set is $V=\{0,1,\ldots,255\}$, and addition and multiplication reduce their mathematical results modulo $256$.
+Thus $250+10$ yields $4$ because $260=1\times256+4$.
+This wraparound is a \term{modular arithmetic} rule of the tiny language.
+Expressions have exactly four shapes, given by the grammar
+\begin{equation}
+  e ::= \operatorname{lit}(n)
+      \mid x
+      \mid \operatorname{add}(e,e)
+      \mid \operatorname{mul}(e,e),
+  \qquad n\in V.
+  \label{eq:app-a-grammar}
+\end{equation}
+The symbol $x$ names the single runtime input, and an addition or multiplication carries exactly two child expressions.
+These shapes describe an \term{abstract syntax tree}, not text with parentheses or comments.
+Every tree must be finite, and every binary node must have two non-null children.
+No node may have two parents and no child path may lead back to an ancestor.
+They matter because the folder mutates nodes in place and assumes that changing one child cannot silently change another parent.
+\index{abstract syntax tree}
+
+\section{The four semantic equations}
+\label{sec:app-a-semantics}
+
+Write $\llbracket e\rrbracket_a$ for the value of expression $e$ when the input $x$ equals $a$.
+The meaning of each tree shape is fixed by one equation.
+\begin{align}
+  \llbracket\operatorname{lit}(n)\rrbracket_a &= n, \label{eq:app-a-literal}\\
+  \llbracket x\rrbracket_a &= a, \label{eq:app-a-input}\\
+  \llbracket\operatorname{add}(p,q)\rrbracket_a
+    &= (\llbracket p\rrbracket_a+\llbracket q\rrbracket_a)\bmod256,
+       \label{eq:app-a-add}\\
+  \llbracket\operatorname{mul}(p,q)\rrbracket_a
+    &= (\llbracket p\rrbracket_a\times\llbracket q\rrbracket_a)\bmod256.
+       \label{eq:app-a-mul}
+\end{align}
+Every expression terminates for every input in $V$, and no expression divides, dereferences memory, calls a function, performs input or output, or diverges.
+Equations~\ref{eq:app-a-literal}--\ref{eq:app-a-mul} are the reference against which the evaluator, the folder, and the stack compiler are judged.
+
+\section{Folder contract}
+\label{sec:app-a-folder-contract}
+
+\term{Constant folding} evaluates a constant operation during translation and replaces it with its result.
+The postorder traversal processes children before deciding about their parent, requires a finite, non-sharing tree built from Equation~\ref{eq:app-a-grammar}, and guarantees a tree with the same value for every input $a\in V$.
+Write $F(e)$ for the folded tree, so the guarantee reads $\llbracket F(e)\rrbracket_a=\llbracket e\rrbracket_a$ for every valid $e$ and every $a\in V$.
+The C implementation folds in place, reuses the parent node for a literal result, and clears both child pointers after computing the value.
+The implementation needs no new expression nodes and takes $O(N)$ time with $O(H)$ extra recursion space for $N$ nodes and height $H$.
+
+\section{Stack instruction set}
+\label{sec:app-a-opcodes}
+
+A \term{stack machine} takes operands from a stack instead of naming a storage location for every intermediate value.
+Write $S\mathbin{\|}[v]$ for the stack formed by appending $v$ to stack $S$.
+The instruction set has exactly four operations, summarized in Table~\ref{tab:app-a-opcodes}.
+\begin{table}
+  \centering
+  \caption{Each opcode has a fixed stack effect.}
+  \label{tab:app-a-opcodes}
+  \begin{tabular}{lll}
+    \toprule
+    Opcode & Operands removed & Value pushed \\
+    \midrule
+    \code{PUSH} $n$ & none & $n$, with $n\in V$ \\
+    \code{GET\_INPUT} & none & current input $a$ \\
+    \code{ADD8} & $u,v$ & $(u+v)\bmod256$ \\
+    \code{MUL8} & $u,v$ & $(u\times v)\bmod256$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+\code{PUSH} carries a literal operand and \code{GET\_INPUT} pushes the current input $a$, while \code{ADD8} and \code{MUL8} each remove the top two values, combine them modulo $256$, and push the result.
+There are no branches, no jumps, and no explicit return instruction.
+Reaching the end of the sequence with exactly one stack value completes the program, and that single value is its result.
+For a binary instruction, the top value $v$ is removed first, so the operation sees $u$ as its left operand and $v$ as its right operand.
+Trying to run an arithmetic instruction with fewer than two available values is \term{stack underflow}, which the verifier rejects before execution.
+Compilation follows the rules $C(\operatorname{lit}(n))=[\code{PUSH}\ n]$, $C(x)=[\code{GET\_INPUT}]$, $C(\operatorname{add}(p,q))=C(p)\mathbin{\|}C(q)\mathbin{\|}[\code{ADD8}]$, and $C(\operatorname{mul}(p,q))=C(p)\mathbin{\|}C(q)\mathbin{\|}[\code{MUL8}]$.
+
+\section{Verification rule}
+\label{sec:app-a-verifier}
+
+The verifier checks target structure without knowing the runtime input.
+It scans the instruction sequence once while tracking only stack depth.
+A push increases the tracked depth by one.
+An arithmetic instruction requires a tracked depth of at least two and decreases it by one.
+If that requirement fails, verification reports a violation without executing anything.
+After the last instruction, the tracked depth must be exactly one.
+The verifier also records the largest depth seen, which is the exact peak stack demand for this branch-free machine.
+Beyond depth, the verifier checks two further rules: each literal operand must lie in $V$ and each opcode tag must be one of the four known operations.
+The unused operand field of every opcode other than \code{PUSH} must contain zero, which gives each instruction one canonical encoding.
+It does not prove that the code implements any particular source tree: a single \code{PUSH} of $99$ is structurally valid but is the wrong translation of almost every source expression.
+Structural safety and semantic preservation therefore remain separate checks even when both are easy to run.
+\index{stack machine!verification}
+
+\section{Capacity, storage, and ownership}
+\label{sec:app-a-storage}
+
+The C code object reserves room for $64$ instructions as an engineering limit of the example rather than as part of the source language.
+The object holds an instruction array and a logical length named \code{used}.
+Only the prefix ending just before \code{used} counts as the program, and remaining slots are storage rather than instructions.
+Because every push consumes one instruction, an accepted program of at most $64$ instructions needs at most $64$ stack slots, so the executor uses a fixed stack array of that size.
+Compilation takes a limit no greater than the array capacity, and if an append would exceed that limit, emission stops and reports failure.
+The public wrapper restores the original logical length when any recursive emission fails.
+The executor verifies the whole sequence before running any instruction and assigns its output parameter only after successful verification and execution.
+On rejection, the caller output value is left unchanged and failure travels through a Boolean status.
+The ownership rule for trees is that the caller owns every node, so folding changes reachable edges in place without freeing disconnected children, which remain caller storage until the caller reclaims them.
+Stack allocation in the demonstration and arena allocation in the tests both satisfy this contract, unlike a general heap allocator in which each node is owned only through its parent.
+\index{arena}
+
+\section{Folded example in stack form}
+\label{sec:app-a-example}
+
+The running source expression $(x+7)\times(3+5)$ compiles to seven instructions before folding.
+After folding it becomes $(x+7)\times8$ and needs only five instructions with a peak demand of two instead of three.
+Listing~\ref{lst:app-a-folded} shows that folded five-instruction program in the shared IR listing style.
+\begin{irlisting}[caption={Folded stack code for $(x+7)\times8$.},label={lst:app-a-folded}]
+GET_INPUT
+PUSH 7
+ADD8
+PUSH 8
+MUL8
+\end{irlisting}
+At input $250$, execution pushes $250$, pushes $7$, adds to obtain $1$, pushes $8$, and multiplies to obtain $8$.
+Compilation and folding compose because folding produces a valid tree of the kind compilation accepts.
+With enough target capacity, executing the compiled folded tree appends $\llbracket F(e)\rrbracket_a$ to the initial stack for every $e$, $a$, and $S$, which the folder theorem identifies with $\llbracket e\rrbracket_a$.
+A capacity failure breaks this chain by producing no executable replacement rather than a wrong answer, so the caller must handle that failure explicitly instead of running unused array slots.

@@ -1,0 +1,201 @@
+\chapter{Just-in-Time Compilation}\label{ch:just-in-time-compilation}
+
+An ahead-of-time compiler optimizes without knowing inputs, shapes, or hot paths.
+A \term{just-in-time compiler} waits until the program runs, watches what actually happens, and then compiles for that reality.
+Waiting trades warm-up time for better information.
+This chapter shows how to spend that budget wisely.
+We build tiered execution from interpreter to baseline to optimizing compiler, with profiling and on-stack replacement connecting the tiers.
+
+\section{Why Compile Late}\label{sec:ch34-why-late}
+
+Static compilers guess at branch directions, call targets, and value types.
+Runtime observation replaces those guesses with counts.
+A loop that runs a million iterations deserves compilation even if it looked cold statically.
+A call site that always targets one method deserves a direct call even if the class hierarchy allows many.
+A value that is always a small integer deserves unboxed arithmetic even if the language allows strings.
+The just-in-time compiler, usually shortened to JIT, acts on these facts.
+It compiles only hot code, specializes it to observed behavior, and keeps a fallback when behavior changes.
+Figure~\ref{fig:ch34-tiers} shows the tiered pipeline used through this chapter.
+Execution starts in the interpreter with profiling enabled.
+Hot methods enter a baseline compiler that produces code quickly with modest optimization.
+Hotter methods enter an optimizing compiler that spends more time for better code.
+Deoptimization, the subject of the next chapter, returns to a lower tier when assumptions fail.
+Table~\ref{tab:ch34-tiers} compares the tiers by compile speed, code quality, and profiling needs.
+The table is qualitative because thresholds and budgets are workload-specific.
+No tier is best in isolation.
+The system wins when most time runs in good code while little time compiles.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=1.0cm and 1.4cm]
+\node[basic block] (interp) {interpreter\\ profile};
+\node[basic block, right=of interp] (base) {baseline JIT\\ fast, modest code};
+\node[basic block, right=of base] (opt) {optimizing JIT\\ slow, best code};
+\node[basic block, below=of base] (deopt) {deoptimize\\ back to lower tier};
+\draw[cfg edge] (interp) -- (base);
+\draw[cfg edge] (base) -- (opt);
+\draw[cfg edge] (opt) -- (deopt);
+\draw[cfg edge] (deopt) -- (interp);
+\end{tikzpicture}
+\caption{Tiered execution moves hot code upward as counters grow and returns through deoptimization when assumptions fail, so profiling pays only where it matters.}
+\label{fig:ch34-tiers}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{Tiers trade compile speed against code quality, with profiling connecting each step upward.}
+\label{tab:ch34-tiers}
+\begin{tabular}{llll}
+\toprule
+Tier & Compile speed & Code quality & Needs \\
+\midrule
+Interpreter & None & Slowest & Counters \\
+Baseline & Fast & Modest & Hot threshold \\
+Optimizing & Slow & Best & Type profiles \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Profiling and Hotness}\label{sec:ch34-profiling}
+
+A JIT compiles what counters and profiles select.
+\term{Method counters} record entries and loop back-edges.
+\term{Type profiles} record the observed kinds at selected operations.
+\term{Call-site profiles} record the observed targets of each indirect call.
+Algorithm~\ref{alg:ch34-tier-up} gives the promotion rule for one method.
+It assumes counters increment on entry and on each back-edge and decay or reset on compilation.
+It requires separate thresholds for baseline and optimizing tiers.
+It returns the tier decision without compiling anything itself.
+Counters are cheap but noisy.
+A method that runs once with a huge loop looks like steady hot code.
+Decay on a timer or on collection separates sustained heat from one burst.
+Profiles are richer but costlier.
+Recording every type at every operation slows the interpreter visibly.
+Production systems profile only chosen bytecodes: arithmetic, property access, and calls.
+Each profile site keeps a small bounded cache of recent observations.
+When the cache overflows with distinct kinds, the site marks itself polymorphic and stops growing.
+That bound keeps profiling memory proportional to program size rather than execution length.
+
+\begin{algorithm}[htbp]
+\caption{Tier promotion from counters and profile maturity}\label{alg:ch34-tier-up}
+\begin{pseudocode}
+\Require method $m$ with entry count $c_e$, back-edge count $c_b$, profile state $p$
+\Ensure tier decision for $m$
+\State $heat \gets c_e + c_b$
+\If{$heat < T_{base}$}
+\State \Return stay in interpreter
+\EndIf
+\If{$heat < T_{opt}$}
+\State \Return compile with baseline JIT
+\EndIf
+\If{$p$ is mature}
+\State \Return compile with optimizing JIT
+\EndIf
+\State \Return compile with baseline JIT and keep profiling
+\end{pseudocode}
+\end{algorithm}
+
+The returned tier is a desired execution tier, not an instruction to compile again on every counter update.
+Compare it with the installed tier and any pending compilation, enqueue at most one request per version, and publish completed code atomically.
+Use saturating counters or checked arithmetic so counter overflow cannot turn a hot method cold.
+Moving an already active loop into new code additionally requires the on-stack replacement state mapping described below.
+
+\section{Worked Example: Promoting a Hot Loop}\label{sec:ch34-worked}
+
+We apply Algorithm~\ref{alg:ch34-tier-up} to a small summation loop.
+Thresholds are $T_{base} = 100$ and $T_{opt} = 1000$.
+The method is entered once, so $c_e = 1$.
+The loop body runs $1200$ iterations, so $c_b = 1200$.
+Heat is $1 + 1200 = 1201$.
+After $50$ iterations, heat is $51$, below $T_{base}$, so the method stays interpreted.
+After $150$ iterations, heat is $151$, above $T_{base}$ but below $T_{opt}$, so the baseline compiler produces quick code.
+After $1200$ iterations, heat is $1201$ and the integer profile at the add is mature, so the optimizing compiler produces specialized code.
+The profile matters as much as the count.
+Suppose the add observed $1150$ integers and $1$ string before maturity.
+The optimizer specializes for integers and guards the string case.
+If the string never recurs, the guard never fires and the fast path pays for itself.
+If strings arrive steadily, the site is polymorphic and the optimizer should not specialize narrowly.
+The listing below shows the specialized shape in schematic intermediate form.
+\begin{irlisting}
+; specialized loop body, integer profile mature
+; guard: tag(addend) == int, else deoptimize
+t1 = unchecked_add t0, 1   ; no tag test
+t2 = cmp_lt t1, 1200
+br t2, loop, exit
+\end{irlisting}
+Arithmetic checks the decision: $1201 \geq 1000$ promotes, $151 \geq 100$ but $< 1000$ holds at baseline, and $51 < 100$ waits.
+Each transition keeps a way back, which the next chapter implements.
+
+\section{On-Stack Replacement}\label{sec:ch34-osr}
+
+Compiling a method is not enough when the program already sits inside a long-running loop.
+\term{On-stack replacement} transfers control between tiers mid-activation.
+Entry replacement starts a method in compiled code.
+Loop replacement jumps from interpreted frames into a compiled loop body, or back out again.
+The transfer needs a mapping between interpreter state and compiled state at the chosen point.
+Source-level values must match on both sides: locals, stack temporaries, and the program counter.
+The compiler emits an \term{OSR map} at each transfer point for this purpose.
+\begin{ccnote}[Maps before speed]
+An OSR map that drops one local corrupts the program silently.
+Test state transfer with exact value checks before measuring any speedup.
+\end{ccnote}
+Test replacement with a loop that transfers at iteration $500$ of $1000$.
+The test records every local before and after the jump and compares checksums over all iterations.
+A second test transfers back out at iteration $750$ and finishes in the interpreter.
+Both runs must produce the same final sum.
+The \enquote{same sum both ways} check catches most mapping defects.
+
+\section{Code Caches and Invalidation}\label{sec:ch34-caches}
+
+Compiled code lives in a managed \term{code cache} with a fixed budget.
+Each entry holds machine code, its OSR maps, its profile links, and its dependency list.
+When the cache fills, cold entries are evicted and their methods return to interpreted execution.
+Eviction must patch or remove every call site that targeted the evicted code.
+Indirect calls through a table need only a table update.
+Inlined copies need invalidation of each host method that absorbed them.
+\term{Invalidation} generalizes eviction to any broken assumption.
+Loading a class can add an override that defeats a devirtualized call.
+Redefining a method can change semantics the optimizer baked in.
+A profile contradiction can prove a specialization wrong.
+The system walks dependencies from the changed entity to every affected compilation.
+Live activations of discarded code deoptimize at their next safe point, reusing the machinery of the next chapter.
+New calls use fresh compilations or the interpreter until heat rebuilds.
+Test the cache with a fill-and-evict sequence under fixed profiles.
+The test asserts that every evicted method still computes correct results and that hot methods recompile on demand.
+A second test loads a new class mid-run and asserts that affected call sites observe the new target.
+The \enquote{correct after eviction} rule keeps cache policy from becoming a correctness risk.
+
+\section{Implementation Notes and Complexity}\label{sec:ch34-implementation}
+
+Counter updates cost $O(1)$ per entry and back-edge.
+Profile recording costs $O(1)$ per observed site with bounded cache size.
+The promotion test itself is $O(1)$.
+Compilation cost dominates: baseline compilation is roughly linear in method size, while optimizing compilation includes analyses that are quadratic or worse in pathological cases.
+Code caches bound total memory; eviction returns cold methods to interpreted execution.
+Production systems compile on background threads, queue by heat, and cap concurrent jobs.
+They invalidate compiled code when classes load, methods redefine, or profiles contradict assumptions.
+Each invalidation walks a dependency table from the changed entity to affected code.
+A common pitfall sets thresholds from folklore instead of measurement.
+Too low a threshold compiles cold code and wastes warm-up.
+Too high a threshold leaves real heat interpreted.
+Another pitfall profiles everything and slows the interpreter severalfold.
+Selective profiling at arithmetic, access, and call sites captures most decisions at a fraction of the cost.
+We keep thresholds configurable and profiles bounded from the start.
+The tiers here feed speculation in the next chapter directly.
+Guards compiled now become the deoptimization points handled there.
+% TODO(cite): need a primary reference for tiered-compilation threshold policies.
+
+\section{Exercises}\label{sec:ch34-exercises}
+
+\begin{enumerate}
+\item Compute the tier decision of Algorithm~\ref{alg:ch34-tier-up} for $c_e = 3$, $c_b = 90$, $T_{base} = 100$ with an immature profile, then repeat with $c_b = 2000$ and a mature profile.\label{ex:ch34-tier-math}
+\item Design a call-site profile with three observed targets in counts $98$, $1$, and $1$, state which specialization you would compile, and describe the fallback for the rare targets.\label{ex:ch34-call-profile}
+\item Write an on-stack-replacement test for a loop of $1000$ iterations transferring at iteration $400$, listing which values the OSR map must carry and what checksum you would compare.\label{ex:ch34-osr-test}
+\end{enumerate}
+
+\section{Further Reading}\label{sec:ch34-reading}
+
+Appel describes compilation pipelines whose ideas carry over to run-time compilation~\cite{appel-1998-modern}.
+Morgan relates profiling and code shape to optimization payoffs~\cite{morgan-1998-optimizing}.
+Safonov discusses trustworthy compilation when assumptions can change at run time~\cite{safonov-2010-trustworthy}.
+The C standard draft defines observable behavior that any replacement must preserve~\cite{wg14-2011-c11}.

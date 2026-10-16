@@ -1,0 +1,200 @@
+\chapter{Instruction Scheduling}\label{ch:instruction-scheduling}
+
+Processors overlap work across cycles, so instruction order decides how fast a program runs.
+Two orders can compute identical results with very different runtimes when one stalls waiting for operands and the other fills those gaps with independent work.
+Instruction scheduling reorders operations to hide latencies, fill issue slots, and respect resource limits without changing meaning.
+It is the back-end pass where the abstract notion of dependence meets the concrete timing of a pipeline.
+
+\section{Dependences and Machine Models}\label{sec:ch26-dependences}
+
+A schedule is legal when it preserves every dependence and resource constraint.
+\term{Instruction scheduling} orders machine operations in time subject to those constraints.
+\term{Data dependence} means one operation reads a value another writes, and covers read-after-write, write-after-read, and write-after-write relations.
+\term{Latency} means the cycles before a result is usable, while \term{throughput} means how often an operation can issue.
+\term{Issue width} counts how many operations can start per cycle, and \term{functional unit} names the hardware that executes a class of operations.
+A \term{dependence DAG} has one node per instruction and one edge per dependence labeled with the required delay.
+
+Consider three operations where the first loads a value, the second adds to it, and the third is independent.
+Scheduling the add immediately after the load stalls for the load latency.
+Moving the independent operation between them hides part of that stall.
+No dependence is violated because the moved operation touches different registers.
+The same idea scales to loops, where software pipelining overlaps iterations, and to wide-issue machines, where the scheduler packs independent operations into the same cycle.
+The \code{load}, \code{add}, and \code{mul} names below are \code{machine opcodes} whose latencies the scheduler reads from the machine model.
+\begin{irlisting}
+; dependence DAG in textual form
+n1: r1 = load [p]      ; latency 3
+n2: r2 = add r1, r0    ; depends on n1 with delay 3
+n3: r3 = mul r4, r5    ; independent of n1 and n2
+\end{irlisting}
+The naive order \code{n1, n2, n3} stalls two cycles between \code{n1} and \code{n2}.
+The order \code{n1, n3, n2} issues the load at cycle $0$, the independent multiply at $1$, and the dependent add at $3$.
+Cycle $2$ is still idle because the load-to-add latency is three cycles.
+The result bits are identical.
+Only the timing differs.
+
+Scheduling scope determines how much freedom the pass has.
+\term{Basic-block scheduling} reorders within one block and is always safe to attempt.
+\term{Superblock} and \term{trace scheduling} work across biased branches by treating a hot path as one region with compensation code on the exits.
+\term{Software pipelining} schedules loop bodies so that operations from different iterations overlap in a steady state.
+Pre-pass scheduling runs before register allocation to expose parallelism, while post-pass scheduling runs after allocation when true machine latencies and spill code are known.
+Pre-pass scheduling risks increasing register pressure; post-pass scheduling cannot rename to break false dependences.
+Many compilers run both lightly rather than one aggressively.
+Figure~\ref{fig:ch26-dag} shows the dependence DAG for the example above.
+Table~\ref{tab:ch26-scheduler-scope} compares the scheduling scopes.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=1.2cm]
+\node[basic block] (n1) {n1: load};
+\node[basic block, below left=of n1] (n2) {n2: add};
+\node[basic block, below right=of n1] (n3) {n3: mul};
+\draw[cfg edge] (n1) -- (n2);
+\end{tikzpicture}
+\caption{The load feeds the add while the multiply stays independent, so the scheduler may place the multiply between them without violating any edge.}
+\label{fig:ch26-dag}
+\end{figure}
+
+\begin{table}[htbp]
+\caption{Scheduling scopes with their freedom and main risk.}
+\label{tab:ch26-scheduler-scope}
+\begin{tabular}{lll}
+\toprule
+Scope & Freedom & Main risk \\
+\midrule
+Basic block & Local reorder only & Small hiding window \\
+Superblock and trace & Cross-branch motion & Compensation code \\
+Software pipeline & Cross-iteration overlap & Code growth, pressure \\
+Pre-allocation & Full renaming room & Pressure blowup \\
+Post-allocation & Exact latencies known & False dependences stuck \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Resource modeling decides how faithfully the scheduler tracks the machine.
+A simple model counts issue slots per cycle and functional-unit occupancy.
+A precise model adds pipeline bypasses, asymmetric ports, cracked micro-operations, and memory-disambiguation stalls.
+Reservation tables record which resources each operation needs in each cycle after issue.
+Overly simple models schedule for a machine that does not exist; overly precise models become brittle across chip revisions.
+Most compilers ship a mid-level model tuned against benchmarks and refine the worst outliers by hand.
+\begin{ccnote}[Model the machine you ship]
+A scheduler tuned to last year pipeline makes this year code slower when port mappings change.
+Recalibrate latencies and port assignments per subtarget and keep a fallback generic model.
+A wrong table pessimizes every hot loop.
+\end{ccnote}
+
+\section{List Scheduling}\label{sec:ch26-algorithm}
+
+\term{List scheduling} is the standard heuristic because optimal scheduling is NP-hard for essentially all realistic models.
+It simulates cycles forward (or backward), keeps a ready list of operations whose predecessors are scheduled, and picks the highest-priority ready operation for each slot.
+Priorities usually combine the critical-path height, the number of successors, and resource-fit tie-breakers.
+Forward scheduling prioritizes hiding consumer stalls, while backward scheduling prioritizes exposing producer flexibility; compilers pick per target or run both and keep the better result.
+Algorithm~\ref{alg:ch26-list} states the forward form for a single region with a reservation-table resource check.
+
+\begin{algorithm}[htbp]
+\caption{Forward list scheduling for one region}\label{alg:ch26-list}
+\begin{pseudocode}
+\Require complete dependence DAG $D$, resource table $R$, edge delays, individually schedulable operations
+\Ensure legal schedule $S$ for the region
+\State compute priority $H(n)$ as the critical-path height of $n$
+\State $cycle \gets 0$, $Ready \gets$ nodes with no predecessors
+\While{unscheduled nodes remain}
+\State release each unscheduled node once all predecessors are placed and their edge delays have elapsed
+\State select the highest $H(n)$ in $Ready$ that fits $R$ at $cycle$
+\If{such $n$ exists}
+\State place $n$ at $cycle$ and reserve its resources in $R$
+\State remove $n$ from $Ready$
+\Else
+\State advance $cycle$ by one idle step
+\EndIf
+\EndWhile
+\State emit $S$ in cycle order with exact slot assignments
+\end{pseudocode}
+\end{algorithm}
+
+The algorithm assumes the dependence DAG is complete: every read-after-write, write-after-read, and write-after-write edge is present with its delay, memory dependences are disambiguated conservatively, and control dependences bound the region.
+It also assumes the resource table answers fit queries in near-constant time.
+Let $N$ be operations, $E$ dependence edges, $Q$ candidate fit checks, $W$ cost per check, and $T$ cycle advances.
+With event-based readiness updates and a priority queue, bookkeeping costs $O(N\log N+E)$, but fit search and cycle advancement add $O(QW+T)$ for this implementation.
+Repeatedly scanning blocked ready operations can make $Q$ much larger than $N$; large latencies likewise increase $T$ unless the scheduler jumps to the next event.
+Priority computation costs $O(N + E)$ by longest-path traversal.
+Priority-queue insertion and removal cost $O(N\log N)$ when each operation enters and leaves once; searching past resource-blocked candidates is additional work.
+In practice the resource check dominates, so implementations cache port masks and precompute operation classes.
+% TODO(cite): need a primary reference for trace scheduling with compensation code.
+
+Heuristic quality hinges on the priority function and the tie-breakers.
+Critical-path height alone is often enough for in-order pipelines.
+Wide out-of-order machines need additional bias toward memory operations, long-latency producers, and operations that relieve port pressure.
+Register-pressure awareness adds another term that delays operations whose results extend many live ranges.
+No single priority wins everywhere, so schedulers expose weights and tune them per subtarget against loop-heavy benchmarks.
+
+\section{Worked Example}\label{sec:ch26-worked}
+
+We schedule a five-operation block by hand on a single-issue machine with the stated latencies.
+The operations and dependences are small enough to enumerate completely.
+\begin{irlisting}
+; latencies: load 3, mul 2, add 1, store 1
+a: r1 = load [p]
+b: r2 = mul r1, r0
+c: r3 = add r4, r5
+d: r6 = mul r3, r2
+e: store [q], r6
+\end{irlisting}
+Dependences: \code{b} waits $3$ cycles after \code{a}; \code{d} waits $2$ after \code{b} and $1$ after \code{c}; \code{e} waits $2$ after \code{d}.
+Including each operation's own latency, critical-path heights are $1$ for \code{e}, $3$ for \code{d}, $5$ for \code{b}, $8$ for \code{a}, and $4$ for \code{c}.
+The chain through \code{a, b, d, e} takes $8$ cycles.
+List scheduling picks \code{a} before \code{c} because height $8$ exceeds $4$.
+Cycle 0 issues \code{a}.
+Cycle 1 has ready set \code{c} only, since \code{b} still waits for the load, so it issues \code{c}.
+Cycle 2 has an empty ready set and idles.
+Cycle 3 releases \code{b} and issues it.
+Cycle 4 idles because \code{d} waits for the multiply latency.
+Cycle $5$ issues \code{d}, cycle $6$ idles, cycle $7$ issues \code{e}, and the block completes at time $8$.
+No legal schedule finishes sooner because the \code{a, b, d, e} chain alone needs that long.
+
+Compare against the naive program order \code{a, b, c, d, e}.
+That order must wait until cycle $3$ to issue \code{b}, then issues \code{c} at cycle $4$, \code{d} at $5$, and \code{e} at $7$.
+It also completes at time $8$; rearranging the idle slots produces no elapsed-time gain in this example.
+Verify legality of the final order \code{a, c, b, d, e}: every consumer issues after its producer delay, memory order between the load and store is preserved by disambiguation, and no resource is double-booked on the single-issue model.
+Dual issue could place \code{a} and \code{c} together at cycle $0$, but the same dependence chain still prevents completion before time $8$.
+Figure~\ref{fig:visual-schedule-timeline} places both single-issue schedules on one time axis.
+The filled cells mark issue events, not the entire time an operation spends in the pipeline.
+This distinction prevents confusing an empty issue slot with an idle processor: a previously issued load or multiply can still be in flight.
+
+\input{figures/schedule-timeline}
+
+That sensitivity to the model is exactly why the scheduler reads latencies from data rather than hard-coding them.
+
+\section{Implementation Notes}\label{sec:ch26-implementation}
+
+Production schedulers split the work across three places: pre-allocation scheduling for parallelism, register allocation with pressure awareness, and post-allocation scheduling for exact stalls and bundling.
+Very long instruction word and in-order targets lean on the scheduler heavily and add bundling, packetization, and explicit no-operation insertion after scheduling.
+Out-of-order targets lean on it less because hardware reorders dynamically, but they still care about instruction-cache layout, micro-operation fusion, and port balance.
+Loop scheduling uses modulo scheduling with a computed initiation interval, kernel-only code generation, and prologue and epilogue handling; when the loop resists pipelining, partial unrolling plus block scheduling is the fallback.
+
+Memory dependences deserve the most testing.
+Static alias analysis disambiguates most stack and global references, while unknown pairs stay ordered conservatively.
+Hardware aliasing hints, non-temporal markers, and fence instructions add edges the DAG must carry explicitly.
+A scheduler that moves a load above an unresolved store trades a rare stall for a wrong program.
+Keep the disambiguation interface narrow so the scheduler cannot invent orderings the analysis never approved.
+
+Compile-time cost stays proportional to region size times issue width for list scheduling, which is why regions are capped and huge unrolled bodies are scheduled in windows.
+Profile hot loops to pick modulo candidates rather than pipelining every loop nest.
+Measure with hardware counters, not just static cycle estimates, because cache misses and branch effects dwarf scheduler gains on many workloads.
+Helpful organization of selector, scheduler, and allocator interaction appears in~\cite{morgan-1998-optimizing} and see~\cite{appel-1998-modern}.
+Soundness discipline for motion across memory operations follows the validation view in~\cite{safonov-2010-trustworthy}.
+Memory-ordering and sequencing rules that constrain legal motion are grounded in~\cite{wg14-2011-c11}.
+
+\section{Exercises}\label{sec:ch26-exercises}
+
+\begin{enumerate}
+\item Schedule the block in Section~\ref{sec:ch26-worked} on a dual-issue machine. \label{ex:ch26-dual-issue} Show the cycle-by-cycle placement, count the saved cycles, and verify every dependence delay.
+\item A load feeds an add with latency 3, and four independent operations are available. \label{ex:ch26-hide-latency} Construct the schedule that hides the stall fully and state how many independents are necessary in general.
+\item A scheduler moves a load above a store with an unknown alias relation. \label{ex:ch26-memory-edge} Explain why the motion is illegal, add the missing edge, and reschedule the three-operation example.
+\end{enumerate}
+
+\section{Further Reading}\label{sec:ch26-reading}
+
+Scheduling scope, software pipelining, and target interaction are developed in~\cite{morgan-1998-optimizing}.
+A compact account of scheduler placement in the backend pipeline appears in~\cite{appel-1998-modern}.
+Validation of motion across potentially excepting and memory operations is treated in~\cite{safonov-2010-trustworthy}.
+The sequencing and memory-model constraints that limit reordering appear in~\cite{wg14-2011-c11}.

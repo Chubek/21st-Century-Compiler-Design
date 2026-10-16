@@ -1,0 +1,208 @@
+\chapter{Dead Code and Control Dependence}
+\label{ch:ch15-dead-code-control-dependence}
+
+Optimizers create garbage as a side effect of doing their job.
+Constant folding leaves dead definitions behind, branch folding leaves dead edges behind, and inlining leaves dead parameter setups behind.
+Each corpse costs code size, instruction cache, and analyst attention in later passes.
+Worse, dead code can keep live code pessimistic: a dead store blocks a load motion, a dead branch doubles a join, and a dead call blocks alias refinement.
+The problem of this chapter is to delete code that cannot affect observable behavior, without deleting code that can.
+We combine backward liveness with control reasoning so that data-dead and control-dead code both disappear.
+Section~\ref{sec:ch15-dead} defines deadness, Section~\ref{sec:ch15-control} adds control dependence, and Section~\ref{sec:ch15-worked} deletes by hand on Figure~\ref{fig:ch15-cfg}.
+
+\section{What dead means}
+\label{sec:ch15-dead}
+
+An instruction is \term{dead} when removing it cannot change any observable behavior of any execution.
+A more operational test uses liveness: a pure definition is dead when no live use reads it on any path.
+A store is dead when no load that may read it is live, accounting for aliasing conservatively.
+A branch is dead when its condition is constant, in which case the untaken edge and its exclusive blocks may be unreachable.
+A call is dead only when it provably lacks side effects and its result is unused, which few calls satisfy.
+The \enquote{provably} qualifier carries the whole safety burden, and every deletion in this chapter traces back to it.
+Table~\ref{tab:ch15-patterns} lists the deletion patterns with the proof each one demands.
+
+Consider \code{t = a + b} followed by \code{use a} with no later mention of \code{t}.
+The addition defines a temporary nobody reads, performs no side effect, and raises no trap under the type guards.
+Deleting it preserves every output, fault, and divergence the program had.
+Now change the operation to \code{t = x / y} where \code{y} might be zero.
+Deleting the division removes a potential trap, turning a failing execution into a succeeding one.
+That changes observable behavior, so the division is live for trapping purposes even when its value is unused.
+Beginners delete the second case because their tests never divide by zero, and the miscompile surfaces only on hostile input.
+The C standard classifies several such operations as trapping or undefined, so portable deletion must consult it, see~\cite{wg14-2011-c11}.
+
+\begin{irlisting}
+; Join with a dead definition, a live use, and a foldable branch
+; B1 branches on flag, B2 defines dead t and live u, B3 defines u
+B1: br flag, B2, B3
+B2: t = a + b
+B2: u = a + 1
+B2: jmp B4
+B3: u = a + 2
+B3: jmp B4
+B4: use u
+\end{irlisting}
+
+The listing holds one clearly dead instruction and one temptation.
+The definition of \code{t} in $B2$ is dead because no path uses \code{t} afterward and integer addition has no effect beyond its value.
+The definitions of \code{u} are both live because $B4$ uses \code{u} on every path.
+Deleting \code{t} is safe today and profitable forever, since later passes stop analyzing it.
+Deleting either definition of \code{u} would corrupt the use at $B4$ on some path.
+A liveness pass over this graph proves the first claim and refutes the second, as Section~\ref{sec:ch15-worked} shows numerically.
+Algorithm~\ref{alg:ch15-adce} then generalizes the hand reasoning to loops and control dependence.
+\section{Control dependence and open questions}
+\label{sec:ch15-control}
+
+Data liveness alone cannot delete a branch, because branches define no values.
+A block is \term{control dependent} on a branch when the branch decides whether the block executes.
+Formally the dependence uses post-dominators: $Y$ depends on $X$ when $X$ has two successors whose paths to exit rejoin differently around $Y$.
+Computing it needs the \term{post-dominator} tree over the reversed graph, where entry and exit swap roles.
+The \term{control dependence graph} then links each branch to the blocks it governs, and dead-edge removal consults it before deleting.
+A branch whose condition is constant governs nothing worth keeping on the dead arm, so its control dependents go dark together.
+Figure~\ref{fig:ch15-cfg} shows $B2$ and $B3$ both dependent on $B1$, which is why folding $B1$ can delete either arm wholesale.
+
+Unreachable code needs this machinery rather than plain liveness.
+An infinite loop with no live values still governs everything after it by never falling through.
+A branch on a constant still selects one arm even when both arms compute live values locally.
+Marking-based deletion therefore starts from truly live roots, such as returns, stores to escaped memory, and effectful calls, then marks backward through data and control edges together.
+Anything unmarked after the sweep is dead, including whole regions guarded by constant branches.
+The sweep must treat volatile operations, atomic fences, and input-output calls as roots unconditionally.
+It must also treat potential traps conservatively unless a prior proof discharges them.
+Safonov treats this root discipline as part of the trusted-deletion argument, see~\cite{safonov-2010-trustworthy}.
+
+\begin{algorithm}
+\caption{Conservative marking-based dead-code elimination}\label{alg:ch15-adce}
+\begin{pseudocode}
+\Require CFG $G$ with explicit effects and traps, and complete reaching-definition links
+\Ensure unused pure definitions removed; all original control flow retained
+\State $Live \gets$ roots: all terminators, observable uses, stores, and operations not proved pure, total, and nontrapping
+\State $MarkedB \gets$ blocks holding roots
+\State $W \gets$ all root instructions
+\While{$W \neq \emptyset$}
+\State remove some $i$ from $W$
+\ForAll{operands $v$ used by $i$}
+\ForAll{definitions $d$ of $v$ that can reach $i$}
+\If{$d$ unmarked}
+\State mark $d$ and add $d$ to $W$
+\EndIf
+\EndFor
+\EndFor
+\ForAll{branches $c$ that $i$ is control dependent on}
+\If{$c$ unmarked}
+\State mark $c$ and add $c$ to $W$
+\EndIf
+\EndFor
+\EndWhile
+\State delete unmarked pure definitions; retain all terminators and blocks
+\end{pseudocode}
+\end{algorithm}
+
+Algorithm~\ref{alg:ch15-adce} marks live instructions rather than deleting dead ones directly.
+It seeds roots that observable behavior requires, then walks backward through data uses and control conditions together.
+A definition becomes live when a live instruction reads it, and a branch becomes live when a live instruction depends on it.
+Termination follows because each instruction marks at most once and each edge is examined on marking.
+Correctness follows because every deleted instruction is pure, unread, and ungoverning by construction of the unmarked set.
+This conservative sweep retains every terminator, so it preserves loops and termination behavior without relying on an exit-reaching post-dominator model.
+Branch deletion is a separate extension requiring a proof about control flow, phi selection, effects, traps, and divergence.
+Morgan presents deletion passes in this mark-then-sweep shape inside the optimization pipeline, see~\cite{morgan-1998-optimizing}.
+\section{Worked example with marking}
+\label{sec:ch15-worked}
+
+We run Algorithm~\ref{alg:ch15-adce} by hand on Figure~\ref{fig:ch15-cfg} with root \code{use u} in $B4$.
+With no successor uses, $\LiveOut{B4}=\emptyset$; the observable use inside $B4$ makes $\LiveIn{B4}=\{u\}$.
+Before deletion, ordinary liveness at $B2$ includes both $a$ and $b$ because the dead assignment \code{t = a + b} still reads them.
+After deleting that pure assignment, only $a$ remains live on entry to $B2$.
+Block $B3$ defines \code{u} from \code{a}, giving live-in $\{a\}$.
+Block $B1$ uses \code{flag} for the branch and passes $\{a, flag\}$ upward.
+Table~\ref{tab:ch15-patterns} classifies each instruction from these sets, and the marking trace below confirms the classification constructively.
+
+\begin{figure}
+\begin{tikzpicture}
+\node[basic block] (b1) {B1: br flag};
+\node[basic block, below left=1.1cm and 0.7cm of b1] (b2) {B2: t dead, u live};
+\node[basic block, below right=1.1cm and 0.7cm of b1] (b3) {B3: u = a + 2};
+\node[basic block, below=2.4cm of b1] (b4) {B4: use u};
+\draw[cfg edge] (b1) -- (b2);
+\draw[cfg edge] (b1) -- (b3);
+\draw[cfg edge] (b2) -- (b4);
+\draw[cfg edge] (b3) -- (b4);
+\end{tikzpicture}
+\caption{The dead-code diamond where \code{t} in $B2$ is dead but both definitions of \code{u} stay live through the use in $B4$.}
+\label{fig:ch15-cfg}
+\end{figure}
+
+\begin{table}
+\caption{Deletion patterns with the safety proof each one requires before removal.}
+\label{tab:ch15-patterns}
+\begin{tabular}{lcc}
+\toprule
+Pattern & Safety proof needed & Action \\
+\midrule
+Pure def, no live use & liveness fixed point & delete definition \\
+Dead branch arm & constant condition & fold to jump \\
+Unreachable block & no live control path & delete block \\
+Effectful or trapping op & no pureness proof & keep operation \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Marking seeds \code{use u} in $B4$ as live and enqueues it.
+It marks both definitions of \code{u} in $B2$ and $B3$ through data edges, since each reaches the use along some executable path.
+It marks the branch in $B1$ through control edges, since the live $B2$ and $B3$ definitions both depend on it.
+It marks \code{a} and \code{flag} transitively as operands of marked instructions.
+It never marks \code{t = a + b} because no marked instruction reads \code{t} and \code{t} governs nothing.
+The sweep deletes exactly that addition and keeps everything else.
+The \enquote{one deletion} outcome is the point: aggressive marking removes what liveness refutes and nothing more.
+A second scenario folds $B1$ on constant true first, after which $B3$ loses live control and both its instructions go dark in the next sweep.
+The cascade shows why deletion and folding iterate together rather than running once each.
+
+The same example warns against deleting the tempting \code{u} copy in $B3$.
+Its value differs from the $B2$ copy, and the join in $B4$ reads whichever arm executed.
+Removing it would leave the right path reading an undefined version, which renaming would expose as a missing phi argument.
+Control dependence explains the error structurally: $B3$ is governed by $B1$, $B4$ is not governed by either arm, and the use in $B4$ needs both governors live.
+Data reasoning and control reasoning agree, which is the invariant to check whenever they seem to disagree.
+When they do disagree, the implementation should keep the code and file a precision bug rather than delete and hope.
+The exercises ask you to construct exactly such a disagreement with aliasing.
+
+\section{Implementation notes and cost}
+\label{sec:ch15-implementation}
+
+The conservative algorithm needs reaching-definition links and a sound side-effect oracle; because all terminators are roots, its control-dependence loop adds no new marks and may be omitted.
+Aggressive branch deletion needs additional control-dependence and termination reasoning.
+Given $I$ instructions and $D$ explicit dependency links, marking and sweeping cost $O(I+D)$ time and storage, excluding construction of those links.
+Non-SSA reaching-definition links can be numerous; neither their construction nor post-dominator computation is made linear merely by using a worklist.
+Iteration across folding cascades repeats sweeps, but each sweep deletes at least one instruction or edge, bounding the number of sweeps.
+Production compilers run a cheap trivial pass first, for single-use chains and constant branches, and reserve aggressive marking for post-folding cleanup.
+Appel shows where each layer sits relative to register allocation and code emission, see~\cite{appel-1998-modern}.
+
+The oracle is the trust boundary, not the graph walk.
+A pure annotation on a call must be verified against the callee body or a trusted specification, never against the call name alone.
+An alias query that declares a store dead must cover every load on every path, including exceptional and concurrent paths the CFG omits.
+A trap-deletion decision must cite the type and range proof that discharges the fault, not the absence of failures in testing.
+These are the rules that keep deletion from becoming miscompilation with good benchmark scores.
+The C language definition supplies the trapping, sequencing, and volatility facts the oracle consults, see~\cite{wg14-2011-c11}.
+Cytron and colleagues give a primary treatment connecting control-dependence graphs with dominance-frontier machinery~\cite{cytron-1991-ssa}.
+
+\section{Exercises}
+\label{sec:ch15-exercises}
+
+\begin{enumerate}
+\item \label{ex:ch15-hand-mark} Run Algorithm~\ref{alg:ch15-adce} on Figure~\ref{fig:ch15-cfg} after changing $B2$ to \code{t = x / y}.
+Assume the division may trap and consult Table~\ref{tab:ch15-patterns} for the trapping row.
+Show the new root set, the marking order, and whether the division survives.
+Then add a range proof that \code{y} is nonzero and rerun, showing which oracle answer flips the outcome.
+\item \label{ex:ch15-alias-trap} Add \code{store u to p} in $B2$ and \code{load q} in $B4$ with unknown aliasing between \code{p} and \code{q}.
+Decide by hand whether the store is dead under a may-alias oracle and under a must-alias oracle.
+State which oracle a safe deleter must use and what test would expose the aggressive choice as wrong.
+Relate your answer to the volatility rules in the C definition.
+\item \label{ex:ch15-cascade-measure} Implement marking plus branch folding for diamonds chained $N$ deep, with $N$ set to $10$, $100$, and $1000$.
+Seed a constant at the first branch so each fold deadens one arm and exposes the next constant.
+Count sweeps to quiescence and instructions deleted per sweep for the joint iteration versus one marking pass followed by one folding pass.
+Report the counts and recommend the production layering.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch15-reading}
+
+Appel locates dead-code elimination among the passes that must run before allocation, see~\cite{appel-1998-modern}.
+Morgan treats control-sensitive deletion as part of the loop and redundancy pipeline, see~\cite{morgan-1998-optimizing}.
+Safonov explains the root and oracle discipline that keeps deletion trustworthy, see~\cite{safonov-2010-trustworthy}.
+The C language definition fixes the observable behavior that deletion must preserve, see~\cite{wg14-2011-c11}.

@@ -1,0 +1,197 @@
+\chapter{Register Allocation}\label{ch:register-allocation}
+
+Programs use unbounded temporaries but machines have few registers.
+Register allocation bridges that gap by assigning each live value to a register or a stack slot over its lifetime.
+Good allocation keeps hot values in registers, spills the rest with minimal traffic, and repairs mismatches with little extra code.
+Bad allocation turns a clean instruction stream into a shuffle of loads and stores that dominates runtime.
+
+\section{Liveness, Interference, and Spilling}\label{sec:ch27-liveness}
+
+Allocation starts from liveness: a value is live between its definition and its last use.
+Two simultaneously needed values that may differ cannot occupy the same register; proven-equal copies can sometimes share one.
+\term{Register allocation} assigns storage locations to values subject to that constraint.
+\term{Interference graph} has one node per live range and one edge per conflict, so coloring the graph with $k$ colors equals assigning $k$ registers.
+\term{Live range} means the connected region where one value is live, possibly split across blocks.
+\term{Spilling} stores a live range to the stack and reloads it near each use when no color is available.
+\term{Coalescing} merges the live ranges of a move source and destination so the move disappears.
+
+Consider a block that computes three values but the machine has two registers.
+If three mutually conflicting values overlap, two registers are insufficient unless the code is changed by spilling, splitting, or recomputation.
+The allocator picks the value with the fewest hot uses, stores it after its definition, and reloads it before each use.
+Each reload adds a load, so the choice matters: spilling a loop-invariant address costs one reload outside the loop, while spilling an inner-loop accumulator costs one reload per iteration.
+The example below needs that decision even though it is only six lines long.
+The \code{load}, \code{add}, and \code{mul} operations are \code{machine-level operations} on virtual registers \code{a} through \code{e} awaiting assignment.
+\begin{irlisting}
+; virtual registers a..e, two machine registers available
+a = load [p]
+b = load [q]
+c = add a, b
+d = mul c, a
+e = add d, b
+store [r], e
+\end{irlisting}
+Live sets show the pressure: after the two loads, \code{a} and \code{b} are both live; after the add, \code{a}, \code{b}, and \code{c} overlap briefly.
+Two registers cannot cover three overlapping ranges.
+One range must spill or split around the tight region.
+
+Splitting often beats spilling the whole range.
+A value used on both sides of a hot region can live in a register outside, rest on the stack through the region, and return to a register afterward.
+Live-range splitting inserts the needed stores and loads only at region boundaries instead of at every use.
+Coalescing works in the opposite direction: when a move connects two ranges that do not otherwise interfere, merging them removes the move and reduces pressure downstream.
+Aggressive coalescing can create a high-degree node that no longer colors, so allocators coalesce conservatively and only when the merged node stays colorable.
+Figure~\ref{fig:ch27-interference} shows the interference graph for the example.
+Table~\ref{tab:ch27-alloc-choices} summarizes the main allocator decisions.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=1.4cm]
+\node[basic block] (a) {a};
+\node[basic block, right=of a] (b) {b};
+\node[basic block, below=of a] (c) {c};
+\node[basic block, below=of b] (d) {d};
+\draw[cfg edge] (a) -- (b);
+\draw[cfg edge] (a) -- (c);
+\draw[cfg edge] (b) -- (c);
+\draw[cfg edge] (b) -- (d);
+\end{tikzpicture}
+\caption{Interference edges join values that are live together, so with two registers this graph forces one spill or split around the tight region.}
+\label{fig:ch27-interference}
+\end{figure}
+
+\begin{table}[htbp]
+\caption{Allocator decisions with their payoff and danger.}
+\label{tab:ch27-alloc-choices}
+\begin{tabular}{lll}
+\toprule
+Decision & Payoff & Danger \\
+\midrule
+Spill cold range & Small traffic cost & Wrong range chosen \\
+Split hot region & Traffic only at edges & Extra boundary moves \\
+Coalesce moves & Fewer copies & Uncolorable merged node \\
+Reserve registers & Simpler calls & Higher base pressure \\
+Rematerialize & No memory traffic & Recomputation cost \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Precolored registers constrain the graph before coloring starts.
+Argument, return, and instruction-pinned registers arrive with fixed colors.
+Callee-saved versus caller-saved preference biases the remaining assignment.
+Alias relations between register pairs, such as a 64-bit value occupying two 32-bit halves, add edges that plain graph coloring does not model, so production allocators extend the graph or post-check the assignment.
+\term{Rematerialization} offers a third option beyond coloring and spilling: recompute a cheap value such as a constant or address instead of reloading it.
+The allocator needs a predicate that certifies when recomputation is cheaper and safe to repeat.
+\begin{ccwarning}[Spills are memory operations]
+Spilled values live in memory, so every inserted load and store must respect aliasing, volatility, and atomicity.
+Never rematerialize or reorder a value whose recomputation can fault, trap, or observe a different memory state.
+\end{ccwarning}
+
+\section{Graph Coloring and Linear Scan}\label{sec:ch27-algorithm}
+
+Two allocator families dominate practice: graph coloring for quality and linear scan for speed.
+Graph coloring builds the interference graph, simplifies low-degree nodes onto a stack, picks a spill candidate when stuck, assigns colors on pop, and rewrites spill code with a retry loop.
+Linear scan orders live intervals by start point, walks them once while maintaining an active set, expires finished intervals, and spills when the active set exceeds the register count.
+Coloring sees the whole conflict structure but pays for graph construction.
+Linear scan runs in near-linear time but makes greedier spill choices.
+Algorithm~\ref{alg:ch27-coloring} states the coloring loop with simplify, spill, and rewrite phases.
+
+\begin{algorithm}[htbp]
+\caption{Graph-coloring allocation with spill rewrite}\label{alg:ch27-coloring}
+\begin{pseudocode}
+\Require accurate interference graph, $k$ interchangeable nonoverlapping registers, legal spill-rewrite policy
+\Ensure assignment of ranges to registers or stack slots
+\State build interference graph $G$ with move edges marked
+\State conservatively coalesce moves that keep $G$ colorable
+\While{unprocessed nonprecolored nodes remain in $G$}
+\If{a nonprecolored node $n$ with degree $< k$ exists}
+\State push $n$ on the stack and remove it from $G$
+\Else
+\State choose a nonprecolored spill candidate $n$ by cost over degree
+\State push $n$ as a potential spill and remove it
+\EndIf
+\EndWhile
+\State pop nodes, assign colors respecting fixed neighbors, mark true spills colorless
+\If{spills exist}
+\State insert spill code and rebuild affected regions
+\State repeat until no new spills
+\EndIf
+\end{pseudocode}
+\end{algorithm}
+
+Precolored nodes retain their fixed colors and are never selected as spills.
+The degree-less-than-$k$ argument assumes interchangeable, nonoverlapping registers: fewer than $k$ colored neighbors cannot forbid all $k$ colors.
+Register classes, overlapping subregisters, and instruction-specific restrictions require a stronger availability test; adding graph edges alone does not justify using the uniform-color proof unchanged.
+Simplify-then-color is $O(N + E)$ per round for $N$ ranges and $E$ interference edges, while graph construction is dominated by liveness and usually costs $O(N \cdot V)$ naively or near-linear with good bitsets, where $V$ is the variable count.
+Each spill round inserts loads and stores in $O(S)$ for $S$ spilled uses and rebuilds only affected regions incrementally.
+Spill rewriting creates new temporary ranges, so the number of spilled values need not decrease monotonically.
+A terminating allocator needs a fallback policy, such as reserved scratch registers and target-legal spill templates, or a finite retry budget followed by a guaranteed allocation strategy.
+Instruction operand constraints must be satisfiable under that strategy; arbitrary repeated spilling is not a proof of progress.
+Linear scan costs $O(V \log V + I)$ for $V$ intervals and $I$ uses after sorting by start position, with a small constant for active-set maintenance.
+
+Spill-cost heuristics decide quality more than the coloring rule itself.
+A standard estimate divides the weighted use count by the node degree so that hot low-degree ranges survive and cold high-degree ranges spill first.
+Loop depth weights uses exponentially so inner-loop values stay in registers.
+Straight-line functions barely discriminate, which is why even simple allocators do well outside loops.
+Just-in-time compilers favor linear scan because compile time is user-visible latency; ahead-of-time compilers favor coloring or a hybrid that colors hot functions and scans cold ones.
+Poletto and Sarkar present linear scan and its compile-time tradeoffs; distinguish their interval algorithm from later extensions with splitting and richer target constraints~\cite{poletto-1999-linear-scan}.
+
+\section{Worked Example}\label{sec:ch27-worked}
+
+We allocate the six-line example by hand with two registers \code{R1} and \code{R2}.
+First compute live ranges: \code{a} spans lines 1 through 4, \code{b} spans lines 2 through 5, \code{c} spans line 3 to line 4, \code{d} spans line 4 to line 5, and \code{e} spans line 5 to line 6.
+With read-before-write instructions that permit destination reuse, the interference edges are $a$--$b$, $a$--$c$, $b$--$c$, and $b$--$d$.
+Values $c$ and $a$ die when $d$ is defined, and $d$ and $b$ die when $e$ is defined.
+The triangle among \code{a}, \code{b}, and \code{c} needs three colors but only two exist.
+With unit weights, \code{a} and \code{b} each have two uses and \code{c} has one, so a use-count heuristic nominates \code{c}.
+That score does not establish feasibility: defining \code{c} still requires an output register while both inputs remain live.
+
+Split \code{b} around line 3 instead of spilling a whole range.
+Keep \code{a} in \code{R1} and \code{b} in \code{R2} through line 2.
+Store \code{b} before line $3$, then read \code{R1} and \code{R2} to form \code{c} in \code{R2}.
+Line $4$ reads \code{c} and \code{a}, writing \code{d} in \code{R2}; both operands then die.
+Reload \code{b} into the now-free \code{R1} after line $4$, immediately before its use at line $5$.
+Line $5$ can write \code{e} into either register because both inputs die there.
+Total spill traffic is one store plus one reload.
+Verify the coloring: no two values sharing a register are live together at any program point, the reload of \code{b} dominates its later uses, and the store of \code{b} follows its definition.
+Merely assigning \code{c} a stack slot does not solve the pressure at its definition on this register-only machine; another value must still be preserved before a register is overwritten.
+The explicit split of \code{b} supplies that preservation and a legal two-register sequence.
+
+Now check the move-coalescing angle.
+Suppose line 5 were \code{e = mov d} instead of an add.
+Then \code{d} and \code{e} do not interfere if \code{d} dies at the move, so coalescing them into one range removes the copy with no color cost.
+The merged node inherits the union of conflicts, which here is still colorable with two registers.
+That is the ideal coalescing case and the reason allocators test it before coloring.
+A high merged degree alone does not prove uncolorability: neighbors may share colors.
+A specified conservative criterion may refuse such a merge because it cannot certify safety, even when a coloring actually exists.
+
+\section{Implementation Notes}\label{sec:ch27-implementation}
+
+Production allocators separate mechanism from policy: graph or interval construction, cost modeling, assignment, and Post-pass copy cleanup.
+LLVM Greedy allocator works on live ranges with per-class allocation, live-range splitting on demand, and advanced rematerialization, while its fast allocator uses a block-local linear scan for debug builds.
+GCC reload and LRA passes handle precolored constraints, multi-word values, and secondary reloads for targets whose instructions have strict operand classes.
+All of them share the unglamorous truth that calling conventions, instruction constraints, and aliasing quirks cause more bugs than the coloring heuristic.
+Test precolored paths with variadic calls, pinned registers, and paired halves explicitly.
+
+Calling-convention interaction shapes the assignment.
+Caller-saved registers suit short ranges that die before the next call.
+Callee-saved registers suit long ranges that span many calls, at the price of prologue saves.
+Instruction constraints may force a value into a specific class for one operation only, which the allocator handles with a constrained temporary plus copies rather than by pinning the whole range.
+Post-allocation passes remove redundant moves, fold spill addresses into memory operands, and shrink prologues.
+Measure spill traffic in dynamic counts, since one static spill in a loop outweighs ten static spills on cold paths.
+Allocator literature and backend structure are surveyed in~\cite{morgan-1998-optimizing} and~\cite{appel-1998-modern}.
+Correctness discipline for inserted memory traffic follows see~\cite{safonov-2010-trustworthy}.
+Value and type rules that keep rematerialization sound rest on see~\cite{wg14-2011-c11}.
+
+\section{Exercises}\label{sec:ch27-exercises}
+
+\begin{enumerate}
+\item Build the interference graph for the block in Section~\ref{sec:ch27-worked} from scratch. \label{ex:ch27-build-graph} List every live set, every edge, and the degree of each node.
+\item The machine gains a third register. \label{ex:ch27-three-regs} Reassign the example with no spills, show the color per range, and count the eliminated memory operations.
+\item A move \code{q = mov p} connects two non-interfering ranges whose merged node would have degree 3 on a 3-register machine. \label{ex:ch27-coalesce-test} Apply the sufficient rule that accepts only merged nodes of degree less than the register count. Explain why rejection under this rule does not prove that the merged graph is uncolorable.
+\end{enumerate}
+
+\section{Further Reading}\label{sec:ch27-reading}
+
+Graph coloring, spilling, coalescing, and splitting are treated together in~\cite{morgan-1998-optimizing}.
+A complementary backend-oriented account with liveness and frame handling appears in~\cite{appel-1998-modern}.
+Validation of memory-affecting backend rewrites is discussed in~\cite{safonov-2010-trustworthy}.
+The language rules constraining duplication and reordering of computations appear in~\cite{wg14-2011-c11}.

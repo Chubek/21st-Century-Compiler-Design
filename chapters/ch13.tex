@@ -1,0 +1,214 @@
+\chapter{Local Simplification}
+\label{ch:ch13-local-simplification}
+
+Global analyses find facts, but they never rewrite a single instruction by themselves.
+Somewhere a pass must look at \code{x + 0}, \code{y * 1}, \code{0 * f()}, and \code{br true, A, B} and replace each with the cheaper equivalent.
+Doing that cleanup late wastes every downstream pass, while doing it locally and repeatedly keeps the whole pipeline honest.
+The problem of this chapter is to simplify code within one block, safely and to a fixpoint, before global passes spend budget on it.
+We treat each rewrite as a guarded rule, each block as a worklist, and each iteration as progress toward a normal form.
+Section~\ref{sec:ch13-rules} catalogs the rules, Section~\ref{sec:ch13-order} orders them, and Section~\ref{sec:ch13-worked} simplifies the block in Figure~\ref{fig:ch13-block} step by step.
+
+\section{Rewrite rules with guards}
+\label{sec:ch13-rules}
+
+A \term{rewrite rule} pairs a pattern with a replacement and a guard that states when the replacement preserves behavior.
+The pattern \code{x + 0} rewrites to \code{x} with the guard that addition has no trapping overflow on this type.
+The pattern \code{x * 0} rewrites to \code{0} with the guard that \code{x} cannot be a trapping value such as infinity, a signaling not-a-number, or a faulting address expression.
+The pattern \code{br true, A, B} rewrites to \code{jmp A} unconditionally, because branch folding on a known condition removes no behavior.
+The guard is the rule, in the sense that an unguarded rewrite is a bug waiting for its counterexample.
+Table~\ref{tab:ch13-rules} lists the core rules used in this chapter with their guards and their payoffs.
+
+Identities remove operations that contribute nothing to the value.
+Adding zero, multiplying by one, shifting by zero, masking with all ones, and OR-ing with zero all return their other operand.
+Annihilators replace the operation with a constant, for example AND with zero yields zero.
+Each identity carries an effect guard: the discarded operand must not trap, fault, or diverge when evaluated.
+A pure integer operand passes trivially, a floating operand needs a finiteness or no-trap argument, and a memory operand needs an aliasing and faulting argument.
+Beginners drop the guard because tests never trap, and the miscompile appears only on the first signaling input in production.
+The C standard makes several of these guards explicit by leaving overflow, division, and aliasing latitude to implementations, see~\cite{wg14-2011-c11}.
+
+\begin{irlisting}
+; Block needing several local rules before any global pass runs
+; Guards assume 32-bit two's complement ints without trapping overflow
+B1: t1 = a + 0
+B1: t2 = t1 * 1
+B1: t3 = b - b
+B1: t4 = t2 + t3
+B1: t5 = t4 * 0
+B1: c1 = t5 == 0
+B1: br c1, B2, B3
+\end{irlisting}
+
+The listing compresses five rules and one folding opportunity into seven lines.
+The sum with zero, the multiply by one, the self-subtraction, and the multiply by zero each match an algebraic rule.
+The comparison of the result against zero then folds to a constant, and the branch folds to a jump.
+No fact from outside the block is needed, only the guards on integer purity.
+A global pass that ran before this cleanup would analyze seven instructions instead of one jump.
+A global pass that runs after sees the normal form and spends its budget on facts only local rules cannot derive.
+That division of labor is the economic argument for simplifying early and often.
+Algorithm~\ref{alg:ch13-simplify} mechanizes it without rescanning the whole function after each rewrite.
+
+Strength reduction and reassociation sit at the boundary of local power.
+Replacing \code{x * 2} with \code{x + x} or \code{x << 1} is local in shape but global in profit, since the target cost depends on the machine.
+Reassociating \code{(a + b) + c} into \code{a + (b + c)} to expose a constant fold is likewise tempting and risky.
+Floating-point reassociation changes rounding and exception behavior, so the guard must cite the fast-math latitude explicitly rather than assume it.
+Integer reassociation is safer but still interacts with overflow wrapping and undefined cases.
+Our local rules therefore canonicalize cheaply, for example by sorting constant operands to one side, and leave machine-specific strength choices to later passes.
+Morgan places these target-sensitive strength decisions after machine-independent cleanup, see~\cite{morgan-1998-optimizing}.
+
+\section{Ordering rules toward a normal form}
+\label{sec:ch13-order}
+
+A \term{normal form} is a shape in which no rule applies, so iteration stops with nothing left to do.
+Confluence would mean every rule order reaches the same normal form, which rarely holds once reassociation meets folding.
+Termination needs more care: a rule that folds and a rule that unfolds the same pattern can ping-pong forever.
+We impose a \term{rule order} with a simple measure that strictly decreases on every rewrite.
+Constant folding runs first because it shrinks the program and enables branch folding.
+Algebraic identities run next because they remove instructions without creating foldable constants elsewhere in the block.
+Canonicalization runs last because it rearranges rather than shrinks, and rerunning folders after it catches newly adjacent constants.
+The loop repeats until a full sweep changes nothing, which the measure guarantees will happen.
+The measure combines instruction count, constant count, and a canonicalization rank in lexicographic order.
+Folding reduces instruction count or replaces an operation with a constant of lower rank.
+Identity removal reduces instruction count while never increasing constants elsewhere.
+Canonicalization keeps instruction count fixed but lowers rank by moving constants rightward and sorting operands.
+No rule increases an earlier component of the triple to decrease a later one, so the triple falls on every accepted rewrite.
+A rule that would raise the measure is deferred to a later pass with a different measure, not forced into this loop.
+This discipline sounds fussy until the first infinite loop between reassociate-left and reassociate-right teaches it empirically.
+Section~\ref{sec:ch13-implementation} shows how the worklist enforces the same discipline incrementally.
+
+\begin{algorithm}
+\caption{Local simplification to a normal form within one block}\label{alg:ch13-simplify}
+\begin{pseudocode}
+\Require block $B$ with instructions $i_1$ to $i_n$, ordered rule set $R$ with decreasing measure
+\Ensure $B$ in normal form: no rule in $R$ applies to any instruction
+\State $W \gets$ all instructions in $B$
+\While{$W \neq \emptyset$}
+\State remove some $j$ from $W$
+\ForAll{rules $r \in R$ in priority order}
+\If{$r$ matches $j$ and its guard holds}
+\State rewrite $j$ by $r$
+\State add surviving $j$, its users, and new neighbors in $B$ to $W$
+\State \Break out of the rule loop to re-examine $j$
+\EndIf
+\EndFor
+\EndWhile
+\end{pseudocode}
+\end{algorithm}
+
+Algorithm~\ref{alg:ch13-simplify} visits instructions in priority order and requeues only their users and new neighbors.
+Rewriting \code{t1 = a + 0} to a copy requeues \code{t2 = t1 * 1} because its operand changed, not the whole block.
+Folding a comparison requeues its branch because the branch condition changed from computed to constant.
+The \code{break} after a successful rewrite restarts rule matching at highest priority for the same instruction, so folding always precedes canonicalization on fresh patterns.
+Termination follows from the decreasing measure on every rewrite plus a finite requeue fan-out per rewrite.
+Correctness follows rule by rule from guards, since the loop applies no transformation beyond guarded rules.
+The \enquote{local} in the name refers to the scope of facts used, not to the size of the win: branch folding from local constants regularly deletes whole downstream blocks.
+Appel implements this cleanup as the peephole layer beneath global optimization, see~\cite{appel-1998-modern}.
+\section{Worked example in seven rewrites}
+\label{sec:ch13-worked}
+
+We simplify the block from Figure~\ref{fig:ch13-block} by hand under 32-bit wrapping integer guards.
+The initial block computes \code{t1} through \code{t5}, compares against zero, and branches.
+Table~\ref{tab:ch13-rules} names each rule applied, and the trace below numbers the seven rewrites in order.
+First, \code{t1 = a + 0} rewrites to a copy of \code{a}, since integer addition by zero neither traps nor changes the value.
+Second, \code{t2 = t1 * 1} rewrites to a copy of \code{a} after copy propagation of the new \code{t1}, since multiply by one is an identity on integers.
+Third, \code{t3 = b - b} rewrites to constant zero, since self-subtraction of an integer is zero without reading memory.
+Fourth, \code{t4 = t2 + t3} becomes \code{a + 0} after substituting the copies and the zero, then rewrites to \code{a} by the additive identity.
+Fifth, \code{t5 = t4 * 0} rewrites to constant zero, with the pure-integer guard discharging the annihilator safely.
+Sixth, \code{c1 = t5 == 0} folds to constant true, since both operands are now known.
+Seventh, \code{br c1, B2, B3} folds to \code{jmp B2}, deleting the edge to $B3$ and exposing it to dead-code removal.
+The block that began as seven instructions ends as a direct jump with all temporaries dead.
+
+\begin{figure}
+\begin{tikzpicture}
+\node[basic block] (b0) {entry: a, b live};
+\node[basic block, below=1.0cm of b0] (b1) {B1: t1..t5, cmp, br};
+\node[basic block, below left=1.0cm and 0.6cm of b1] (b2) {B2: use a};
+\node[basic block, below right=1.0cm and 0.6cm of b1] (b3) {B3: use b};
+\draw[cfg edge] (b0) -- (b1);
+\draw[cfg edge] (b1) -- (b2);
+\draw[cfg edge] (b1) -- (b3);
+\end{tikzpicture}
+\caption{The single simplifiable block $B1$ with two successors, where folding the branch to $B2$ later deadens the edge to $B3$.}
+\label{fig:ch13-block}
+\end{figure}
+
+\begin{table}
+\caption{Local rules applied in the worked example, each with its guard for wrapping integer arithmetic.}
+\label{tab:ch13-rules}
+\begin{tabular}{lcc}
+\toprule
+Pattern and replacement & Guard & Effect \\
+\midrule
+x + 0 becomes x & no trapping overflow & removes add \\
+x times 1 becomes x & integer type & removes mul \\
+x - x becomes 0 & pure integer operand & creates constant \\
+x times 0 becomes 0 & pure, no trap & creates constant \\
+cmp folded, br folded & constant condition & removes edge \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Each step preserves the observable behavior while strictly lowering the measure.
+The first four steps lower instruction count by removing arithmetic.
+The fifth replaces a multiply with a constant of lower rank.
+The sixth lowers rank by turning a comparison into a constant.
+The seventh lowers count by replacing a conditional branch with a jump.
+No step uses a fact from $B2$ or $B3$, and no step needs the global analyses from earlier chapters.
+A checker can verify the sequence by replaying the seven rewrites and confirming the guard at each one.
+The most instructive check is the fifth: replacing it with a floating multiply would demand a finiteness guard the example does not supply.
+That failed guard is exactly where fast-math latitude would have to appear explicitly, and its absence keeps the integer rule honest.
+
+The example shows why simplification is useful before global passes; running it again afterward can exploit facts those passes discover.
+Available-expression analysis on the original block would number five temporaries and two comparisons.
+Liveness would keep \code{a} and \code{b} live through all seven lines.
+After simplification, both analyses see one jump and nothing else.
+Compile time saved downstream usually exceeds the linear cost of the local sweep.
+More importantly, the answers improve: constants discovered locally seed the global constant propagator of the next chapter.
+Safonov treats this layering as part of predictable compiler architecture rather than as opportunistic cleanup, see~\cite{safonov-2010-trustworthy}.
+
+\section{Implementation notes and cost}
+\label{sec:ch13-implementation}
+
+An implementation stores one rule table shared by all blocks, with pattern matchers compiled to a decision tree over opcodes.
+Matching tries folders first, then identities and annihilators, then canonicalization, exactly mirroring the priority in Algorithm~\ref{alg:ch13-simplify}.
+Guards consult type tags, fast-math flags, and a purity bit on each operand, all available locally.
+Rewrites update def-use chains in place and requeue users, so the per-rewrite cost is proportional to the user count.
+Let $n$ be the initial instruction count, $r$ the successful rewrite count, and $u$ the maximum number of affected users and neighbors per rewrite.
+With constant-cost rule matching, duplicate-free queue membership, and constant-cost bookkeeping per affected instruction, the cost is $O(n+r(u+1))$.
+A well-founded decreasing measure proves termination but does not by itself bound $r$ by $O(n)$; that stronger bound needs a rule-specific argument.
+Memory overhead is one worklist plus def-use edges the compiler already keeps.
+
+The main pitfall is rule interaction across passes, not within one block.
+A canonicalizer that sorts operands can fight a selector that wants constants on a specific side for addressing modes.
+A folder that creates \code{0.0} with the wrong sign can break a later sign-sensitive branch fold.
+A demolished type guard can let integer rules fire on pointers, miscompiling address arithmetic the C standard reserves to implementations.
+The fix layers measures: local simplification owns the portable measure, while target passes own their own measures afterward.
+Rules that need target costs carry explicit hooks rather than smuggling prices into guards.
+Testing covers each rule with pure, trapping, floating, and effectful operands so guards fire exactly when they should.
+Section~\ref{sec:ch13-rules} lists the guard for every rule, and the exercises ask you to break each one deliberately.
+% TODO(cite): need a primary reference for peephole and rule-based simplification catalogs beyond the four listed books.
+
+\section{Exercises}
+\label{sec:ch13-exercises}
+
+\begin{enumerate}
+\item \label{ex:ch13-guard-break} Revisit Table~\ref{tab:ch13-rules} and construct a counterexample for each rule with its guard removed.
+Use a signaling not-a-number for the floating annihilator, a faulting load for the identity through memory, and a wrapping versus trapping type pair for the additive identity.
+Show the original and rewritten behavior on your counterexample and state which observable event differs.
+Then restore the guard and explain why it excludes your case.
+\item \label{ex:ch13-measure-fight} Implement Algorithm~\ref{alg:ch13-simplify} with reassociate-left and reassociate-right both enabled at equal priority.
+Run it on Figure~\ref{fig:ch13-block} extended with \code{t6 = (a + b) + c} and count rewrites to termination or loop.
+Then impose the priority from Section~\ref{sec:ch13-order} and report the new count with the final normal form.
+Explain how the lexicographic measure rules out the ping-pong.
+\item \label{ex:ch13-branch-cascade} Extend the worked example so $B2$ begins with \code{d = a + 0} and ends with a foldable branch.
+Simplify $B1$ to a jump, delete the edge to $B3$, run dead-code reasoning informally, then simplify $B2$ with the newly constant context.
+Report how many instructions the cascade removes beyond the seven local rewrites.
+Discuss where a global worklist should resume after a local fold changes the CFG.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch13-reading}
+
+Appel treats local cleanup as the peephole foundation under global passes, see~\cite{appel-1998-modern}.
+Morgan separates machine-independent simplification from target-sensitive strength choices, see~\cite{morgan-1998-optimizing}.
+Safonov describes how layered passes keep a trusted pipeline predictable, see~\cite{safonov-2010-trustworthy}.
+The C language definition supplies the overflow, rounding, and aliasing rules that guards must cite, see~\cite{wg14-2011-c11}.

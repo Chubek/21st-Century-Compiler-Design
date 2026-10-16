@@ -1,0 +1,83 @@
+\chapter{Verification}
+\label{ch:pebble-verification}
+
+An interpreter that follows an invalid operand ID can fail before it has a chance to explain the malformed program.
+A verifier must therefore check the safety of its own queries in a deliberate order.
+PebbleIR first establishes bounds and graph shape, then record shape, then operand availability and types.
+
+\section{Layers of trust}
+\label{sec:pebble-verification-layers}
+The verifier accepts a valid initialized C object, not an arbitrary byte buffer cast to \code{Pir}.
+Serialized input enters through the parser.
+It rejects zero blocks, excessive counts, unknown terminators, invalid targets, edges into entry, and duplicate targets of a conditional branch.
+It builds predecessor sets and requires every declared block to be reachable from entry.
+This last rule keeps dead regions from complicating dominance and is stricter than many production IRs.
+
+Next it checks every value header before following any value operand.
+That ordering matters when a valid-looking operand ID points to a record whose block field is out of bounds.
+A dominance lookup using that block before checking it would make the verifier itself unsafe.
+The malformed fixtures include exactly this boundary.
+
+\begin{algorithm}[htbp]
+\caption{Verifying in dependency order.}
+\label{alg:pebble-verify}
+\begin{pseudocode}
+\Require initialized function object $F$
+\Ensure verified $F$ and fresh facts, or diagnostic with facts unchanged
+\State validate counts and all terminators before following edges
+\State derive predecessors; compute reachability; reject unreachable blocks
+\State compute dominators over the reachable graph
+\State validate every value's opcode, type, block, and canonical fields
+\State validate phi prefixes and exact predecessor coverage
+\State check live operands, use-point dominance, and operand types
+\State check return and branch operands at block terminators
+\State publish facts tagged with owner and revision
+\end{pseudocode}
+\end{algorithm}
+
+Algorithm~\ref{alg:pebble-verify} is implemented by \code{pir\_verify}.
+Facts are accumulated locally and copied to the output only on success.
+This keeps a caller from mistaking a partly computed dominator table for a usable analysis result after a rejected function.
+
+\section{Uses belong to program points}
+\label{sec:pebble-use-points}
+An ordinary operand in block $B$ must be defined earlier in $B$, or in a different block that dominates $B$.
+A terminator operand can use any earlier live value in its block.
+A phi operand is checked at the corresponding predecessor's terminator, not at the phi's textual location.
+Listing~\ref{lst:pebble-availability} is the common availability query; its caller supplies the appropriate block and ordering boundary.
+
+\begin{listing}[htbp]
+\inputminted[firstline=50,lastline=56]{c}{example-code/pebbleir/pebbleir.c}
+\caption{Availability combines live-ID validation, block dominance, and same-block order.}
+\label{lst:pebble-availability}
+\end{listing}
+
+Suppose a diamond defines value 5 in its left branch and value 7 in its right branch.
+Changing an operand inside the left branch to value 7 preserves both the numeric ID range and the byte type.
+It nevertheless fails availability because the right block does not dominate the left block.
+A phi in the join may legitimately use both values, each on its own incoming edge.
+This is why a type checker alone is not an SSA verifier.
+
+\section{What acceptance does not establish}
+\label{sec:pebble-verify-limits}
+Verification establishes internal well-formedness, not equivalence to a source program.
+A function that returns constant zero is valid even when the source expression should return 128.
+It also does not establish termination, profitability, or absence of implementation defects in the verifier itself.
+Differential tests and local correctness arguments cover different obligations.
+
+Let $N$ be allocated values, $B$ blocks, and $R$ the number of dominator sweeps.
+With the implementation's one-word block sets, the dominator portion costs $O(RB^2)$ and the later scans cost $O(N+B)$.
+The interface recomputes facts rather than trusting stale caches; frequent verification therefore has a visible compile-time cost.
+Production builds can choose checkpoint frequency without changing which invariants clients are allowed to assume.
+
+\section{Exercises}
+\label{sec:pebble-eight-exercises}
+\begin{enumerate}
+\item \label{ex:pebble-welltyped-bad} Construct the sibling-branch misuse described above and identify the check that rejects it.
+\item \label{ex:pebble-phi-use} Explain why a loop-header phi can refer to a latch value with a larger ID, while an ordinary header addition cannot use that latch value directly.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:pebble-eight-reading}
+Cytron and colleagues supply the dominance foundations behind SSA's definition-use discipline~\cite{cytron-1991-ssa}.
+Safonov provides context for treating representation checks as part of a compiler's trust argument rather than as optional debugging decoration~\cite{safonov-2010-trustworthy}.

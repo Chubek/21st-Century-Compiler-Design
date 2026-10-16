@@ -1,0 +1,251 @@
+\chapter{Inlining and Specialization}\label{ch:inlining-specialization}
+
+A procedure call looks cheap in source code but costs real work at run time.
+The caller saves registers, passes arguments, jumps to a new address, builds a frame, and later tears it down.
+Inlining removes that boundary by splicing the body of a callee into its caller.
+Specialization goes one step further and builds a dedicated copy of a procedure for a particular constant, type, or shape.
+Both transformations trade code size for speed, and both unlock other optimizations that cannot see through a call.
+
+\section{Why Calls Block Optimization}\label{sec:ch23-why-calls-block}
+
+Consider a tiny helper that clamps a value into a range.
+The caller passes two bounds and a candidate, and the callee does two comparisons.
+Written with a call, constant propagation stops at the call boundary because the optimizer has no facts about the callee body at the call site.
+Written inline, the comparisons sit next to the surrounding constants and fold away.
+That pattern repeats for loop bounds, null checks, type tags, and array lengths.
+The optimization that matters is often not the eliminated jump but the cleanup that becomes visible afterward.
+\term{Inlining} replaces a call site with a renamed copy of the callee body.
+\term{Specialization} creates a new procedure variant tuned to a particular argument property and redirects selected call sites to it.
+\term{Direct call} names its target statically, while \term{indirect call} selects the target at run time through a pointer or method table.
+Direct calls are easy to inline.
+Indirect calls need a guard, a profile, or a devirtualization proof first.
+
+The following three-address fragment shows the lost opportunity.
+\begin{irlisting}
+; caller before inlining
+t1 = call clamp(x, 0, 100)
+t2 = add t1, 1
+; callee, defined elsewhere
+clamp(a, lo, hi):
+  t3 = cmp_lt a, lo
+  t4 = select t3, lo, a
+  t5 = cmp_gt t4, hi
+  t6 = select t5, hi, t4
+  ret t6
+\end{irlisting}
+After inlining, the two bounds are the constants \code{0} and \code{100} sitting next to the comparisons.
+A later pass folds, simplifies selects, and may prove that one branch is dead for this call site.
+Without inlining, none of that happens.
+The same effect appears with wrapper functions, accessor methods, and small numeric kernels.
+
+Inlining also changes the shape of the control-flow graph.
+A call node becomes straight-line code, a fork, or a small diamond, depending on the callee.
+That new shape can merge with the caller loops and branches.
+Loop-invariant code motion, global value numbering, and dead-code elimination all profit from the larger scope.
+The price is code growth and possibly worse instruction-cache behavior.
+A good inliner therefore weighs the expected cleanup against the size cost of each call site.
+
+\section{The Inlining Decision}\label{sec:ch23-decision}
+
+An inliner needs three pieces: legality, profitability, and mechanics.
+Legality asks whether the transformation preserves meaning.
+Profitability asks whether it is worth doing.
+Mechanics performs the splice without breaking names, control flow, or exception behavior.
+The three pieces interact because a profitable-looking site may be illegal without extra guards.
+Figure~\ref{fig:ch23-inline-scope} shows how inlining widens the optimizer view from two isolated regions into one joint region.
+Table~\ref{tab:ch23-inline-tradeoffs} summarizes the main benefits and the corresponding risks.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=1.1cm and 1.6cm]
+\node[basic block] (caller) {caller: t = call f(a)};
+\node[basic block, right=of caller] (callee) {f: body; ret r};
+\node[basic block, below=of caller] (merged) {caller: body[a/x]; use r};
+\draw[cfg edge] (caller) -- (callee);
+\draw[cfg edge] (caller) -- (merged);
+\end{tikzpicture}
+\caption{Inlining merges the callee body into the caller, so later passes see one region instead of two isolated ones.}
+\label{fig:ch23-inline-scope}
+\end{figure}
+
+\begin{table}[htbp]
+\caption{Benefits of inlining and specialization with their main risks.}
+\label{tab:ch23-inline-tradeoffs}
+\begin{tabular}{lll}
+\toprule
+Benefit & Mechanism & Risk \\
+\midrule
+Eliminated call overhead & No jump or frame setup & Larger code size \\
+Exposed constants & Arguments become local facts & Extra register pressure \\
+Better branch folding & Callee tests meet caller values & More hot-path branches \\
+Type refinement & Clone assumes one case & Guard cost on mismatch \\
+Cross-call code motion & One region for hoisting & Slower compile time \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Legality is straightforward for direct calls to nonrecursive functions without tricky control flow.
+The compiler renames the callee locals so they do not collide with caller names.
+It maps actual arguments to fresh temporaries, splices the body in place of the call, and wires each \code{ret} to the continuation.
+Recursion needs a depth bound or a partial strategy that inlines a few levels and leaves a residual call.
+Functions with multiple returns need one join point per inlined site or a duplicated tail.
+Language features such as exceptions, coroutines, and dynamic scoping add edges that the splice must preserve.
+A conservative inliner refuses sites it cannot model exactly.
+\begin{ccwarning}[Do not inline what you cannot unwind]
+Inlined exception edges, cleanup actions, and early returns must land in the right handler.
+If the intermediate representation cannot represent the combined control flow, keep the call.
+A wrong landing pad corrupts unwinding tables and exception semantics.
+\end{ccwarning}
+
+Profitability is a heuristic because the true payoff depends on passes that have not run yet.
+Most inliners combine a size budget with a benefit score.
+Small callees get inlined almost always.
+Large callees need strong evidence such as constant arguments, a single call site, or a hot profile count.
+Call-site context matters: the same callee may be worth inlining in a tight loop and not worth inlining on a cold error path.
+Specialization uses the same logic but pays the code-size cost once per variant and shares it across sites.
+A \term{call-site benefit} estimates the constants, branches, and loads that become simplifiable after the splice.
+A \term{size budget} caps total growth for a function or module.
+
+Specialization handles the case where full inlining is too big but one argument property makes a cheaper version possible.
+A generic routine over an element size, a data type tag, or a stride gains a fast path when that property is fixed.
+The compiler clones the procedure, replaces the parameter with the known value inside the clone, runs the normal simplifiers on the clone, and redirects matching call sites.
+Unmatched sites keep calling the generic version.
+Profile data often picks the specialization key, for example the most common receiver type at a virtual call.
+The guard that checks the key must be cheaper than the work it saves.
+
+\section{Cost-Guided Inlining Algorithm}\label{sec:ch23-algorithm}
+
+Algorithm~\ref{alg:ch23-inline} states the standard greedy worklist approach.
+It scores every eligible direct call site, inlines the best one within budget, and repeats because new sites and new constants appear.
+The scoring function is deliberately simple so it runs on every module without profile data.
+A profile-guided compiler adds hotness multipliers on top of the same skeleton.
+The algorithm assumes three-address or SSA input with explicit calls and a call graph the compiler can update incrementally.
+It also assumes the simplifier runs between rounds so that benefit estimates track the current code.
+
+\begin{algorithm}[htbp]
+\caption{Greedy cost-guided inlining with a size budget}\label{alg:ch23-inline}
+\begin{pseudocode}
+\Require call graph $G$, size budget $B$, scoring function $Score$
+\Ensure inlined module with updated $G$
+\State compute initial size $S$ of each function
+\State build worklist $W$ of eligible direct call sites
+\While{$W \neq \emptyset$}
+\State remove the site $c$ with the highest $Score(c)$ from $W$
+\If{$Score(c) \le 0$}
+\State \Break
+\EndIf
+\If{inlining $c$ exceeds budget $B$}
+\State \Continue
+\EndIf
+\State splice a renamed copy of the callee at $c$
+\State run local cleanup: fold, propagate, eliminate dead code
+\State update sizes $S$, call graph $G$, and affected scores
+\State add newly exposed call sites to $W$
+\EndWhile
+\State emit specialized clones for profitable constant keys
+\State redirect matching call sites to the clones
+\end{pseudocode}
+\end{algorithm}
+
+The score typically subtracts a size penalty from a context bonus.
+A common form is a weighted sum of constant arguments, single-call-site status, small callee size, and static estimates of eliminated branches.
+Production compilers tune the weights empirically and clamp them so no single factor dominates.
+The budget may be global, per caller, or adaptive to optimization level.
+A size budget alone is not a termination argument: recursively inlining a wrapper may expose another call without increasing the measured size.
+Track recursive expansion depth, deduplicate specialization keys, and impose a finite expansion budget independent of cleanup's size reductions.
+Recompute stale scores before using the highest-score stopping rule, and charge specialized clones against the budget as well.
+A debug build inlines almost nothing.
+A release build with link-time information inlines across modules.
+The complexity is $O(C \log C + I \cdot (N + E))$, where $C$ is the number of candidate sites, $I$ is the number of performed inlines, and $N$ and $E$ are the nodes and edges touched by cleanup and graph updates.
+The dominant cost is usually the repeated cleanup, not the priority queue.
+
+Specialization reuses the same loop with a different candidate generator.
+Each candidate is a pair of a procedure and a specialization key, such as \enquote{second argument equals 4} or \enquote{receiver has a given hidden class}.
+The compiler materializes the clone lazily, simplifies it eagerly, and measures whether the clone is smaller or faster than the generic body under that key.
+Clones that fail to simplify are discarded before they reach the object file.
+This \enquote{simplify then measure} discipline keeps speculative cloning from exploding code size.
+% TODO(cite): need a primary reference for profile-guided inlining heuristics.
+
+\section{Worked Example}\label{sec:ch23-worked}
+
+We now inline a small example by hand and track every simplification.
+The callee scales and biases its input.
+The caller supplies constants at two sites, one of which makes the bias dead.
+\begin{irlisting}
+; callee
+scale_bias(v, s, b):
+  t1 = mul v, s
+  t2 = add t1, b
+  ret t2
+; caller before inlining
+x1 = call scale_bias(p, 2, 0)
+x2 = call scale_bias(q, 4, 7)
+\end{irlisting}
+Inline the first site by mapping \code{v} to \code{p}, \code{s} to \code{2}, and \code{b} to \code{0} with fresh temporaries.
+The spliced code is \code{t1a = mul p, 2} followed by \code{x1 = add t1a, 0}.
+Fold the addition of zero to get \code{x1 = mul p, 2}, possibly strength-reduced later to a shift.
+No frame, no jump, and no argument shuffling remain.
+Inline the second site the same way to get \code{t1b = mul q, 4} and \code{x2 = add t1b, 7}.
+Here the addition survives because \code{7} is not an identity, but the multiply by a power of two is still a shift candidate.
+The two expansions share no temporaries, so no renaming conflict arises.
+
+Now consider specialization instead of full inlining.
+Suppose the real routine is large because it handles strides, checks alignment, and selects among three kernels.
+Inlining all of that twice would bloat the caller.
+The profile shows that \code{s} is almost always \code{4} at hot sites.
+The compiler clones the routine with \code{s} fixed to \code{4} and folds the kernel dispatch to the stride-4 path.
+Stride alone does not prove base-pointer alignment; an alignment test remains unless a separate fact establishes the required alignment.
+Hot sites call the clone directly.
+Cold sites with other strides keep calling the generic version.
+Code grows by one compact fast path rather than by two full expansions.
+The guard is free here because the call sites pass the constant explicitly; with a dynamic key the compiler would emit a comparison and keep both targets.
+
+We verify the result by counting operations before and after.
+Before, each site pays a call plus the two arithmetic operations inside the callee.
+After inlining, the first site pays one multiply and the second pays one multiply and one add.
+The specialization variant pays one direct call to the lean clone plus the reduced body inside it.
+Either way, the arithmetic that depended on the known argument is gone.
+That is the signature of a successful inline or specialization: known inputs dissolve neighboring operations.
+
+\section{Implementation Notes}\label{sec:ch23-implementation}
+
+Real inliners live inside a pass pipeline, not in isolation.
+They run early to expose constants, again in the middle to catch functions simplified by other passes, and sometimes at link time to cross module boundaries.
+LLVM performs inline costing with a modular bonus model and re-runs simplification after each round, while GCC combines early inlining with interprocedural summaries and profile feedback.
+Both systems cap growth with budgets that scale with the optimization level.
+Hot call sites get larger budgets than cold ones.
+Recursive functions get a small unroll-like allowance rather than unbounded expansion.
+These details matter because the textbook greedy loop looks optimal but is only a heuristic: inlining under realistic size constraints is NP-hard, so production compilers tune rather than solve.
+
+Data structures stay simple.
+The call graph maps each site to its caller, callee, argument list, and hotness.
+A priority queue orders sites by score.
+An incremental size model avoids remeasuring whole functions after each splice.
+Attribute and alias information must survive the splice: memory effects, nonnull facts, alignment, and exception behavior travel with the copied instructions.
+Debug information needs special care so stepped lines map back to the callee source even though the code now lives in the caller.
+A common implementation bug is stale profiling counters after duplication; counters must be scaled or split, not copied verbatim.
+
+Interaction with the rest of the compiler decides the final quality.
+Inline before scalar replacement, loop rotation, and vectorization if those passes need the larger window.
+Run dead-code elimination and constant folding immediately after each inline wave so scores for the next wave see the cleaned code.
+Keep an eye on register pressure and instruction-cache footprint because an aggressive inline that helps microbenchmarks can hurt large programs.
+Measure with profiles rather than assuming.
+When in doubt, the maintainable default is a modest budget, eager cleanup, and specialization only for keys that simplify the clone measurably.
+Good treatments of these engineering tradeoffs appear in the standard optimization texts, see~\cite{appel-1998-modern} and see~\cite{morgan-1998-optimizing}.
+A further angle on preserving correctness while transforming code aggressively is given in~\cite{safonov-2010-trustworthy}.
+The language rules that decide whether removing a call changes observable behavior are stated in~\cite{wg14-2011-c11}.
+
+\section{Exercises}\label{sec:ch23-exercises}
+
+\begin{enumerate}
+\item Inline the two calls in Section~\ref{sec:ch23-worked} when the first call passes \code{s = 1} instead of \code{s = 2}. \label{ex:ch23-fold-identity} Show each renamed instruction, fold all identities, and count the surviving arithmetic operations.
+\item A callee has 40 instructions and three call sites. \label{ex:ch23-budget} Two sites pass a constant flag that deletes 25 instructions after simplification, while the third passes a variable flag. Decide which sites to inline under a 50-instruction growth budget and justify the rejected site.
+\item A virtual call site observes receiver types $A$, $A$, $B$, $A$ in a profile. \label{ex:ch23-spec-guard} Design a specialized clone for the hot type, draw its guard and fallback, and explain when the guard pays for itself.
+\end{enumerate}
+
+\section{Further Reading}\label{sec:ch23-reading}
+
+Good coverage of inline costing, interprocedural context, and backend interaction appears in~\cite{morgan-1998-optimizing}.
+A complementary functional-language perspective on inlining and closure handling appears in~\cite{appel-1998-modern}.
+Trust and validation concerns for aggressive interprocedural rewrites are discussed in~\cite{safonov-2010-trustworthy}.
+Language-level facts about function calls, argument passing, and observable behavior used to justify legality appear in~\cite{wg14-2011-c11}.

@@ -1,0 +1,224 @@
+\chapter{Static Single Assignment}
+\label{ch:ch12-static-single-assignment}
+
+Every dataflow fact so far has a name problem underneath it.
+A variable assigned in five blocks carries five histories under one name, and each use must sift which histories reach it.
+Reaching definitions answers by sets, liveness answers by backward sets, and clients pay the set cost at every query.
+The problem of this chapter is to rename variables so that each name has exactly one definition, and to make merging explicit where paths join.
+After renaming, a use refers to one definition by construction, and many flow queries become local lookups.
+Section~\ref{sec:ch12-meaning} defines the form, Section~\ref{sec:ch12-placement} places the merges, and Section~\ref{sec:ch12-worked} renames the graph in Figure~\ref{fig:ch12-ssa} by hand.
+
+\section{What single assignment means}
+\label{sec:ch12-meaning}
+
+A program is in \term{static single assignment} form when every variable has exactly one static definition and every use refers to that definition.
+Straight-line code reaches the form by versioning: \code{x = 1} becomes \code{x1 = 1}, \code{x = x + 2} becomes \code{x2 = x1 + 2}, and later uses take the current version.
+Branches complicate versioning because two arms define different versions of the same source variable.
+Joins therefore need a merge operation that selects the version from the arm actually taken.
+That operation is the \term{phi function}, written $\assignphi{x_3}{x_1,x_2}$ to mean that $x_3$ takes $x_1$ from the left edge and $x_2$ from the right edge.
+Phi functions sit at the top of join blocks, execute conceptually on edge traversal, and disappear before machine code emission.
+The \enquote{static} in the name marks that uniqueness holds at compile time over program text, not at run time over executed stores.
+
+\begin{irlisting}
+; Source before SSA: x defined on both arms, used at join
+; After SSA: versions x1 x2, merge x3 by phi at B4 head
+B1: br c, B2, B3
+B2: x1 = 1
+B2: jmp B4
+B3: x2 = 2
+B3: jmp B4
+B4: x3 = phi(x1, x2)
+B4: y1 = x3 + 1
+B4: use y1
+\end{irlisting}
+
+The listing shows the three ingredients together: versioned definitions, one phi per merged variable at the join, and uses rewritten to current versions.
+The phi has one argument per incoming edge, ordered by edge, not by value.
+A phi at a three-way join needs three arguments.
+A loop-carried variable needs a header phi when its incoming definitions must be merged; a variable overwritten before every use need not have one in pruned form.
+Variables never assigned keep no versions and need no phis.
+Memory locations need no phis until the compiler promotes them to registers, because stores through pointers do not create unambiguous definitions.
+The renaming in Section~\ref{sec:ch12-implementation} turns this picture into an algorithm, and Table~\ref{tab:ch12-df} supplies the placement facts it needs.
+
+Minimality matters because extra phis cost time and space without adding precision.
+A program is in \term{minimal SSA} form when it holds exactly the phis needed to preserve single-assignment meaning, no more.
+A program is in \term{pruned SSA} form when it additionally drops phis for variables never live across the join.
+Pruned form is what compilers build, since dead phis would immediately burden the next passes.
+Semi-pruned construction filters out variables that are never live on entry to any block, avoiding a full per-block liveness filter while retaining some dead phis.
+The placement algorithm below targets minimal form, and a liveness filter trims it to pruned form afterward.
+Appel develops the renaming stack that makes this pipeline concrete, see~\cite{appel-1998-modern}.
+
+\section{Where phis must go}
+\label{sec:ch12-placement}
+
+A phi for variable $v$ belongs at every join where two distinct definitions of $v$ arrive along different paths.
+Dominance frontiers compute exactly those joins from the dominator tree.
+A node $n$ \term{dominates} $m$ when every path from entry to $m$ passes through $n$.
+The \term{dominance frontier} $\DF(n)$ contains each block $y$ for which $n$ dominates a predecessor of $y$ but does not strictly dominate $y$.
+If $n$ defines $v$ and $j$ sits in $\DF(n)$, then some path carries that definition to $j$ alongside a path that avoids $n$, so $j$ needs a phi for $v$.
+Iterating this rule to closure over newly added phis yields the minimal placement.
+The iteration stops because each block gains at most one phi per variable.
+A \term{dominator tree} records immediate dominators as parent links, with the entry as root and every block hanging below its strictest dominator.
+Frontiers fall out of the tree by one upward walk per edge: for edge $a$ to $b$, climb from $a$ while the current node does not strictly dominate $b$, adding $b$ to each visited frontier.
+Different edges can repeat parts of an upward walk, so this construction does not have a general linear-time bound.
+Loop heads appear in their own frontiers when the back edge climbs past them, which is why loop variables need phis even without any visible branch.
+Figure~\ref{fig:ch12-ssa} shows a loop head with exactly that self-frontier, and Table~\ref{tab:ch12-df} lists the frontier sets behind the placement.
+Morgan treats dominator-based placement as the standard front end for SSA construction, see~\cite{morgan-1998-optimizing}.
+
+\begin{algorithm}
+\caption{Minimal phi placement by iterated dominance frontiers}\label{alg:ch12-placement}
+\begin{pseudocode}
+\Require CFG $G$, dominator tree with $\DF(n)$ per node, set $\Def(v)$ of blocks defining each $v$
+\Ensure one phi for $v$ at each join in the iterated frontier of $\Def(v)$
+\ForAll{variable $v$ defined anywhere in $G$}
+\State $Work \gets \Def(v)$
+\State $Placed \gets \emptyset$
+\While{$Work \neq \emptyset$}
+\State remove some $n$ from $Work$
+\ForAll{$j \in \DF(n)$}
+\If{$j \notin Placed$ for $v$}
+\State insert $\assignphi{v_j}{...}$ at the head of $j$
+\State $Placed \gets Placed \cup \{j\}$
+\If{$j \notin \Def(v)$ originally}
+\State add $j$ to $Work$
+\EndIf
+\EndIf
+\EndFor
+\EndWhile
+\EndFor
+\end{pseudocode}
+\end{algorithm}
+
+Algorithm~\ref{alg:ch12-placement} processes one variable at a time over definition sites and frontier edges.
+Each definition site seeds the worklist, each frontier join gains a phi, and each fresh phi acts as a definition that can force further phis downstream.
+The test against $Placed$ prevents duplicate phis at the same join for the same variable.
+The test against original definitions prevents reprocessing blocks that already seeded the search.
+The result is the conventional unpruned iterated-frontier placement; it can include phis whose results are dead.
+Pruned placement additionally requires the variable to be live on entry to the candidate block, or removes dead phi chains afterward.
+Treat phi arguments as uses on their corresponding incoming edges, not simultaneous uses at the start of the join block.
+An implementation should place phis for all variables before any renaming, because renaming while placing mixes two traversals with different invariants.
+
+Renaming walks the dominator tree with one version stack per source variable.
+It rewrites each definition to push a fresh version, each use to read the stack top, and each phi argument in a successor to read the stack top along that edge.
+It recurses into tree children with the pushed versions visible, then pops them on return so siblings see the correct prefix.
+Seed parameter and other entry definitions before traversal.
+An empty version stack at a reachable use signals a missing definition or a language-specific uninitialized value; inventing an arbitrary version is not a sound repair.
+The walk is linear in program size plus phi arguments, with stack depth bounded by tree height.
+A subtle bug rewrites phi arguments as if they executed at the join head rather than on incoming edges.
+The fix reads the predecessor-specific stack state per edge, which the tree walk holds by processing the predecessor before descending.
+Section~\ref{sec:ch12-worked} traces the stacks on a small graph so the edge rule becomes concrete.
+\section{Worked example with loop and branch}
+\label{sec:ch12-worked}
+
+We place and rename by hand on Figure~\ref{fig:ch12-ssa}, which holds a branch inside a loop.
+Variable \code{x} is defined in $B1$ before the loop, in $B3$ on the left arm, and in $B4$ on the right arm.
+For a separate pruning experiment, suppose $B3$ also defines an unused variable \code{y}.
+The dominator tree has $B1$ as root, $B2$ as its child, $B3$, $B4$, and $B5$ as children of $B2$, and $B6$ as a child of $B5$.
+The branch arms have frontier $\{B5\}$; $B2$ and $B5$ have frontier $\{B2\}$.
+The entry has an empty frontier.
+Table~\ref{tab:ch12-df} lists these sets exactly as the placement loop consumes them.
+
+\begin{figure}
+\begin{tikzpicture}
+\node[basic block] (b1) {B1: x = 0};
+\node[basic block, below=1.0cm of b1] (b2) {B2: head phi x};
+\node[basic block, below left=1.0cm and 0.6cm of b2] (b3) {B3: x = x + 1};
+\node[basic block, below right=1.0cm and 0.6cm of b2] (b4) {B4: x = x + 2};
+\node[basic block, below=2.2cm of b2] (b5) {B5: use x};
+\node[basic block, below=1.0cm of b5] (b6) {B6: exit};
+\draw[cfg edge] (b1) -- (b2);
+\draw[cfg edge] (b2) -- (b3);
+\draw[cfg edge] (b2) -- (b4);
+\draw[cfg edge] (b3) -- (b5);
+\draw[cfg edge] (b4) -- (b5);
+\draw[cfg edge] (b5) -- (b6);
+\draw[back edge] (b5) -- (b2);
+\end{tikzpicture}
+\caption{A branch inside a loop, where \code{x} needs phis at both the branch join $B5$ and the loop head $B2$ after frontier iteration.}
+\label{fig:ch12-ssa}
+\end{figure}
+
+\begin{table}
+\caption{Dominance frontiers and resulting phi placement for \code{x} and \code{y} on the loop-and-branch graph.}
+\label{tab:ch12-df}
+\begin{tabular}{lcc}
+\toprule
+Block & Frontier set & Phi placed \\
+\midrule
+B1 & empty & none \\
+B2 & loop head B2 & phi for x at B2 \\
+B3 & join B5 & phi for x at B5 \\
+B4 & join B5 & phi already at B5 \\
+B5 & loop head B2 & none new \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Placement for \code{x} seeds the worklist with $B1$, $B3$, and $B4$.
+Processing $B1$ adds nothing because its frontier is empty.
+Processing $B3$ adds a phi at $B5$ and queues $B5$.
+Processing $B4$ finds $B5$ already placed and adds nothing.
+Processing $B5$ adds a phi at $B2$ and queues $B2$.
+Processing the re-seeded $B2$ finds its own frontier already satisfied.
+The final placement holds a two-argument phi at $B5$ for the branch and a two-argument phi at $B2$ for loop entry versus back edge.
+Placement for \code{y} seeds with $B3$ alone, finds frontier entries $B5$ and $B2$, and would place phis there in minimal form.
+Pruning removes both \code{y} phis because no use of \code{y} is live across either join in this example.
+The surviving program therefore merges only \code{x}, which matches the intuition that unmerged variables need no phis.
+
+Renaming starts at $B1$ with empty stacks and pushes $x1$ for the definition there.
+It descends to $B2$, creates the head phi result $x2$, and pushes it for the whole loop body.
+Along the left edge it pushes $x3$ at $B3$, and along the right edge it pushes $x4$ at $B4$.
+At $B5$ it creates $x5$ as $\phifn{x_3, x_4}$ using the edge-specific tops, then rewrites the use to $x5$.
+The back edge carries $x5$ to the head phi, whose other argument reads $x1$ from entry.
+Because $B6$ is a dominator-tree child of $B5$, it is visited while $x5$ is still on the stack.
+A use of \code{x} at the exit therefore reads $x5$, the value leaving the final iteration, not the pre-loop value $x1$.
+Figure~\ref{fig:visual-ssa-domtree} shows why: $B6$ is below $B5$ in the dominator tree, so the renaming traversal has not yet popped $B5$'s version.
+Compare this tree with the execution edges in Figure~\ref{fig:ch12-ssa}; the two graphs answer different questions.
+
+\input{figures/ssa-dominator-tree}
+
+The \enquote{one definition per name} invariant holds at every step, and each use names the version from its own path.
+A checker can verify the result linearly by confirming that each version has one definition and each phi has one argument per incoming edge.
+
+\section{Implementation notes and cost}
+\label{sec:ch12-implementation}
+
+A builder computes dominators, derives frontiers, places phis per variable, and renames along the dominator tree.
+For $N$ blocks and $E$ edges, the simple upward-walk frontier construction takes at most $O(EN)$ time with constant-time set insertion.
+If $F$ is the sum of frontier sizes and $V$ the number of variables, placement takes $O(V(N+F))$ time with duplicate-free worklists.
+Renaming takes $O(N+I+P)$ time for $I$ ordinary operand occurrences and definitions and $P$ phi arguments.
+Memory holds one stack entry per live variable along the current tree path, plus one phi node per placed merge.
+Large functions with many globals need care: a variable defined in hundreds of blocks seeds hundreds of frontier walks.
+SSA construction frameworks therefore filter with address-taken and single-block tests before placing anything.
+Safonov discusses keeping such construction passes predictable inside trusted toolchains, see~\cite{safonov-2010-trustworthy}.
+
+Destruction belongs in the notes because construction without a destruction plan strands phis before emission.
+Critical edges, where a block with several successors jumps to a block with several predecessors, need splitting so phi copies land on exactly one edge.
+Lost-copy and swap problems arise when parallel phi semantics meet sequential moves, and the standard fix orders copies through temporaries along each edge.
+Register allocation either coalesces phi-related copies aggressively or lowers phis before coloring, depending on the allocator architecture.
+The C standard constrains observable behavior across these rewrites, so copies that touch volatile locations or sequence points need conservative handling, see~\cite{wg14-2011-c11}.
+Cytron and colleagues develop dominance-frontier-based SSA construction and its connection to control dependence; read the construction and its proof together~\cite{cytron-1991-ssa}.
+
+\section{Exercises}
+\label{sec:ch12-exercises}
+
+\begin{enumerate}
+\item \label{ex:ch12-place-rename} Place phis and rename Figure~\ref{fig:ch12-ssa} by hand after adding a definition of \code{y} in $B4$.
+Use Table~\ref{tab:ch12-df}; adding definitions without changing edges does not change dominance frontiers.
+Show the version stacks on entry to every block and the final phi arguments at $B2$ and $B5$.
+State which \code{y} phis pruning keeps when $B6$ uses \code{y}.
+\item \label{ex:ch12-critical-edge} Find a critical edge in Figure~\ref{fig:ch12-ssa} after adding an edge from $B3$ directly to $B6$.
+Explain why phi copies for $B5$ cannot sit in $B3$ or $B5$ without affecting the new edge.
+Split the critical edge, show where the copies land, and run Algorithm~\ref{alg:ch12-placement} again to confirm the placement is unchanged.
+\item \label{ex:ch12-lost-copy} Construct a two-predecessor join where naive sequential phi lowering swaps two variables instead of copying them.
+Show the wrong sequential moves, the correct parallel semantics with $\assignphi{}{}$ notation, and the temporary-based fix.
+Implement the fix for arbitrary phi arity and test it on random joins with three predecessors.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch12-reading}
+
+Appel gives the stack-based renaming walk in implementable detail, see~\cite{appel-1998-modern}.
+Morgan places SSA construction among the loop and redundancy passes that consume it, see~\cite{morgan-1998-optimizing}.
+Safonov covers the engineering discipline that keeps construction and destruction predictable, see~\cite{safonov-2010-trustworthy}.
+The C language definition governs which copies and merges an implementation may reorder or remove, see~\cite{wg14-2011-c11}.

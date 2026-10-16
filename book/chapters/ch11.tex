@@ -1,0 +1,86 @@
+\chapter{Mutation and Rewriting}
+\label{ch:pebble-rewriting}
+
+A legal replacement can be implemented incorrectly, and an impeccably updated graph can encode an illegal replacement.
+An IR editing API must distinguish these failures.
+PebbleIR's replacement routine checks representation validity; the pass that calls it must separately justify equality of the substituted values.
+
+\section{Replace uses, not identities}
+\label{sec:pebble-replace}
+\code{pir\_replace} changes uses of one live value ID to another live ID of the same type.
+It scans ordinary operands, phi operands, and terminator values.
+It leaves the old definition in place; dead-code elimination can later remove it.
+The candidate is verified before publication, so a replacement from a sibling branch is rejected even if its result type matches.
+
+Algorithm~\ref{alg:pebble-replace} states the mechanism.
+Its transaction is implemented with a whole-function copy.
+This is appropriate for the small capacity, but a large editor may instead record an undo log, provided rollback restores every modified field and analysis association.
+
+\begin{algorithm}[htbp]
+\caption{A structurally checked replace-all-uses operation.}
+\label{alg:pebble-replace}
+\begin{pseudocode}
+\Require verified $F$, live same-type IDs $a,b$, caller's proof that substitution is legal
+\Ensure verified replacement, or unchanged $F$
+\State reject if the revision cannot advance
+\State $T\gets$ copy of $F$
+\State substitute $b$ for $a$ in all operand and terminator uses of $T$
+\State advance $T$'s revision
+\If{verification rejects $T$}
+\State report failure without changing $F$
+\Else
+\State publish $T$
+\EndIf
+\end{pseudocode}
+\end{algorithm}
+
+Replacing input \code{x} with a dominating constant 9 can pass verification and still change the program on 255 inputs.
+The verifier checks the graph contract, not the caller's equality claim.
+An optimizer should therefore place the proof-producing guard near the edit: for example, both operands are constants, the operation is total, and evaluation follows byte semantics.
+
+\section{A worked successful rewrite}
+\label{sec:pebble-fold-rewrite}
+For the running expression, value 6 is \code{add} of constants 3 and 5.
+The pass changes its record to \code{const u8 8}, clears its operand and predecessor fields, and retains its block and ID.
+Value 7 continues to refer to ID 6.
+This in-place definition rewrite needs no replace-all-uses call because the value's identity is preserved.
+It does require a new revision because constant and use-def information has changed.
+
+The maximum host sum is within range, and $3+5\bmod256=8$.
+Every execution reaching the original instruction therefore obtains the same byte from its replacement.
+The operation has no effects or traps, so removing its operand dependencies does not remove required behavior.
+Those statements are the legality argument; successful verification is only the structural postcondition.
+
+\section{A rejected rewrite is useful evidence}
+\label{sec:pebble-reject-rewrite}
+In the diamond fixture, replacing input value 1 with left-arm value 5 would make several uses depend on a definition that does not dominate them.
+It can also introduce a direct dependency cycle in the left-arm addition.
+The test calls the replacement API, expects rejection, and compares the whole function with its saved state.
+An editor that reports failure after partially rewriting operands has violated its contract even if a later verifier catches the resulting damage.
+
+Every instruction's operands must be read before its record is overwritten.
+The constant folder copies both operand records into local variables before storing the replacement record.
+That detail avoids losing an operand or type field during an in-place update.
+For more complex rewrites, collect the match and its required facts before beginning the transaction.
+
+\section{Deletion and analysis lifetime}
+\label{sec:pebble-delete}
+The provided passes never delete terminators or blocks.
+They replace unused value records with canonical all-zero tombstones.
+The fact cache uses a deliberately conservative rule: any committed rewrite advances the revision, and any caller retaining facts must recompute before use.
+An optimization that preserves the CFG could eventually declare dominators preserved, but such a declaration is a proof obligation attached to that pass, not a property inferred from its name.
+
+Replacement scanning takes $O(N+B)$ before verification and transaction copying.
+The bound excludes a semantic equivalence proof, which is supplied by the pass's rule.
+This separation keeps API performance claims from concealing the difficult part of optimization.
+
+\section{Exercises}
+\label{sec:pebble-eleven-exercises}
+\begin{enumerate}
+\item \label{ex:pebble-valid-wrong} Give a replacement that preserves types and dominance but changes the running expression's meaning. Show one disagreeing input.
+\item \label{ex:pebble-fold-fields} List the fields that remain unchanged and the fields that must be cleared when value 6 becomes constant 8.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:pebble-eleven-reading}
+Morgan treats transformations as consumers of program facts; use that perspective to separate the proof that permits an edit from the machinery that performs it~\cite{morgan-1998-optimizing}.

@@ -1,0 +1,202 @@
+\chapter{Testing and Validating Compilers}\label{ch:testing-validating-compilers}
+
+A compiler that cannot be checked cannot be trusted.
+Optimizations rewrite programs in ways their authors never wrote, and each rewrite can introduce a defect that no single example exposes.
+Testing therefore needs structure: contracts that state what each pass preserves, oracles that judge results, and regression suites that remember every past failure.
+This chapter builds that structure from pass contracts to minimized failing tests.
+We reuse the fault-isolation ideas of the opening chapter, restated here in the language of full pipelines.
+
+\section{Pass Contracts State the Promise}\label{sec:ch37-contracts}
+
+A \term{pass contract} names the input shape a pass accepts, the property it preserves, and the output shape it guarantees.
+The input shape lists required invariants: well-formed control flow, valid SSA, or consistent types.
+The preserved property names the observable behavior: result values, effect order, or termination on defined inputs.
+The output shape lists the invariants the next pass may assume.
+A contract makes blame assignable.
+When a pipeline miscompiles, the first pass whose output violates its contract is the suspect.
+Consider a folding pass over pure expressions.
+Its contract accepts well-formed trees, preserves evaluation results on all inputs, and guarantees no new effects.
+A test then checks three things: the input satisfied the entry shape, the result matches the oracle, and the output satisfies the exit shape.
+Figure~\ref{fig:ch37-pipeline} shows contracts as gates between passes.
+Each gate checks its entry shape, runs the pass, and checks the exit shape before handing off.
+Table~\ref{tab:ch37-oracles} compares oracle kinds that judge pass results.
+Differential testing compares two pipelines or optimization levels on the same input.
+Reference interpreters compare compiled behavior against a slow trusted evaluator.
+Metamorphic checks compare related inputs whose outputs must satisfy a known relation.
+Each oracle catches defects the others miss, so suites combine them.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=1.0cm and 1.3cm]
+\node[basic block] (p1) {pass A};
+\node[basic block, right=of p1] (g1) {contract\\ check};
+\node[basic block, right=of g1] (p2) {pass B};
+\node[basic block, right=of p2] (g2) {contract\\ check};
+\node[basic block, right=of g2] (p3) {pass C};
+\draw[cfg edge] (p1) -- (g1);
+\draw[cfg edge] (g1) -- (p2);
+\draw[cfg edge] (p2) -- (g2);
+\draw[cfg edge] (g2) -- (p3);
+\end{tikzpicture}
+\caption{Contract checks between passes turn a silent miscompilation into a located failure by testing each handoff before the next pass runs.}
+\label{fig:ch37-pipeline}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{Oracles judge results differently, so a suite combines several kinds rather than relying on one.}
+\label{tab:ch37-oracles}
+\begin{tabular}{lll}
+\toprule
+Oracle & Compares & Catches \\
+\midrule
+Differential & Levels or pipelines & Optimization-only defects \\
+Reference & Trusted evaluator & Wrong-code defects \\
+Metamorphic & Related inputs & Consistency defects \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{From Failure to Minimal Test}\label{sec:ch37-minimize}
+
+A failing program is usually too large to diagnose.
+\term{Test-case reduction} shrinks it while preserving the failure.
+The classic loop removes one fragment at a time and keeps the removal when the failure persists.
+Algorithm~\ref{alg:ch37-reduce} states the single-fragment greedy version.
+It assumes a deterministic failure predicate: the same input always fails or always passes.
+It requires that fragments can be removed independently without breaking the test harness.
+It returns a test where no single remaining fragment can be removed without losing the failure.
+The result is minimal relative to single removals, not globally smallest.
+That weaker guarantee is still valuable because each step is cheap and checkable.
+The opening chapter applied the same idea to isolate one wrong transformation in a tiny expression language.
+The method there built a deterministic reducer, replayed an exact reduction trace, and argued minimality step by step.
+We generalize that discipline here to full pipelines.
+First, freeze the input, the flags, and the environment so the failure reproduces on demand.
+Second, reduce the program while the oracle still reports the same defect signature.
+Third, reduce the flags while the same signature persists.
+Fourth, record the minimal case with its contract check, trace, and expected output.
+A frequent mistake reduces the program and the flags together.
+Coupled reduction confuses which change mattered and produces cases that fail for a different reason than the original.
+Another mistake accepts flaky failures during reduction.
+Nondeterminism makes every removal decision suspect.
+Repeated reproduction is a practical filter for flaky failures, not a proof of determinism.
+The minimality claim below assumes a deterministic predicate that recognizes the same failure signature, including any required validity checks.
+
+\begin{algorithm}[htbp]
+\caption{Greedy single-fragment test-case reduction}\label{alg:ch37-reduce}
+\begin{pseudocode}
+\Require failing test $T$, finite removable fragments, deterministic same-failure predicate $F$
+\Ensure $T$ still fails and no permitted valid single-fragment removal preserves that failure
+\State confirm $F(T)$; abort reduction if the original signature is absent
+\Repeat
+\State $changed \gets false$
+\ForAll{$i$ from $1$ to $n$}
+\State $T' \gets T$ with $f_i$ removed
+\If{$T'$ is well-formed and $F(T')$ holds}
+\State $T \gets T'$
+\State $changed \gets true$; refresh fragment numbering and restart the scan
+\State \Break
+\EndIf
+\EndFor
+\Until{not $changed$}
+\State \Return $T$
+\end{pseudocode}
+\end{algorithm}
+
+\section{Worked Example: Shrinking a Folding Failure}\label{sec:ch37-worked}
+
+We reduce a failing constant-folding case by hand.
+The original test folds \code{(x + 7) + (3 + 5)} with $x = 10$ and expects $25$.
+The pipeline reports $17$, a wrong-code signature.
+Fragments are the outer add, the \code{x + 7} term, the \code{3 + 5} term, and the binding $x = 10$.
+We confirm the failure three times before touching anything.
+Try removing the outer add: the program no longer parses, so the removal is rejected.
+Try removing \code{x + 7}: the remainder \code{3 + 5} folds to $8$, which matches the oracle, so the failure vanishes and the removal is rejected.
+Try removing \code{3 + 5}: the remainder \code{x + 7} with $x = 10$ gives $17$ both before and after folding, so no failure appears and the removal is rejected.
+Try removing the binding: $x$ becomes undefined and the harness reports a different signature, so the removal is rejected.
+No single removal preserves the wrong-code signature.
+The test is therefore irreducible under these permitted single-fragment removals, assuming the stated failure predicate; this is not a global minimum-size claim.
+Hand arithmetic confirms the diagnosis: $x + 7 = 17$, $3 + 5 = 8$, and $17 + 8 = 25$.
+Reporting $17$ means the folder kept the left term and dropped the right term.
+The listing below pins the minimal case for the regression suite.
+\begin{irlisting}
+; minimal folding failure, expect 25
+; x = 10
+; expr = (x + 7) + (3 + 5)
+; observed after fold: 17
+; diagnosis: right term dropped
+\end{irlisting}
+The suite stores the input, the flags, the oracle output, and the contract check that locates the faulty handoff.
+
+\section{Regression Suites That Remember}\label{sec:ch37-regression}
+
+A \term{regression test} locks a past failure so it can never return silently.
+Each entry records the minimal program, the exact flags, the environment, the oracle verdict, and the contract check that locates the defect.
+Entries run on every change to the passes they cover.
+A new failure must either match a known entry or earn a new one through reduction.
+\begin{ccnote}[One defect per entry]
+An entry that covers two defects passes when either is fixed and hides the other.
+Split combined failures before storing them.
+\end{ccnote}
+We organize entries by the handoff they guard.
+Folding entries pin expression contracts.
+Frame entries pin calling conventions.
+Guard entries pin speculation exits with injected failures.
+The \enquote{guard the handoff} rule keeps suites diagnostic: a red entry names the suspect pass directly.
+Randomized testing complements the suite.
+Generators produce well-formed programs, differential oracles compare levels, and every new mismatch enters reduction immediately.
+Coverage guides generation toward untested opcodes and shapes without replacing directed tests.
+
+\section{Generators and Fuzzing Discipline}\label{sec:ch37-fuzzing}
+
+Hand-written tests cover known defects, but they rarely surprise the compiler.
+\term{Randomized testing} generates well-formed programs, runs oracles over them, and reduces every mismatch.
+Generation needs the same contract discipline as the rest of the suite.
+The generator produces only inputs that satisfy the entry shape of the handoff under test.
+Anything else tests the validator instead of the pass.
+A practical generator grows programs from a small grammar of expressions, control flow, and calls.
+It tracks defined names, live values, and effect order so outputs stay meaningful.
+It biases toward recently changed opcodes and historically buggy shapes without abandoning the base distribution.
+Seeds make every run reproducible.
+A failing seed replays exactly, reduces through Algorithm~\ref{alg:ch37-reduce}, and enters the regression suite as a directed entry.
+We quarantine flaky seeds rather than deleting them.
+A seed that fails once in fifty runs still names a real defect or a real nondeterminism source.
+Consider a generator that emits ten thousand straight-line programs per night.
+Differential comparison of two optimization levels flags eleven mismatches.
+Reduction shrinks them to three distinct minimal cases, and two match known entries.
+The night produced exactly one new regression test and one updated coverage gap.
+That arithmetic is the point: fuzzing is measured by distinct minimal defects, not by raw program count.
+The \enquote{count distinct defects} rule keeps fuzzing honest about its yield.
+
+\section{Implementation Notes and Complexity}\label{sec:ch37-implementation}
+
+Contract checks cost $O(N)$ per handoff where $N$ is the program size, using validators that walk each structure once.
+Reduction with $n$ fragments costs $O(n)$ oracle runs per pass over the fragments, each run costing a full pipeline execution.
+Restarting after each successful removal permits $O(n^2)$ oracle calls overall when each accepted step strictly reduces the fragment count.
+This is single-deletion irreducibility relative to the permitted edits, not globally minimum program size.
+Small fragments keep $n$ large but each run cheap; large fragments reverse the trade.
+Caching well-formedness results avoids rechecking unchanged regions.
+Production suites shard by handoff, run deterministically under fixed seeds, and quarantine flaky entries instead of deleting them.
+They version expected outputs with the contract that produced them.
+A common pitfall stores outputs without the flags that produced them.
+A later flag change then turns the whole suite red for no local reason.
+Another pitfall lets generators drift from the language definition.
+Generated programs that violate entry shapes test the validator, not the pass.
+We freeze grammars with the contracts they target and review generator changes as contract changes.
+Every suite entry is a contract with a replayable witness.
+% TODO(cite): need a primary reference for delta-debugging minimality guarantees.
+
+\section{Exercises}\label{sec:ch37-exercises}
+
+\begin{enumerate}
+\item Run Algorithm~\ref{alg:ch37-reduce} on a five-fragment test where only fragments $2$ and $4$ together trigger failure, list which removals are kept, and state whether the result is globally minimal.\label{ex:ch37-reduce-trace}
+\item Write a pass contract for a dead-code pass over straight-line code, naming its input shape, preserved property, output shape, and two tests that each violate a different clause.\label{ex:ch37-contract-write}
+\item Design a regression entry for a miscompiled call sequence, listing the program, flags, environment, oracle verdict, and the contract check that locates the handoff.\label{ex:ch37-entry-design}
+\end{enumerate}
+
+\section{Further Reading}\label{sec:ch37-reading}
+
+Appel discusses testing compiler components against their specifications~\cite{appel-1998-modern}.
+Morgan treats pass structure and the obligations between passes~\cite{morgan-1998-optimizing}.
+Safonov examines validation as part of trustworthy compilation~\cite{safonov-2010-trustworthy}.
+The C standard draft supplies the conformance rules that C-facing tests must encode~\cite{wg14-2011-c11}.

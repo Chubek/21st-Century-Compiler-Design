@@ -1,0 +1,1012 @@
+\chapter{Programs, Meaning, and Translation}
+\label{ch:programs-meaning-translation}
+
+A program can become faster and still become wrong.
+It may return the expected number but omit a write to a file.
+It may work for small inputs but fail when an integer reaches its limit.
+It may pass every test we have and fail on the first input a reader tries.
+The first task of a compiler writer is therefore not to make a program smaller or faster.
+It is to say what the program means, and what a translation must preserve.
+
+Consider a calculation that adds a fixed fee to an input and then multiplies the result by a fixed rate.
+Suppose the input is named $x$, the fee is $7$, and the rate is written as $3+5$.
+The expression is
+\[
+  (x+7)\times(3+5).
+\]
+We do not need the input to work out the rate.
+Replacing $3+5$ by $8$ seems harmless.
+Yet even this small change raises useful questions.
+What kind of numbers are these?
+Can an addition have an effect besides producing its result?
+Does evaluating the expression ever fail?
+Where does the replacement happen: in source text, in a tree, or in machine code?
+
+We will answer those questions for a deliberately small language before making claims about larger ones.
+The example is small enough to execute by hand, implement, test over every input, and justify with a short proof.
+It gives us a working standard for the rest of the book: a transformation needs a meaning, a contract, an implementation, and evidence that the implementation keeps the contract.
+
+\section{A small promise with a large boundary}
+\label{sec:translation-promise}
+
+A \term{compiler} translates a program from one language or representation into another.
+The result need not be machine code.
+A compiler may produce assembly, bytecode for a virtual machine, another source language, or an intermediate form that another tool accepts.
+An \term{interpreter} executes a representation by carrying out its operations.
+The same system can do both: translate one representation into another, then interpret the result.
+
+These words describe work, not ranks of sophistication.
+A tree-walking interpreter can be the clearest executable description of a language.
+A large compiler may use an interpreter internally to evaluate constants.
+A runtime can interpret a function while collecting the information needed to compile it later.
+What matters is which representation each component accepts and which promise it makes.
+
+For an ordinary arithmetic function, the promise might look like this:
+\begin{equation}
+  \operatorname{run}(C(P),i)=\operatorname{run}(P,i).
+  \label{eq:deterministic-translation}
+\end{equation}
+Here $P$ is a source program, $C$ is a compiler, and $i$ is an allowed input.
+The function $\operatorname{run}$ describes execution at the relevant level.
+On the left it executes the compiled representation; on the right it executes the source representation.
+Equation~\ref{eq:deterministic-translation} says that their results agree.
+It does not say that their instructions, temporary values, or running times agree.
+
+This equation has a restricted use.
+It assumes that the executions being compared have results and that those results describe everything we need to preserve.
+An interactive server does not simply read one input and return one number.
+A program can write a file, wait forever, or receive data from another process.
+We will need a richer description for such programs.
+The simple equation remains useful when its assumptions are stated rather than silently extended.
+
+The boundary also includes the environment in which compiled code runs.
+If a function receives the wrong argument representation, an otherwise correct instruction sequence cannot repair the call.
+If a runtime expects one object layout and the compiler emits another, every field access may be wrong.
+A compiler's contract therefore depends on language rules, representation choices, and agreements with other components.
+We should write those agreements down before making them difficult to change.
+
+Appel develops compiler construction through a sequence of representations and interfaces~\cite{appel-1998-modern}.
+We adopt that broad engineering lesson, but use a different starting point here: the contract of one small transformation.
+The aim is to make the obligation visible before the surrounding machinery becomes large.
+
+\section{Define the numbers before using algebra}
+\label{sec:tiny-expression-domain}
+
+Our example language uses the values
+\[
+  V=\{0,1,\ldots,255\}.
+\]
+An addition or multiplication keeps the remainder after division by $256$.
+Thus $250+10$ produces $4$, not $260$.
+The calculation first gives $260$ in ordinary integer arithmetic, and $260=1\times256+4$.
+This is \term{modular arithmetic}, with modulus $256$.
+It is a rule of the example language, not an accidental feature of the machine used to run it.
+
+We choose a small domain for two reasons.
+Every value fits comfortably on a page, and every possible input can be tested.
+The wraparound also prevents us from confusing the source language's arithmetic with unbounded integer arithmetic.
+A language definition should settle such a difference before an optimizer starts applying identities.
+
+Expressions have four forms:
+\begin{equation}
+  e ::= \operatorname{lit}(n)
+      \mid x
+      \mid \operatorname{add}(e,e)
+      \mid \operatorname{mul}(e,e),
+  \qquad n\in V.
+  \label{eq:tiny-expression-grammar}
+\end{equation}
+The notation after $::=$ lists the allowed shapes of an expression.
+A literal contains one value $n$.
+The symbol $x$ names the single runtime input.
+An addition or multiplication contains two child expressions.
+These forms describe a tree; they are not yet a grammar for text a user types.
+There are no assignments, function calls, pointers, or loops.
+
+We require every tree to be finite.
+Every binary node has exactly two children.
+Each node belongs to one place in the tree: different parents do not share a child.
+These conditions may look like storage details, but the implementation will rely on them when it changes nodes in place.
+They also ensure that a recursive traversal eventually reaches leaves.
+
+Let $\llbracket e\rrbracket_a$ mean the value of expression $e$ when the input $x$ is $a$.
+The brackets name evaluation; the subscript supplies the input.
+The definition is
+\begin{align}
+  \llbracket\operatorname{lit}(n)\rrbracket_a &= n, \label{eq:tiny-literal}\\
+  \llbracket x\rrbracket_a &= a, \label{eq:tiny-input}\\
+  \llbracket\operatorname{add}(p,q)\rrbracket_a
+    &= (\llbracket p\rrbracket_a+\llbracket q\rrbracket_a)\bmod256,
+       \label{eq:tiny-add}\\
+  \llbracket\operatorname{mul}(p,q)\rrbracket_a
+    &= (\llbracket p\rrbracket_a\times\llbracket q\rrbracket_a)\bmod256.
+       \label{eq:tiny-mul}
+\end{align}
+Each equation describes one tree shape.
+To evaluate a binary node, evaluate its children, combine their values, and reduce the result.
+Every expression has a value for every input in $V$.
+There is no operation that divides by zero, dereferences an address, or calls something that may not return.
+
+This is a \term{semantics}: a definition of what the allowed forms mean.
+The grammar alone does not supply it.
+We could keep the same tree shapes and choose unbounded integers, checked overflow, or floating-point values instead.
+The programs would then have different meanings even though their trees looked the same.
+Morgan's discussion of compiler representations emphasizes the distinction between structural rules and execution rules~\cite[Chapter~4]{morgan-1998-optimizing}.
+Our arithmetic equations make the execution rules explicit for this example.
+
+\subsection{Work out the example}
+\label{sec:tiny-worked-values}
+
+Take $a=9$.
+The left addition gives $9+7=16$.
+The right addition gives $3+5=8$.
+The multiplication gives $16\times8=128$.
+All three results already lie in $V$, so reducing them changes nothing.
+
+Now take $a=250$.
+The left addition gives a mathematical sum of $257$, whose remainder is $1$.
+The right addition still gives $8$.
+The multiplication gives $1\times8=8$.
+The result is therefore $8$.
+It would be a mistake to report the unreduced mathematical value $2056$ as the language's result.
+
+Table~\ref{tab:tiny-example-values} records several inputs, including the wraparound boundary.
+The intermediate values matter.
+They show where the semantics acts, rather than merely reporting that a test passed.
+For input $248$, the final multiplication is $255\times8=2040$, and $2040=7\times256+248$.
+For input $249$, the left addition becomes zero, so the final result is zero.
+
+\begin{table}
+  \centering
+  \caption{Each operation reduces its result modulo 256.}
+  \label{tab:tiny-example-values}
+  \begin{tabular}{rrrr}
+    \toprule
+    Input $a$ & $(a+7)\bmod256$ & $(3+5)\bmod256$ & Final value \\
+    \midrule
+    0   & 7   & 8 & 56 \\
+    1   & 8   & 8 & 64 \\
+    9   & 16  & 8 & 128 \\
+    248 & 255 & 8 & 248 \\
+    249 & 0   & 8 & 0 \\
+    250 & 1   & 8 & 8 \\
+    255 & 6   & 8 & 48 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Choose a representation that exposes the work}
+\label{sec:expression-representation}
+
+The text $3+5$ is easy for a person to recognize.
+A compiler should not need to recognize it by searching for that exact string.
+Spaces, parentheses, and comments can change the text without changing the calculation.
+Names can also look alike without naming the same object.
+Text is the right input for a parser, but usually the wrong working form for an arithmetic transformation.
+
+An \term{abstract syntax tree} keeps the operation structure while leaving out punctuation that no longer matters.
+Its nodes say which operations exist and which operands belong to them.
+For our example, the root is a multiplication.
+Its left child is an addition of $x$ and $7$.
+Its right child is an addition of $3$ and $5$.
+The tree does not need a separate node for each parenthesis.
+
+Figure~\ref{fig:tiny-before-after} shows the original tree and the tree after replacing the constant addition.
+The operation removed from runtime execution is visible as a missing internal node.
+We have not changed the input-dependent addition.
+We have not distributed multiplication or replaced it with shifts.
+A narrowly stated change is easier to inspect than a cluster of changes performed at once.
+
+\begin{figure}
+  \centering
+  \begin{tikzpicture}[level distance=12mm,
+    level 1/.style={sibling distance=29mm},
+    level 2/.style={sibling distance=13mm}]
+    \node[basic block] at (0,0) {mul}
+      child[cfg edge] {node[basic block] {add}
+        child[cfg edge] {node[basic block,minimum width=8mm] {$x$}}
+        child[cfg edge] {node[basic block,minimum width=8mm] {7}}}
+      child[cfg edge] {node[basic block] {add}
+        child[cfg edge] {node[basic block,minimum width=8mm] {3}}
+        child[cfg edge] {node[basic block,minimum width=8mm] {5}}};
+    \node[basic block] at (7,0) {mul}
+      child[cfg edge] {node[basic block] {add}
+        child[cfg edge] {node[basic block,minimum width=8mm] {$x$}}
+        child[cfg edge] {node[basic block,minimum width=8mm] {7}}}
+      child[cfg edge] {node[basic block] {8}};
+    \node[font=\sffamily\small] at (0,0.8) {Before};
+    \node[font=\sffamily\small] at (7,0.8) {After};
+  \end{tikzpicture}
+  \caption{Folding the right addition leaves the input-dependent subtree unchanged.}
+  \label{fig:tiny-before-after}
+\end{figure}
+
+The tree is one kind of \term{intermediate representation}, or IR.
+\index{IR|see{intermediate representation}}
+An IR is a working language between other stages of translation.
+It need not resemble the source language or the final instruction set.
+Its purpose is to expose the facts a stage needs and to make the stage's assumptions checkable.
+An expression tree exposes nesting.
+A control-flow graph exposes possible transfers of control.
+A machine-level IR exposes operations, registers, and constraints that a particular target requires.
+
+There is no single best representation for every task.
+Early in translation, preserving source structure can make diagnostics easier.
+Later, explicit branches can make reachability easier to analyze.
+Near code emission, explicit register uses can make storage conflicts easier to detect.
+The choice of representation is therefore part of the algorithm design, not a container selected after the real work is done.
+
+\subsection{A representation has rules}
+\label{sec:expression-invariants}
+
+A \term{representation invariant} is a condition that valid instances of a representation must satisfy.
+For our trees, a literal stores a value in $V$.
+An input node has no children.
+An addition or multiplication has two non-null children.
+No child path leads back to an ancestor.
+No node has two parents.
+
+The last two conditions are different.
+A cycle makes naive recursive evaluation fail to terminate.
+Sharing can terminate but still make mutation surprising.
+If two parents point to one child, changing that child affects both parents.
+An algorithm proved for trees cannot silently be treated as an algorithm for arbitrary graphs.
+
+In a mature implementation, a verifier can walk an IR and check its structural rules.
+Some rules are local: a binary node has two operands.
+Others need wider information: an operand is defined where it is used, or a branch names an existing block.
+The verifier does not prove that an optimization preserves meaning.
+It checks whether the optimization has produced a legal object for the next stage to consume.
+
+This distinction helps locate failures.
+If a pass creates a malformed node, the representation contract has failed.
+If the node is well formed but computes the wrong value, the semantic contract has failed.
+Both are bugs, but they call for different explanations and often different tests.
+
+\section{An interpreter as a reference point}
+\label{sec:tiny-reference-interpreter}
+
+An interpreter for this language can follow Equations~\ref{eq:tiny-literal}--\ref{eq:tiny-mul} directly.
+That makes it useful as a reference implementation.
+It does not make it infallible.
+The interpreter can still contain a wrong operator, a missing reduction, or a bad pointer access.
+Its advantage is that the correspondence between the definition and the implementation is short enough to inspect.
+
+Listing~\ref{lst:tiny-node} gives the C node representation.
+The field \code{kind} tells us how to interpret the other fields.
+Only a literal uses \code{literal} as its value.
+Only a binary operation uses \code{left} and \code{right} as operands.
+The full header also declares the evaluator and folder and states their input contract.
+
+\begin{listing}
+  \inputminted[firstline=5,lastline=12]{c}{example-code/ch01/expr.h}
+  \caption{A tagged node represents one expression form.}
+  \label{lst:tiny-node}
+\end{listing}
+
+Listing~\ref{lst:tiny-evaluator} implements evaluation.
+The argument \code{x} supplies the runtime input.
+For a literal, the evaluator returns the stored value.
+For an input node, it returns \code{x}.
+For an operation, it obtains both operand values before applying the operator and reducing the result.
+The assertions document important preconditions, but they are not a parser or a complete tree validator.
+
+\begin{listing}
+  \inputminted[firstline=5,lastline=20]{c}{example-code/ch01/expr.c}
+  \caption{The evaluator implements the four semantic equations.}
+  \label{lst:tiny-evaluator}
+\end{listing}
+
+The implementation uses C's \code{unsigned}, not an eight-bit C type.
+The example language has eight-bit values; the implementation language needs room for intermediate calculations.
+Each operand passed to an operation is at most $255$.
+An addition is therefore at most $510$, and a multiplication is at most $65025$.
+C11 guarantees that \code{unsigned int} can represent at least the values $0$ through $65535$~\cite[Section~5.2.4.2.1]{wg14-2011-c11}.
+Both intermediate calculations fit before the explicit remainder operation.
+
+This is a small but useful portability argument.
+We do not depend on \code{unsigned} having exactly 32 bits, nor on a compiler providing an optional exact-width type.
+We do not depend on an overflowing host calculation happening to produce the guest language's desired result.
+The suffix \code{U} makes constants such as \code{256U} unsigned.
+The implementation and the language definition meet at an explicit remainder operation.
+
+The evaluator's traversal visits each node once.
+If $N$ is the number of nodes and $H$ is the height of the tree, its worst-case time is $O(N)$ and its extra call-stack space is $O(H)$.
+Here the height is the maximum number of nodes on a root-to-leaf path.
+The bound assumes constant-time access to fields and fixed-width arithmetic.
+A language with arbitrary-precision integers would need to account for the size of the numbers as well as the number of nodes.
+
+\section{Move work from execution to translation}
+\label{sec:tiny-constant-folding}
+
+The value of $3+5$ does not depend on $x$.
+Evaluating it once while preparing the program can replace repeated evaluations while running the program.
+This is \term{constant folding}: evaluating a constant operation during translation and replacing it with its result.
+In our language, we fold an addition or multiplication when both children have become literals.
+
+The phrase \enquote{have become} matters.
+A parent can become constant only after a child is simplified.
+For example, in $(14+19)\times(6+5)$, neither operand of the multiplication is initially a literal.
+After folding the additions, the multiplication has literal operands $33$ and $11$.
+It can then become the literal $107$, because $33\times11=363$ and $363\bmod256=107$.
+
+Algorithm~\ref{alg:tiny-fold} visits children before deciding whether to fold their parent.
+This order is a \term{postorder traversal}.
+The algorithm is written as a function that produces a replacement tree.
+The C version will reuse existing node storage instead of allocating a new node for every result.
+Both versions have the same semantic contract.
+
+\begin{algorithm}
+  \caption{Fold constant operations in a finite expression tree.}
+  \label{alg:tiny-fold}
+  \begin{pseudocode}
+    \Require A finite, non-sharing tree $e$ from Equation~\ref{eq:tiny-expression-grammar}
+    \Ensure A tree with the same value for every input $a\in V$
+    \Function{Fold}{$e$}
+      \If{$e$ is a literal or the input node}
+        \State \Return $e$
+      \EndIf
+      \State $p\gets\Call{Fold}{\operatorname{left}(e)}$
+      \State $q\gets\Call{Fold}{\operatorname{right}(e)}$
+      \If{$p=\operatorname{lit}(u)$ and $q=\operatorname{lit}(v)$}
+        \If{$e$ is an addition}
+          \State \Return $\operatorname{lit}((u+v)\bmod256)$
+        \Else
+          \State \Return $\operatorname{lit}((u\times v)\bmod256)$
+        \EndIf
+      \EndIf
+      \State \Return a node with $e$'s operator and children $p,q$
+    \EndFunction
+  \end{pseudocode}
+\end{algorithm}
+
+For the fee-and-rate example, the traversal first reaches $x$ and $7$.
+The input is not a literal, so the left addition remains an addition.
+It then reaches $3$ and $5$.
+Both are literals, so the right addition becomes $8$.
+The root still has a nonliteral left child, so it remains a multiplication.
+The resulting expression is $(x+7)\times8$.
+
+Originally, evaluation reached seven nodes: two addition nodes, one multiplication node, the input node, and three literals.
+After folding, it reaches five: one addition, one multiplication, the input, and two literals.
+The number of runtime arithmetic operations falls from three to two.
+Those are statements about this interpreter and representation.
+They are not yet measurements of machine-code size or elapsed time.
+
+\subsection{One traversal is enough for this rule}
+\label{sec:tiny-fold-complexity}
+
+Once a child has been processed, it contains no operation whose two children are literals.
+If the parent can become a literal, the algorithm does so immediately.
+If it cannot, at least one child is nonliteral.
+The parent's decision does not create an unprocessed constant operation inside that child.
+There is therefore no need to repeat the traversal for this particular rule.
+
+The algorithm does $O(1)$ local work per original node.
+With $N$ nodes and height $H$, its worst-case time is $O(N)$ and its extra recursion space is $O(H)$.
+The in-place implementation needs no new expression nodes.
+A version that constructs a separate result tree may need $O(N)$ additional node storage.
+These storage bounds should not be confused: the output representation and the traversal's temporary stack are different resources.
+
+This argument does not say that every optimization needs only one pass.
+Two different rules can expose opportunities for each other.
+A change to one block can invalidate an analysis used by another.
+A repeated optimization pipeline needs its own argument for termination, its own cost limit, or both.
+The absence of such machinery in this example is a consequence of its narrow rule, not a general principle about compilers.
+
+\section{Prove the replacement that was actually made}
+\label{sec:tiny-fold-proof}
+\index{constant folding!correctness}
+
+Let $F(e)$ be the tree produced by Algorithm~\ref{alg:tiny-fold}.
+The claim is
+\begin{equation}
+  \llbracket F(e)\rrbracket_a=\llbracket e\rrbracket_a
+  \qquad\text{for every valid tree $e$ and every $a\in V$.}
+  \label{eq:tiny-fold-correctness}
+\end{equation}
+Notice both quantifiers.
+The claim is not limited to the fee-and-rate example, nor to the inputs in Table~\ref{tab:tiny-example-values}.
+It covers every finite expression permitted by the grammar.
+The small set of expression forms lets us prove it by following the tree's structure.
+
+For a literal, $F$ returns the same literal.
+Its value is unchanged by Equation~\ref{eq:tiny-literal}.
+For the input node, $F$ returns the same input node.
+Its value is unchanged by Equation~\ref{eq:tiny-input}.
+These are the leaf cases.
+
+Now consider an addition with children $p$ and $q$.
+Assume that folding each child preserves its value for every input.
+This assumption is valid because the children are smaller trees; repeatedly descending to smaller children eventually reaches the leaf cases.
+Write $p'=F(p)$ and $q'=F(q)$.
+For any input $a$, their values agree with those of $p$ and $q$.
+
+If $p'$ and $q'$ are not both literals, the algorithm keeps an addition with those children.
+Its value is
+\[
+  (\llbracket p'\rrbracket_a+\llbracket q'\rrbracket_a)\bmod256
+  = (\llbracket p\rrbracket_a+\llbracket q\rrbracket_a)\bmod256.
+\]
+That is exactly the original addition's value.
+If both children are literals, write them as $\operatorname{lit}(u)$ and $\operatorname{lit}(v)$.
+The algorithm returns the literal $(u+v)\bmod256$.
+The retained addition would have produced that same value by Equation~\ref{eq:tiny-add}.
+Replacing it with the literal therefore preserves the value as well.
+
+For multiplication, the argument is identical except that the local operation is multiplication and the relevant rule is Equation~\ref{eq:tiny-mul}.
+Both the retained-node case and the literal-result case compute the original product modulo $256$.
+The leaf cases and the two operation cases exhaust the grammar.
+Equation~\ref{eq:tiny-fold-correctness} follows.
+This proof method is \term{structural induction}: establish the claim for the leaves, then show how the claim for children establishes it for their parent.
+
+\subsection{What the proof does not establish}
+\label{sec:tiny-proof-boundary}
+
+The proof is about the specified transformation on valid trees.
+It does not establish that an arbitrary C program implements that transformation.
+A C folder can confuse the two child pointers, write the wrong tag, or use the host machine's arithmetic incorrectly.
+It can also exhaust the process stack on a sufficiently deep tree.
+The mathematical function has no such process resource limit.
+
+We therefore need a second connection: the implementation must correspond to the algorithm under stated resource and storage assumptions.
+For this example, the correspondence is short enough to review directly.
+Tests support that review and can expose mistakes, but they do not turn finite testing into a proof about every tree.
+
+The distinction will remain useful as the compiler grows.
+We can have a correct optimization idea with a defective implementation.
+We can have a faithful implementation of an incorrect idea.
+We can also have a correct pass called when its preconditions do not hold.
+Each failure has a different remedy.
+A proof attached to the wrong contract is not protection against the other two.
+
+\section{Implement the fold without hiding ownership}
+\label{sec:tiny-fold-implementation}
+\index{constant folding!implementation}
+
+Listing~\ref{lst:tiny-folder} is the in-place implementation.
+It first leaves literals and input nodes alone.
+For an operation, it folds both children.
+If either child remains nonliteral, it returns without replacing the parent.
+Otherwise, it evaluates the now-constant parent and changes that node into a literal.
+
+\begin{listing}
+  \inputminted[firstline=22,lastline=36]{c}{example-code/ch01/expr.c}
+  \caption{The in-place folder reuses the parent node for a literal result.}
+  \label{lst:tiny-folder}
+\end{listing}
+
+The call \code{eval(e, 0U)} does not claim that the actual runtime input is zero.
+At that point, both children are literals.
+The evaluator will read those values and will never inspect an input node.
+Any input argument in $V$ gives the same result.
+Using zero is merely a convenient way to satisfy the evaluator's interface.
+
+The call is also not a hidden traversal of the original subtree.
+Each child has already been folded and is now a literal.
+Evaluation reaches exactly the parent and its two immediate children.
+It therefore takes constant time at this point.
+Calling a recursive evaluator at every node would not in general justify a linear-time bound; the local shape established by the condition is what justifies the bound here.
+
+After obtaining the value, the code changes \code{kind} and clears both child pointers.
+Clearing the pointers makes the new node's shape agree with its tag.
+It does not release the old children's storage.
+The caller owns all nodes, including nodes that the root can no longer reach.
+The examples use stack-allocated nodes or a fixed arena, so their storage has a lifetime independent of the current tree edges.
+
+This ownership rule must remain visible.
+If each node were separately allocated and owned only through its parent, clearing the pointers without freeing the children would leak memory.
+If a child were shared, freeing it could leave another parent with a dangling pointer.
+Neither problem is solved by adding a call to \code{free} at the end of the function.
+The representation and ownership contracts must agree with the mutation strategy.
+
+An \term{arena} allocates a collection of objects whose storage is reclaimed together.
+It is often convenient for transformations that disconnect objects during a phase.
+Disconnected objects occupy space until the arena is released, so cheap reclamation is not the same as immediate reclamation.
+The right choice depends on how many objects become unreachable and how long the arena remains alive.
+Our fixed test arena makes that trade-off explicit without introducing a general allocator.
+
+\section{Test the claim at several boundaries}
+\label{sec:tiny-fold-testing}
+
+The source files for this example live in \code{example-code/ch01/}.
+The chapter includes code from those files rather than maintaining a second copy in LaTeX.
+The directory's README gives compilation commands and the input contract.
+The files use C11 and the standard library only.
+
+The first tests check each binary operation on every pair of literal operands.
+There are $256\times256=65{,}536$ pairs.
+For each pair, the tests check addition and multiplication before folding, then check that folding produces the expected literal.
+They also check that the replacement node no longer has children.
+This is exhaustive over those two operations' literal inputs, not over arbitrary expression trees.
+
+The second tests build the fee-and-rate tree.
+They record its value for every input in $V$, fold it, and compare the results for every input again.
+They check the shape as well: the root is still a multiplication, the left child is still an addition, and the right child is the literal $8$.
+The shape check catches a folder that does nothing but happens to preserve all results.
+Semantic preservation alone does not establish that an optimizer performed its intended work.
+
+The tests then fold the result again and compare the values again.
+An operation is \term{idempotent} when applying it twice has the same result as applying it once.
+For this rule, a second traversal has no additional constant operation to fold.
+Repeated application should therefore leave the reachable tree unchanged.
+The current test checks repeated evaluation results; a stronger test could also compare the complete reachable shape.
+We should distinguish the mathematical property from the part of it a particular test checks.
+
+The third group builds 256 deterministic generated trees of height at most five nodes on any root-to-leaf path.
+For each tree, it compares all 256 input results before and after folding.
+The generator uses a fixed arithmetic rule, so a failure can be reproduced.
+These cases provide additional shapes, but they do not cover all trees of that height or prove correctness for all heights.
+The test set is finite even when the property is not.
+
+The program \code{demo.c} prints selected before-and-after values.
+Its output agrees with the corresponding rows of Table~\ref{tab:tiny-example-values}.
+The tests also check the nested constant expression used in the folding discussion, the wraparound sum $250+10$, and the two identities used in the exercises.
+Hand calculations, representation checks, and executable comparisons support one another; none should be allowed to stand in for all the others.
+
+\subsection{The reference can share a mistake}
+\label{sec:tiny-oracle-risk}
+
+Before-and-after evaluation can miss a mistake shared by both executions.
+If the evaluator accidentally subtracts where it should add, the folder may use that same evaluator to compute a constant.
+The two versions can then agree with each other while both disagree with the language definition.
+Agreement is useful evidence only when we also ask what the compared implementations have in common.
+
+This is why the direct literal-operation tests compute expected values separately from the evaluator's traversal.
+The arithmetic expectations still use C, so this is not a fully independent implementation of arithmetic.
+The earlier range argument is part of the justification for those expectations.
+The hand-worked boundary cases add another check on the intended meaning.
+
+For larger languages, a second compiler, a separately written interpreter, or a translation validator can provide a different point of comparison.
+Each has limits.
+Two compilers can share assumptions, and a validator can have its own bugs.
+The useful question is not whether a component deserves the label \enquote{trusted} in isolation.
+It is which failures the evidence can detect and which components remain outside that evidence.
+Safonov discusses compiler trustworthiness as a broader engineering concern than the correctness of one optimization~\cite{safonov-2010-trustworthy}.
+
+\section{A result is not the whole execution}
+\label{sec:observable-behavior}
+
+Our expression language is unusually forgiving.
+Every expression terminates and has no effect except producing a value.
+That makes result equality a sufficient comparison.
+Adding one operation with an effect changes the problem.
+
+Suppose a function increments a counter and returns $7$.
+Multiplying its return value by zero produces zero, but calling the function also changes the counter.
+Listing~\ref{lst:zero-effect} is a complete C program that makes the difference visible.
+The function call is evaluated before the multiplication has its result.
+The final print observes both the value and the updated counter.
+
+\begin{listing}
+  \inputminted{c}{example-code/ch01/observations.c}
+  \caption{A zero result does not make the function call's effect dispensable.}
+  \label{lst:zero-effect}
+\end{listing}
+
+The program prints \code{value=0 calls=1}.
+Replacing the entire body of \code{keep\_effect} with a return of zero would leave the counter unchanged.
+The program would print a different result and return a failure status.
+A compiler may remove the multiplication while retaining the increment.
+It may also inline the function or reorganize the surrounding calculation.
+It must preserve the program's required observations, not its particular spelling or call structure.
+
+An \term{observable behavior} is an aspect of execution that the language and its execution model require an implementation to preserve.
+The exact definition belongs to the language.
+It is not safe to invent a universal list from an optimizer's current needs.
+For C, the abstract-machine rules discuss observable requirements including volatile accesses, file contents at termination, and interactive input/output behavior~\cite[Section~5.1.2.3]{wg14-2011-c11}.
+Our counter matters because its value contributes to printed output; an arbitrary unobserved local update need not be preserved as a machine operation.
+
+The word \enquote{observable} does not mean that a debugger can inspect a temporary while single-stepping.
+Debugging interfaces can impose additional expectations, but those expectations are a separate agreement.
+Nor does it mean every physical property a measuring device could detect.
+Ordinary language semantics generally allows changes in instruction timing; a security-sensitive system may need stronger rules about timing or memory-access patterns.
+The preservation boundary must match the promise being made.
+
+\subsection{Record a trace when order matters}
+\label{sec:behavior-traces}
+
+A \term{trace} records a sequence of events.
+For a small input/output language, events might be \enquote{read this value} and \enquote{write this value}.
+Two runs that write the same values in different orders have different traces.
+Two runs that both return zero can also have different traces if only one writes a message.
+
+We can describe a terminating deterministic execution by a pair $(t,r)$, where $t$ is its trace and $r$ is its final result.
+A more complete model can distinguish a return, a defined trap, and divergence.
+The details depend on which constructs the language contains.
+An expression language with no loops needs less machinery than a concurrent language with shared memory and external inputs.
+
+The point of introducing a trace is not to make every proof longer.
+It is to prevent the proof from forgetting behavior the program can actually have.
+If a transformation only touches a pure expression inside a larger program, we may prove a local value property and then justify why that local replacement preserves the surrounding execution.
+If the expression can perform input/output, the local property must include that behavior or explicitly require its absence.
+
+\section{Equality, permission, and refinement}
+\label{sec:behavior-refinement}
+
+Some language rules allow more than one behavior for the same program and input.
+For example, a language might leave the evaluation order of two independent operations open.
+A compiler can choose one permitted order without supporting every order on every execution.
+Requiring the compiled program to reproduce the entire set of source possibilities would then be unnecessarily strong.
+
+Let $\mathcal{B}(P,i)$ be the set of behaviors permitted for program $P$ on input $i$.
+For programs whose behavior is defined, a useful compiler requirement is
+\begin{equation}
+  \mathcal{B}(C(P),i)\subseteq\mathcal{B}(P,i).
+  \label{eq:behavior-refinement}
+\end{equation}
+Here both sides must describe observations at a common interface.
+Machine-level bookkeeping events should not appear on only one side of the comparison.
+Equation~\ref{eq:behavior-refinement} says that a compiled execution must not introduce a forbidden behavior.
+This form of restriction is called \term{refinement}.
+
+The equation alone is not a complete definition of compiler correctness.
+If an execution model allowed a target program to have no behaviors at all, an empty set would satisfy the inclusion vacuously.
+We also need the model and correctness statement to account for execution, progress, and termination in the intended way.
+For a terminating deterministic source program, describing divergence as a distinct behavior prevents an endlessly looping target from masquerading as a correct result.
+
+Undefined behavior needs particular care.
+A language can decline to impose execution requirements after a program violates a specified rule.
+That is not the same as choosing one of several ordinary defined results.
+It is also not a guarantee that the program will stop with an error message.
+The scope of the compiler's obligation must be stated on inputs and executions to which the language gives a meaning.
+
+In C, signed integer overflow is not a request for wraparound arithmetic.
+The exceptional-expression rule makes behavior undefined when a result is not representable in its type, subject to the language's specific rules for operations and types~\cite[Section~6.5, paragraph~5]{wg14-2011-c11}.
+Unsigned arithmetic has a different rule: results are reduced modulo one more than the largest representable value of the resulting unsigned type~\cite[Section~6.2.5, paragraph~9]{wg14-2011-c11}.
+Integer promotions still affect which type an expression uses.
+Naming an eight-bit storage type does not by itself make every intermediate C expression an eight-bit operation.
+
+Our example avoids those complications by specifying its own domain and proving that the host operations fit.
+The lesson is not that every compiler should use this arithmetic.
+It is that a transformation must follow the arithmetic of the language or IR it is transforming.
+An identity copied from a mathematics textbook is not a substitute for that check.
+
+\section{Control flow changes what can happen}
+\label{sec:first-control-flow-graph}
+
+An expression tree tells us how operands nest.
+It does not directly express a choice between paths through a program.
+Suppose a program tests whether the input is below $128$.
+On the true path it computes $(x+7)\times8$; on the false path it returns $x$.
+Only one path executes on each run.
+
+A \term{control-flow graph}, or CFG, represents possible transfers of control.
+\index{CFG|see{control-flow graph}}
+Its vertices are blocks of instructions, and its directed edges describe possible transfers between them.
+A \term{basic block} is a sequence of instructions entered at its beginning, with no internal branch that selects a different successor before its end.
+For this first graph, the instructions are just descriptive labels.
+We will define an executable instruction representation before implementing graph transformations.
+
+Figure~\ref{fig:first-diamond} shows the choice as a diamond.
+The entry block tests the input.
+Its two outgoing edges have different conditions.
+Each path assigns the result to $r$, then reaches a return block.
+The graph describes both possible paths even though an individual execution follows only one of them.
+
+\begin{figure}
+  \centering
+  \begin{tikzpicture}[node distance=14mm and 12mm]
+    \node[basic block] (test) {test $x<128$};
+    \node[basic block,below left=of test] (yes) {$r\gets(x+7)\times8$};
+    \node[basic block,below right=of test] (no) {$r\gets x$};
+    \node[basic block,below right=of yes] (ret) {return $r$};
+    \draw[cfg edge] (test) -- node[above left,font=\small] {true} (yes);
+    \draw[cfg edge] (test) -- node[above right,font=\small] {false} (no);
+    \draw[cfg edge] (yes) -- (ret);
+    \draw[cfg edge] (no) -- (ret);
+  \end{tikzpicture}
+  \caption{A branch selects one computation; the return block is shared.}
+  \label{fig:first-diamond}
+\end{figure}
+
+For $x=9$, the true edge is selected and the result is $128$.
+For $x=250$, the false edge is selected and the result is $250$.
+The fee-and-rate expression would evaluate to $8$ at that second input, but this execution does not evaluate it.
+Distinguishing an expression's possible value from whether it executes is essential to reasoning about a whole program.
+
+If we moved an operation from one branch to the entry block, it could run on inputs that previously skipped it.
+For our finite, pure arithmetic expression, that extra evaluation would terminate and would have no external effect.
+For a memory access, a division, or a function call, the extra evaluation could matter.
+Moving work requires a justification about execution conditions as well as about the operation's returned value.
+
+The CFG itself does not tell us every semantic fact we need.
+An edge says a transfer is possible in the representation.
+An analysis may prove that a particular edge cannot be taken under a particular condition.
+Until such a proof exists, an optimizer cannot simply omit a path because the path looks unlikely.
+Likelihood supports a performance decision; impossibility supports a different kind of correctness argument.
+
+\section{Separate facts from rewrites}
+\label{sec:analysis-and-transformation}
+
+A \term{program analysis} computes facts used to reason about a program.
+A \term{program transformation} changes the program's representation.
+Our folder does both in a small local form: it recognizes two literal children and replaces their parent with a literal.
+Larger optimizations often separate those tasks so that several rewrites can reuse the same analysis.
+
+Suppose a value is known to be $8$ at one instruction.
+An analysis can record that fact.
+A transformation can replace a multiplication's operand with the literal $8$.
+Another transformation can simplify a comparison using the same fact.
+The analysis is useful because its statement has a defined scope: which value, which program point, and which possible executions.
+
+Using a fact creates three distinct obligations.
+The analysis must cover the executions that can reach the point, the rewrite must be valid under the reported fact, and the implementation must apply that rewrite to the representation the fact describes.
+For example, knowing that \code{x} is zero does not by itself justify deleting the evaluation of \code{f() * x}: the call may have an observable effect or may fail to return.
+Even a sound fact and a valid rule are insufficient if an intervening edit has changed which definition of \code{x} reaches the multiplication.
+This separation gives a practical way to diagnose wrong code: inspect the fact, the rule's preconditions, and the fact's lifetime before changing the optimization heuristic.
+
+The cost of a wrong fact can be much larger than the cost of a missed opportunity.
+If an analysis cannot establish that a value is constant, keeping the original computation may make the program slower.
+If it falsely reports a constant, replacing the computation can make the program wrong.
+A \term{conservative analysis} deliberately keeps enough possibilities to avoid making an unsound claim.
+The direction of that conservatism depends on what the analysis represents.
+For possible targets of a call, retaining an extra target can be safe while omitting a real target is not.
+
+The small folder makes no claim about the value of $x$.
+It is possible that every caller supplies the same input, but our function's contract allows all $256$ values.
+Without an additional argument about callers, the folder must retain the input-dependent work.
+Not exploiting an unstated assumption is a form of correctness, not a weakness to conceal.
+
+\subsection{A change can invalidate a fact}
+\label{sec:analysis-invalidation-introduction}
+
+An analysis result refers to a particular program representation.
+After a transformation changes that representation, the old result may no longer apply.
+If a graph gains a new predecessor edge, a fact justified by all previous predecessors may become false.
+If a store is inserted, an earlier conclusion about a loaded value may stop being valid.
+
+There are three broad responses.
+We can recompute the analysis.
+We can update it while changing the program.
+Or we can discard it and avoid using it until it is computed again.
+Each choice has an implementation cost.
+Continuing to use the old result without justification is not a fourth choice.
+
+This is one reason to give passes explicit interfaces.
+A pass should state which representation it expects, which properties it preserves, and which analyses it invalidates.
+Those statements let a pipeline compose passes without depending on accidental knowledge inside each implementation.
+The interface is part of the correctness argument even when the source code expresses it only through assertions and documentation.
+
+\section{A compiler is a chain of small languages}
+\label{sec:compiler-phase-contracts}
+
+Figure~\ref{fig:first-pipeline} sketches a translation path.
+The diagram is a map of responsibilities, not a rule that every compiler must have exactly four stages.
+The tree preserves source structure.
+The middle representation exposes operations and control.
+The machine representation exposes target constraints.
+Each arrow crosses a boundary where one set of invariants must be established from another.
+
+\begin{figure}
+  \centering
+  \begin{tikzpicture}[node distance=8mm]
+    \node[basic block,minimum width=24mm] (source) {Source};
+    \node[basic block,minimum width=24mm,right=of source] (tree) {Typed tree};
+    \node[basic block,minimum width=24mm,right=of tree] (ir) {Middle IR};
+    \node[basic block,minimum width=28mm,right=of ir] (machine) {Machine IR};
+    \draw[cfg edge] (source) -- (tree);
+    \draw[cfg edge] (tree) -- (ir);
+    \draw[cfg edge] (ir) -- (machine);
+  \end{tikzpicture}
+  \caption{Different representations make different obligations explicit.}
+  \label{fig:first-pipeline}
+\end{figure}
+
+The \term{front end} checks and translates the source language.
+It typically handles tokens, syntax, names, and types, then creates a representation suitable for later work.
+The \term{middle end} performs analyses and transformations at a level that need not commit to every detail of a target instruction set.
+The \term{back end} maps work onto a target's operations, storage resources, and calling conventions.
+These names describe a useful division of responsibility, not three sealed rooms.
+
+A source feature can create obligations all the way to machine code.
+If an operation must report overflow, lowering cannot silently replace it with an operation that merely wraps.
+If a call can trigger garbage collection, the runtime may need a way to find live references at that call.
+If a function can unwind, instruction motion must respect the defined behavior of unwinding.
+The representation can change, but an obligation cannot disappear simply because its original syntax has disappeared.
+
+A \term{lowering} translates a construct into operations that express it more explicitly or are closer to the eventual execution mechanism.
+For example, a structured conditional can become a test and branch edges.
+A representation with a single allocation operation may later become a call plus runtime metadata.
+Lowering is not inherently an optimization.
+It can increase the number of visible operations while making the required implementation possible.
+
+At each boundary, we should ask two questions.
+Does the result satisfy the next representation's structural rules?
+Does it preserve the source construct's required behavior?
+The first question is often suitable for an IR verifier.
+The second needs reasoning about the translation itself.
+Keeping the questions separate makes a complicated pipeline easier to test and explain.
+
+\section{Optimization needs an objective, not a name}
+\label{sec:optimization-objectives}
+
+An \term{optimization} aims to improve a program according to some objective while preserving the required behavior.
+The word does not mean that the compiler finds the best possible program.
+Many passes make local choices or apply heuristics under limited information.
+The objective might be execution time, code size, memory use, energy, startup delay, or some combination.
+Two objectives can disagree about the same change.
+
+Our folder removes one runtime addition from the example expression.
+If the same expression is interpreted many times, avoiding that repeated work is a plausible benefit.
+If the expression is interpreted once, preparing the folded tree also costs work.
+Whether the change reduces total time depends on how preparation and execution are used.
+We should not turn an operation count into a benchmark result.
+
+For a simple model, let $T$ be the extra translation time spent optimizing a program.
+Let $s$ be the execution time saved per run, and let $k$ be the number of runs.
+Ignoring other differences, the optimization pays for its extra preparation time when
+\begin{equation}
+  k s > T.
+  \label{eq:optimization-break-even}
+\end{equation}
+The units must agree: if $T$ and $s$ are times, $k$ is a count.
+This is a model for a decision, not a measured property of the folder.
+If $s$ is zero or negative, increasing the run count does not produce the assumed benefit.
+
+An ahead-of-time compiler and a runtime compiler can face different values of $k$ and different tolerances for $T$.
+A build system may spend substantial time preparing a binary that runs many times.
+A runtime may need to decide whether a particular function is worth compiling while the application is already running.
+The same transformation can be appropriate under one budget and inappropriate under another.
+
+Code size introduces another trade-off.
+Duplicating a block can avoid a branch on one path while making the program larger.
+Inlining can expose constants while increasing the amount of code later passes must process.
+The claim \enquote{this pass improves the program} is incomplete until the objective and relevant conditions are named.
+Morgan's treatment of optimizing compilers connects transformations to machine and compiler-engineering concerns rather than treating them as isolated algebra~\cite[Chapters~1--2]{morgan-1998-optimizing}.
+
+\section{Make failures small enough to understand}
+\label{sec:compiler-failure-method}
+
+When a compiler produces a wrong answer, the original failing program can be much larger than the cause.
+A useful first goal is a smaller program that still exposes the error.
+The smaller program makes the disputed contract easier to identify.
+It can also become a regression test: an executable reminder of a failure the compiler must not repeat.
+
+For our folder, a wrong result at input $250$ suggests several possibilities.
+The evaluator may have omitted a reduction.
+The folder may have calculated a constant with the wrong operator.
+The test may have built the tree incorrectly.
+Printing the input, the original tree, the transformed tree, and both values can separate those possibilities without printing every internal pointer.
+
+The relevant observation should be part of the test.
+For a pure expression, the result value is enough.
+For Listing~\ref{lst:zero-effect}, the test must also check the counter-dependent output or final status.
+A test that records only the returned arithmetic value cannot detect a lost effect by inspecting that value more often.
+
+The allowed inputs also belong in the test description.
+A supposed compiler bug in an arbitrary C program may instead depend on undefined behavior in that program.
+That does not make every surprising output correct; it means the language rules must be checked before the example can establish a miscompilation.
+Using a deliberately defined small language lets us practice this discipline without first confronting every detail of C.
+
+During development, structural checks close to a transformation can catch damage before it spreads.
+For this example, assertions on node kinds and literal ranges help document assumptions.
+A complete graph implementation will need broader checks for edges and definitions.
+When the first invalid state is found close to the pass that created it, the final machine-code failure becomes less mysterious.
+
+\input{chapters/ch01/stack-translation}
+\input{chapters/ch01/fault-lab}
+\input{chapters/ch01/traps-effects}
+
+\section{What we can now claim}
+\label{sec:first-chapter-checkpoint}
+
+We have defined a finite expression language, not a complete programming language.
+Its evaluator follows four equations.
+Its constant folder removes operations whose operands have become literals.
+A structural proof establishes preservation for the specified algorithm, and executable tests check the implementation on exhaustive literal-operation inputs and selected tree shapes.
+We also translate those trees to a four-operation stack machine.
+A stack-prefix theorem connects target execution to source evaluation, while a separate verifier checks target structure and stack safety.
+The combined pipeline folds a tree, emits code, verifies it, and executes it under explicit capacity limits.
+An isolated faulty wrapper and a greedy reducer show how a structurally legal translation can still violate that pipeline's semantic promise.
+A separate laboratory extends the tree with a trapping division, an ordered event log, and a fuel check.
+It shows why a zero divisor must stay unfolded, why effect order belongs to the program's observations, and why divergence constrains code motion even when no wrong number appears.
+
+We have also found the limits of that small result.
+It does not justify deleting function effects, moving arbitrary operations across branches, or treating C's arithmetic as our expression arithmetic.
+It does not establish that fewer tree nodes always means less elapsed time.
+It does not remove the need for ownership rules or resource limits in the implementation.
+
+Those limits are useful.
+They tell us what additional information a more ambitious compiler will need.
+Names and types need rules.
+Branches need a graph.
+Analyses need a meaning and a safe direction of approximation.
+Transformations need contracts that remain valid when other passes change the program.
+The rest of the project grows from those needs rather than from a list of clever rewrites.
+
+\section{Exercises}
+\label{sec:programs-meaning-exercises}
+
+\begin{enumerate}
+  \item \label{ex:tiny-wraparound}
+  Evaluate $(x+7)\times(3+5)$ in the language of Equation~\ref{eq:tiny-expression-grammar} for $x=9$, $x=249$, and $x=255$.
+  Show the reduction after each operation.
+  Explain why a mathematical integer result outside $V$ is not a result of this language.
+
+  \item \label{ex:tiny-nested-fold}
+  Draw the expression tree for $(14+19)\times(6+5)$.
+  Apply Algorithm~\ref{alg:tiny-fold} in postorder and record each replacement.
+  Count the nodes reachable from the root before and after folding.
+
+  \item \label{ex:tiny-zero-identity}
+  Prove that $\operatorname{mul}(e,\operatorname{lit}(0))$ can be replaced by $\operatorname{lit}(0)$ in the finite, pure language defined here.
+  State which properties of the language justify omitting evaluation of $e$.
+  Explain why the same value identity does not justify deleting the call in Listing~\ref{lst:zero-effect}.
+
+  \item \label{ex:tiny-identity-extension}
+  Extend the folder with the rule $\operatorname{add}(e,\operatorname{lit}(0))\mapsto e$.
+  Keep the caller-owned, non-sharing tree contract.
+  Describe how an in-place implementation can replace the root node without returning a pointer to a temporary object.
+  Test the rule for every input when $e$ is $x$ and when $e$ is $\operatorname{mul}(x,\operatorname{lit}(7))$.
+
+  \item \label{ex:tiny-test-limits}
+  A test compares original and folded results for all $256$ inputs on one tree and finds no difference.
+  State exactly which preservation claim this establishes if the evaluator is correct.
+  Give two claims about the folder that this test alone does not establish.
+
+  \item \label{ex:tiny-shared-node}
+  Suppose the no-sharing invariant is removed, and the same node is used as both children of a parent.
+  Explain why the current linear-time argument in terms of distinct allocated nodes no longer follows from the tree traversal.
+  Construct a family of acyclic shared graphs with few distinct nodes but many repeated recursive visits.
+  Suggest one representation-aware way to avoid the repeated visits.
+  \item \label{ex:tiny-stack-prefix}
+  Execute the seven instructions in Table~\ref{tab:tiny-stack-trace} with input $9$ and initial stack $[23]$.
+  Show every stack and identify the point of maximum depth.
+  Explain why the final stack is correct for a fragment but not for a whole expression program started empty.
+
+  \item \label{ex:tiny-stack-demand}
+  Using Equation~\ref{eq:tiny-stack-demand}, compare the stack demands of these trees:
+  \[
+    \operatorname{add}(x,\operatorname{add}(x,x)),
+    \qquad
+    \operatorname{add}(\operatorname{add}(x,x),x).
+  \]
+  Check the arithmetic equivalence in the modulo-256 language, and state why this observation alone would not justify reassociation in an arbitrary effectful or floating-point language.
+
+  \item \label{ex:tiny-stack-valid-wrong}
+  Give a target program that passes the verifier but is not a correct translation of $x$ for every input.
+  Give an input that exposes the mismatch.
+  Identify which obligation the verifier establishes and which it does not.
+  \item \label{ex:tiny-mutant-hidden}
+  Fold the reduced counterexample $0\times1$ before compiling it with the faulty wrapper.
+  Explain why the mismatch disappears and why this is not a repair of the wrapper.
+
+  \item \label{ex:tiny-mutant-agreement}
+  Find all pairs $u,v\in V$ for which translating one multiplication as addition accidentally gives the correct result.
+  Derive a congruence for those pairs, and determine the number of pairs.
+  Explain why testing only $1\times1$ would still detect the mutation, whereas testing only $0\times0$ would not.
+
+  \item \label{ex:trap-div-zero}
+  Evaluate $(x+7)/(3+5)$ in the extended language of Equation~\ref{eq:trap-div-semantics} for $x=9$ and $x=250$.
+  Show each reduction, including the folded divisor $8$ and the truncated quotients $2$ and $0$.
+  Then consider $(x+7)/(249+7)$.
+  Show that the divisor folds to $0$, explain why the whole expression traps for every input, and state why replacing it with any literal in $V$ would be wrong.
+
+  \item \label{ex:trap-effect-swap}
+  Two calls return $10$ and $20$ while logging tags $1$ and $2$ in call order.
+  Show that left-to-right evaluation logs $[1,2]$ and right-to-left evaluation logs $[2,1]$, with sum $30$ in both cases.
+  Explain why swapping the calls preserves the value but changes the trace, and which contract decides whether the swap is allowed.
+
+  \item \label{ex:trap-hoist-branch}
+  Consider a branch that divides $10$ by $b$ only when $b\neq0$, and otherwise returns $0$.
+  Give concrete values with $b=0$ where the guarded program returns normally.
+  Show that hoisting the division above the test as in Figure~\ref{fig:trap-hoist} introduces a trap on that path.
+  State the resulting refinement failure using Equation~\ref{eq:behavior-refinement}.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:programs-meaning-reading}
+
+Appel's \emph{Modern Compiler Implementation in ML} connects front-end and back-end algorithms through an implementable compiler organization~\cite{appel-1998-modern}.
+Read it for the way interfaces and data structures give the individual algorithms a place in a working system.
+
+Morgan's \emph{Building an Optimizing Compiler} develops the representations and analyses needed to connect optimization to code generation~\cite{morgan-1998-optimizing}.
+Its discussion of execution rules is a useful reminder that syntax alone does not define the transformations a language permits.
+
+Safonov's \emph{Trustworthy Compilers} broadens the discussion to the engineering obligations of dependable translation~\cite{safonov-2010-trustworthy}.
+Use it to compare different kinds of assurance rather than treating successful compilation as evidence that the compiler is correct.
+
+The WG14 C11 committee draft is a specification, not a compiler tutorial~\cite{wg14-2011-c11}.
+For the examples here, consult its environmental limits, unsigned arithmetic rules, expression rules, and abstract-machine requirements.
+Checking those clauses against the code is more useful than assuming that a familiar C type behaves like a mathematical number.

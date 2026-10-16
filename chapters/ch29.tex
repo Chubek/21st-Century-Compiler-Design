@@ -1,0 +1,183 @@
+\chapter{Linking and Loading}\label{ch:linking-loading}
+
+Compilation ends with object files, but programs run as processes.
+Linking and loading close that gap by combining objects, resolving names, assigning addresses, and preparing a runnable image.
+The linker merges sections, patches relocations, and exports a symbol table.
+The loader maps segments into memory, applies final fixups, and transfers control to the entry point.
+Both must be exact: one wrong address computation crashes the program before it starts.
+
+\section{What the Linker Combines}\label{sec:ch29-linker-job}
+
+A program typically spans many translation units plus libraries.
+Each object file contributes named sections such as text, read-only data, writable data, uninitialized storage, debug information, and unwind tables.
+\term{Static linking} merges those contributions into one executable or shared object with all internal addresses resolved.
+\term{Symbol resolution} matches each undefined reference to exactly one definition under the scoping rules.
+\term{Relocation} patches code and data bytes whose final addresses were unknown at compile time.
+\term{Section merging} concatenates same-named input sections, discards dead ones when asked, and assigns the result to output segments with permissions.
+A \term{segment} groups sections with the same memory permissions for the loader, while a section is the finer linker-level unit.
+
+Consider a call from \code{main.o} to \code{helper} defined in \code{util.o}, plus a global counter incremented by both.
+At compile time the call target is a placeholder and the counter address is a placeholder.
+The symbol tables record an undefined \code{helper} in the first object, a defined \code{helper} in the second, and a common or defined counter in one of them.
+Relocation records name each placeholder with its symbol, offset, and computation.
+The linker picks the layout, writes the final addresses into the placeholders, and reports duplicates or missing definitions.
+The loader later maps the segments and, for position-independent or dynamic builds, applies the remaining fixups.
+\begin{irlisting}
+; relocations in main.o (schematic)
+text+0x10: call helper + addend -4  ; direct call to fill
+text+0x20: load counter + GOT[tls?] ; address to fill
+symtab: UND helper, UND counter
+; definitions in util.o (schematic)
+symtab: DEF helper at text+0x0, DEF counter at data+0x0
+\end{irlisting}
+Nothing here is executable until the placeholders are patched.
+That patching is the linker entire visible effect on correct builds, plus layout, ordering, and dead-stripping choices that affect size and locality.
+Figure~\ref{fig:ch29-merge} shows section merging from two objects into one image.
+Table~\ref{tab:ch29-reloc-kinds} lists the relocation computations a linker applies most often.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=0.7cm and 1.4cm]
+\node[basic block] (t1) {main.o .text};
+\node[basic block, below=of t1] (d1) {main.o .data};
+\node[basic block, right=of t1] (t2) {util.o .text};
+\node[basic block, right=of d1] (d2) {util.o .data};
+\node[basic block, right=of t2] (out) {image: text + data};
+\draw[cfg edge] (t1) -- (out);
+\draw[cfg edge] (t2) -- (out);
+\draw[cfg edge] (d1) -- (out);
+\draw[cfg edge] (d2) -- (out);
+\end{tikzpicture}
+\caption{The linker concatenates matching input sections into output segments, resolves symbols across objects, and patches each relocation against the final layout.}
+\label{fig:ch29-merge}
+\end{figure}
+
+\begin{table}[htbp]
+\caption{Common relocation computations and when they apply.}
+\label{tab:ch29-reloc-kinds}
+\begin{tabular}{lll}
+\toprule
+Computation & Meaning & Typical use \\
+\midrule
+Direct 32 or 64 & Symbol address plus addend & Absolute pointers \\
+PC-relative 32 & Symbol minus place plus addend & Calls and jumps \\
+GOT-relative & Table offset of symbol & Shared-library data \\
+PLT call & Stub address for function & Lazy binding \\
+TLS variant & Thread-block offset & Thread-local data \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Duplicate and missing symbols are the two resolution outcomes every programmer meets.
+Strong definitions collide: two objects defining the same global name is an error in most models, with special rules for weak symbols, linkonce sections, and common-block merging inherited from older toolchains.
+Missing definitions fail the link unless the symbol is explicitly allowed to stay undefined for runtime resolution.
+Archives (static libraries) refine resolution by contributing only the members that satisfy some outstanding undefined name, which makes link order significant.
+Shared objects refine it further by deferring binding to load time through tables rather than patching every use site directly.
+\begin{ccnote}[Link order is semantics]
+With archives, the linker scans left to right and extracts only what resolves a known undefined name.
+Reordering libraries can flip a build from success to failure without changing any source.
+Prefer explicit dependency lists over hopeful ordering.
+\end{ccnote}
+
+\section{Relocation and Address Assignment}\label{sec:ch29-algorithm}
+
+Algorithm~\ref{alg:ch29-link} states the static-link skeleton: collect symbols, lay out sections, then patch relocations.
+It assumes well-formed objects with consistent section flags, a link script or default layout, and a symbol table where each global has compatible type and size.
+It produces an executable or relocatable image plus diagnostics for duplicates and undefined names.
+Real linkers add garbage collection of unused sections, identical-code folding, ordering for locality, and relaxation that rewrites instruction sequences once distances are known.
+
+\begin{algorithm}[htbp]
+\caption{Static link: resolve, lay out, and relocate}\label{alg:ch29-link}
+\begin{pseudocode}
+\Require object set $O$, library set $L$, layout rules $D$
+\Ensure linked image or diagnostic
+\State build the symbol table: resolve definitions across $O$
+\State extract needed archive members under the linker's search-order rules; update definitions and unresolved names until that search reaches closure
+\State merge input sections into output sections per $D$
+\State assign addresses honoring alignment and permissions
+\ForAll{relocation $r$ at place $p$ naming symbol $s$}
+\State compute $value(s, p)$ per the relocation kind
+\State check overflow and permission for $r$
+\State write the patched bytes at $p$
+\EndFor
+\State emit segments, symbol tables, and debug mappings
+\end{pseudocode}
+\end{algorithm}
+
+Each relocation computation is a small integer formula over the symbol address $S$, the place address $P$, the addend $A$, and sometimes a table base $G$.
+An extracted archive member can introduce new undefined symbols, so extraction is not necessarily a single pass over the original unresolved set.
+Library ordering and explicitly grouped rescans are part of the linker's contract; a mathematical set of libraries alone does not encode those rules.
+Direct absolute relocation writes $S + A$ truncated to the field width with an overflow check.
+PC-relative relocation writes $S + A - P$ so the code works wherever it is mapped.
+Table-based relocations write the offset of the symbol slot so the text stays shareable while only the table holds absolute addresses.
+The complexity is $O(M + R)$, where $M$ is the total input size for merging and $R$ is the relocation count, plus symbol-table hashing costs that behave like linear time in practice.
+Relaxation and identical-code folding add passes proportional to the section sizes they rewrite.
+Overflow checks are not optional decoration: a 32-bit field holding a 64-bit address must fail loudly rather than truncate silently.
+% TODO(cite): need a primary reference for dynamic-loader symbol binding.
+
+Position independence changes which fixups the static linker leaves behind.
+A \term{position-independent executable} uses PC-relative and table-based addressing so the loader can map it at any base.
+A \term{global offset table} holds absolute addresses of shared data, while a \term{procedure linkage table} routes function calls through lazily bound stubs.
+The static linker builds those tables and emits the dynamic relocations the loader will consume.
+Lazy binding resolves each function on first call through a resolver rather than at startup, which shortens launch time at the price of a first-call indirection.
+Security features such as read-only-after-relocation ordering, immediate binding options, and control-flow annotations ride on the same tables.
+
+\section{Worked Example}\label{sec:ch29-worked}
+
+We link two tiny objects by hand with concrete numbers.
+Object \code{main.o} has a 64-byte text section starting at placeholder zero and one data word.
+Object \code{util.o} has a 32-byte text section and one data word.
+The link script places text at \code{0x1000} with 16-byte alignment and data at the next 16-byte boundary after text.
+Layout: \code{main.o} text occupies \code{0x1000} through \code{0x103F}, \code{util.o} text occupies \code{0x1040} through \code{0x105F}, and data starts at \code{0x1060} with the \code{util.o} counter at \code{0x1060} and the \code{main.o} word at \code{0x1068} after padding.
+Symbol \code{helper} resolves to \code{0x1040}.
+Symbol \code{counter} resolves to \code{0x1060}.
+
+Now patch three relocations step by step.
+First, a direct call at \code{0x1010} to \code{helper} with PC-relative 32 computation and addend \code{-4}: the patched value is \code{0x1040 - 4 - 0x1010 = 0x2C}, so the call encodes offset \code{0x2C}.
+Check the arithmetic: target \code{0x1040}, place \code{0x1010}, processor adds the instruction length before branching, hence the \code{-4} addend.
+Second, an absolute 64-bit pointer to \code{counter} in data at \code{0x1068} writes \code{0x1060} plus its addend of \code{0} with no overflow because the field is 64 bits wide.
+Third, a data reference to \code{helper} through the table writes the table slot offset rather than \code{0x1040} directly, keeping the referencing section shareable.
+Verify each result: the call lands on the first byte of \code{helper}, the pointer loads the counter address, and the table slot will hold \code{0x1040} after load-time fixup.
+A single off-by-alignment error anywhere in this chain would shift every later address and corrupt all three patches.
+
+Loading continues where linking stopped for dynamic builds.
+The loader maps the text segment read-execute, the read-only segment read-only, and the data segment read-write at the chosen base.
+It processes dynamic relocations in dependency order, resolves lazy function slots on first call, runs initializers, and then jumps to the entry point.
+Unloading reverses the order with finalizers.
+Startup latency depends on relocation count, so table design and binding policy are performance features, not just correctness machinery.
+
+\section{Implementation Notes}\label{sec:ch29-implementation}
+
+Production linkers optimize for throughput on huge inputs: parallel section hashing, concurrent relocation patching, and incremental modes for edit-build-debug cycles.
+LLVM lld, GNU ld, and mold differ in parallelism strategy and script compatibility but agree on the skeleton above.
+Dead-section stripping uses reachability from entry points and exported symbols; identical-code folding hashes instruction bytes and merges duplicates with careful exception-table handling.
+Relaxation rewrites conservative long sequences into short ones once distances are final, for example shrinking a global access into a PC-relative load.
+Each of these changes bytes after addresses were assigned, so the linker iterates layout and patching to a fixed point with bounded passes.
+
+Dynamic loading adds the runtime half of the contract.
+The loader enforces segment permissions, applies address-space randomization offsets, binds symbols breadth-first across dependencies, and honors visibility and versioning rules.
+Common failures include missing shared objects on the search path, version mismatches that resolve the wrong definition, and initialization-order cycles across libraries.
+Diagnose them with loader tracing and symbol lookup logs before suspecting code generation.
+Reproducible builds add deterministic section ordering, stable hash seeds, and normalized timestamps so identical sources produce identical images.
+
+Testing this layer means comparing addresses, not just outputs.
+Check map files for section placement, verify relocations with object-dump tools, and run the image under multiple base addresses to prove position independence.
+Combine objects built at different optimization levels to catch convention drift.
+Useful compiler-side context for object emission and symbol handling appears in~\cite{appel-1998-modern} and see~\cite{morgan-1998-optimizing}.
+Validation thinking for preserving behavior across link-time transformations follows see~\cite{safonov-2010-trustworthy}.
+Rules for linkage, storage duration, and observable effects at the language level are defined in~\cite{wg14-2011-c11}.
+
+\section{Exercises}\label{sec:ch29-exercises}
+
+\begin{enumerate}
+\item Two objects define text sizes 48 and 64 bytes with text base \code{0x2000} and 16-byte alignment. \label{ex:ch29-layout} Compute the start address of each section and the first data address, showing padding explicitly.
+\item A PC-relative call sits at \code{0x3000} targeting \code{0x3080} with addend \code{-4}. \label{ex:ch29-pcrel} Compute the encoded offset by hand and verify that it lands on the target.
+\item An archive provides \code{foo} and \code{bar} in one member, but the program uses only \code{foo}. \label{ex:ch29-archive} Explain what the linker extracts, what stays out, and how link order could break the build.
+\end{enumerate}
+
+\section{Further Reading}\label{sec:ch29-reading}
+
+Object emission, symbol tables, and backend-to-linker interfaces appear in~\cite{appel-1998-modern}.
+Link-time optimization, section handling, and target concerns are developed in~\cite{morgan-1998-optimizing}.
+Validation of whole-program transformations spanning compile and link time is discussed in~\cite{safonov-2010-trustworthy}.
+Linkage, storage, and conformance rules at the language level appear in~\cite{wg14-2011-c11}.

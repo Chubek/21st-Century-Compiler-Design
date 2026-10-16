@@ -1,0 +1,99 @@
+\chapter{Dogfooding PebbleIR}
+\label{ch:pebble-dogfooding}
+
+An IR is being \term{dogfooded} when a client uses it to solve a real implementation problem and its design changes in response to that use.
+For this specimen, the client is an expression compiler that has no privileged access to optimizer internals.
+Graph fixtures add the branches and loops that its source language cannot yet express.
+Together they exercise the representation as a shared interface rather than as a collection of isolated structs.
+
+\section{The client path}
+\label{sec:pebble-client-path}
+The source grammar accepts \code{x}, decimal literals from 0 through 255, parentheses, addition, and multiplication.
+Multiplication binds more tightly; operators at the same precedence associate to the left.
+The parser rejects trailing tokens, missing operands, missing closing parentheses, oversized literals, excessive nesting, and capacity exhaustion.
+It builds a temporary function and publishes only a fully verified result.
+
+The demo compiles an expression, optimizes it, lowers it, prints the optimized IR, and executes the target at input 9.
+Listing~\ref{lst:pebble-client} includes the real client implementation.
+The IR goes to standard output and the evaluation report to standard error, so saving the snapshot does not mix the record format with commentary.
+
+\begin{listing}[htbp]
+\inputminted{c}{example-code/pebbleir/demo.c}
+\caption{A client uses the same public compile, optimize, lower, print, and execute interfaces as the tests.}
+\label{lst:pebble-client}
+\end{listing}
+
+The expression \code{(x+7)*(3+5)} reports result 128 and six target dispatches.
+Its unoptimized lowering has eight instructions.
+The reduction is a measured static instruction-count difference checked by the test program, not a claim about hardware speedup.
+The serialized value count stays seven because identity slots are retained.
+
+\section{A testing matrix with different oracles}
+\label{sec:pebble-test-matrix}
+The executable suite has three graph fixtures: a diamond, a modular summation loop, and a loop-carried parallel swap.
+Each runs for every input byte through the original IR, optimized IR, original VM, and optimized VM, with a direct result oracle.
+It also generates 128 bounded expression trees, prints each as source, compiles it, and compares source-tree evaluation with both IR forms and optimized VM execution on every byte input.
+These are 32,768 generated-program/input pairs, plus the graph cases.
+They are not exhaustive over tree shapes or graphs.
+
+Malformed-object tests target unavailable sibling definitions, incorrect phi predecessor coverage, nonboolean branch operands, out-of-range constants and targets, and invalid value-owner blocks.
+Failure-contract tests exercise rejected replacement, source parsing, text parsing, value capacity, and revision exhaustion.
+Round-trip tests compare printed bytes before and after parsing, including optimized tombstones.
+Separate target tests check a malformed register and the five-versus-six-dispatch budget boundary.
+
+Add a regression at the layer where the failure first becomes visible.
+A parser crash needs a source reproducer; a dominance defect needs a graph reproducer; a wrong phi copy needs the edge bundle and an input that distinguishes sequential from parallel behavior.
+A test that merely confirms \enquote{the program did not crash} would miss most of these failures.
+
+\section{Reduce one failure without changing its meaning}
+\label{sec:pebble-reducer}
+Algorithm~\ref{alg:pebble-reduce} is a proposed reducer workflow, not an implemented feature of the library.
+It keeps the same wrong-code signature, not just any failure.
+Replacing a well-formed wrong-result case with malformed input that the verifier rejects does not preserve the original bug.
+
+\begin{algorithm}[htbp]
+\caption{Reducing a wrong-result reproducer while retaining its contract.}
+\label{alg:pebble-reduce}
+\begin{pseudocode}
+\Require valid failing specimen $T$, fixed input, deterministic same-failure predicate
+\Ensure failure retained and no accepted single simplifying edit remains
+\Repeat
+\State $changed\gets false$
+\ForAll{permitted smaller candidates $T'$ in deterministic order}
+\If{$T'$ verifies, all executions complete, and the same result mismatch remains}
+\State $T\gets T'$; $changed\gets true$; restart candidate enumeration
+\State \Break
+\EndIf
+\EndFor
+\Until{not $changed$}
+\State retain the final snapshot, input, and tool configuration
+\end{pseudocode}
+\end{algorithm}
+
+For a hypothetical multiplication-lowered-as-addition defect, the expression \code{2*3} is already a useful witness: source result 6 differs from target result 5.
+Replacing it by literal 6 removes the faulty multiplication and therefore removes this signature.
+Keeping the operator while shrinking its operands may retain a mismatch; for example, \code{0*1} yields 0 versus 1.
+This demonstrates why a reducer needs an explicit size measure and allowed edits before it claims minimality.
+
+\section{Measure the implementation being proposed}
+\label{sec:pebble-measure}
+Before changing the containers, record live values, allocated slots, block count, verifier work, and target instruction count on representative clients.
+Before claiming elapsed-time improvement, run repeated measurements outside sanitizer builds, record compiler and machine configuration, separate translation from execution, and verify every measured result.
+The supplied suite reports correctness and the eight-to-six instruction change; it does not publish timing measurements.
+
+Useful next clients are a statement parser that emits the existing loop graphs, a module owner that compiles several functions, and a larger graph workload that stresses repeated scans.
+Each forces a specific design decision: SSA construction, cross-function identity, or indexing and allocation policy.
+Adopt an external memory or container library only after specifying what new contract it must satisfy.
+The point of dogfooding is to turn such decisions into observed requirements rather than preferences defended in advance.
+
+\section{Exercises}
+\label{sec:pebble-sixteen-exercises}
+\begin{enumerate}
+\item \label{ex:pebble-precedence} Predict the results and optimized live-value counts for \code{2+3*4} and \code{(2+3)*4}. Explain how a precedence bug could be found by the tree oracle.
+\item \label{ex:pebble-reduction-signature} For the hypothetical multiply-as-add defect, evaluate \code{2*3}, \code{0*1}, and literal 6 under the correct and faulty implementations. Which candidates preserve the wrong-result signature?
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:pebble-sixteen-reading}
+Safonov gives context for assembling multiple forms of correctness evidence around a compiler~\cite{safonov-2010-trustworthy}.
+Appel remains useful as an example of learning representation requirements from the needs of a complete language implementation~\cite{appel-1998-modern}.

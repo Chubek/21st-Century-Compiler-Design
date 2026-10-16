@@ -1,0 +1,207 @@
+\chapter{Speculation and Deoptimization}\label{ch:speculation-deoptimization}
+
+Optimized code bets on the future.
+It assumes types stay stable, branches keep their direction, and call targets do not change.
+When the bet holds, the code runs fast.
+When the bet fails, the system must recover without the program noticing.
+\term{Speculation} places those bets explicitly with checks called guards.
+\term{Deoptimization} honors the fallback by rebuilding interpreter state when a guard fails.
+This chapter makes both mechanisms precise enough to implement.
+We place guards, record the state needed to leave, and trace one recovery by hand.
+
+\section{Bets With Receipts}\label{sec:ch35-bets}
+
+Every speculation has three parts: a fact assumed, a check that tests it, and a recovery that runs when the check fails.
+The fact might be that a value is always an integer.
+The check is a \term{guard}: a cheap test on the fast path that jumps to slow code on mismatch.
+The recovery is a \term{deoptimization point} holding enough information to resume at a lower tier.
+Figure~\ref{fig:ch35-guard-point} shows the shape.
+Fast code runs guarded operations in sequence.
+Each guard points to a shared exit stub.
+The stub rebuilds interpreter state and resumes there.
+Table~\ref{tab:ch35-speculations} lists common speculation kinds with their guard and fallback.
+The table stays qualitative because guard costs depend on the target.
+Type speculation guards tags and falls back to generic operations.
+Branch speculation lays out the hot direction straight-line and falls back to the cold path.
+Call speculation inlines the observed target and falls back to a full dispatch.
+Alias and shape speculation assume a layout and fall back to generic access.
+Each row follows the same discipline.
+The assumed fact is written down, the check is emitted, and the fallback is tested before the optimization ships.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=1.0cm and 1.6cm]
+\node[basic block] (fast1) {guarded op 1};
+\node[basic block, below=of fast1] (fast2) {guarded op 2};
+\node[basic block, below=of fast2] (fast3) {guarded op 3};
+\node[basic block, right=of fast2] (stub) {exit stub\\ rebuild state};
+\node[basic block, right=of stub] (interp) {interpreter\\ resume};
+\draw[cfg edge] (fast1) -- (fast2);
+\draw[cfg edge] (fast2) -- (fast3);
+\draw[cfg edge] (fast1) -- (stub);
+\draw[cfg edge] (fast2) -- (stub);
+\draw[cfg edge] (fast3) -- (stub);
+\draw[cfg edge] (stub) -- (interp);
+\end{tikzpicture}
+\caption{Each guarded operation on the fast path can reach a shared exit stub that rebuilds interpreter state, so no bet is placed without a tested way back.}
+\label{fig:ch35-guard-point}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{Each speculation pairs an assumed fact with a guard and a tested fallback.}
+\label{tab:ch35-speculations}
+\begin{tabular}{lll}
+\toprule
+Assumption & Guard & Fallback \\
+\midrule
+Operand is integer & Tag test & Generic arithmetic \\
+Branch goes one way & Direction test & Cold path \\
+Call hits one target & Class test & Full dispatch \\
+Object has one shape & Shape test & Generic access \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{What a Deoptimization Point Records}\label{sec:ch35-points}
+
+A guard failure must reconstruct the exact state the interpreter would have held.
+That requires a \term{frame descriptor} at each deoptimization point.
+The descriptor maps compiled locations back to source-level values: locals, stack temporaries, and the bytecode index.
+It also records which values need reboxing, re-tagging, or reloading from memory.
+Algorithm~\ref{alg:ch35-deopt} gives the recovery procedure for one failed guard.
+It assumes the descriptor for the failing point is complete and that the interpreter can resume at the recorded index.
+It requires that no guarded effect before the failure becomes visible after recovery.
+It copies each needed value through the descriptor, drops compiled-only temporaries, and resumes interpretation.
+The ordering rule deserves emphasis.
+Guards must fire before any effect the interpreter would not have produced yet.
+Stores, calls with effects, and allocations constrain where guards may sit.
+Compilers hoist pure checks freely but keep effectful operations behind their guards.
+A frequent defect records a value still sitting in a reused register.
+Liveness at the exit must reflect the interpreter, not the compiled code.
+Another defect forgets a temporary that the interpreter needs two bytecodes later.
+Descriptors therefore derive from interpreter state, computed forward, rather than from whatever happens to be live in machine code.
+
+\begin{algorithm}[htbp]
+\caption{Deoptimization after a failed guard}\label{alg:ch35-deopt}
+\begin{pseudocode}
+\Require failed guard $g$, complete descriptor $D(g)$, live compiled frame $F_c$; one logical interpreter frame
+\Ensure interpreter frame $F_i$ resumed at the recorded index
+\State $idx \gets$ bytecode index in $D(g)$
+\State $F_i \gets$ fresh interpreter frame for the same method
+\ForAll{$v$ live in the interpreter at $idx$}
+\State $loc \gets$ compiled location of $v$ in $D(g)$
+\State materialize $v$ in $F_i$ from $loc$ \Comment{rebox or reload as recorded}
+\EndFor
+\State discard $F_c$ temporaries not present in the interpreter
+\State resume interpretation at $idx$ with $F_i$
+\end{pseudocode}
+\end{algorithm}
+
+Materialization must preserve object identity as well as field contents: if two interpreter locals refer to one eliminated allocation, reconstruct one object and point both locals to it.
+Keep source references visible to the collector while boxing or allocation can trigger collection, and retain the compiled frame until reconstruction succeeds.
+Inlining extends the descriptor to a chain of logical frames; the single-frame algorithm is the base case.
+
+\section{Worked Example: A Guard Fires Mid-Loop}\label{sec:ch35-worked}
+
+We trace a loop that sums $1000$ inputs with one speculative integer add.
+The optimizer guards each input's tag inside the loop; the next input can have a different tag, so that guard cannot simply be hoisted.
+Iterations $0$ through $499$ see integers.
+Iteration $500$ sees a string.
+The compiled frame holds the running total unboxed in a register and the loop index in another.
+The descriptor at the value guard records the bytecode index of the add, the boxed total, the index, and the current input slot.
+Recovery under Algorithm~\ref{alg:ch35-deopt} proceeds step by step.
+The guard at iteration $500$ fails on the string tag.
+The stub reads the descriptor and boxes the running total accumulated so far.
+Hand computation fixes the numbers: the integers $0$ through $499$ sum to $124750$.
+The stub materializes total $124750$, index $500$, and the string input in a fresh interpreter frame.
+It resumes at the recorded add index.
+The interpreter performs generic addition for $124750$ and the string per language semantics.
+If generic addition completes normally, the remaining $499$ iterations may continue interpreted or use later recompiled code; if it raises a language-defined error, that error is the required outcome.
+No integer iteration is recomputed and no effect is duplicated.
+Figure~\ref{fig:visual-deopt-map} makes the recovery mapping explicit.
+The value $124750$ is the sum of inputs $0$ through $499$; input $500$ has been fetched but its addition has not executed.
+Resuming after the add would omit an operation, while resuming before an already completed input read could duplicate an effect.
+The descriptor must identify this semantic boundary as well as the storage locations.
+
+\input{figures/deopt-frame-map}
+
+The listing below pins the descriptor contents for tests.
+\begin{irlisting}
+; deopt descriptor at speculative add
+; bytecode index: 12 (add)
+; total  <- reg r4, rebox as int
+; index  <- reg r5, copy as int
+; input  <- reg r6, rebox generic
+; resume: interpreter at index 12
+\end{irlisting}
+A test replays this trace exactly and asserts the resumed total, the index, and the final result.
+
+\section{Invalidation and Recompilation}\label{sec:ch35-invalidation}
+
+Guards fail for two reasons: rare events and changed programs.
+A rare event, like one string among thousands of integers, needs only local recovery.
+Execution continues, counters note the event, and the compiled code stays installed.
+Repeated failures mark the speculation as wrong and trigger recompilation with a wider assumption.
+A changed program, like a class load that adds a method target, needs \term{invalidation}.
+The system walks a dependency table from the changed entity to every compiled method that assumed the old fact.
+Each affected method deoptimizes its live activations and discards or patches its code.
+\begin{ccwarning}[Effects first]
+Never move a guard below an effect it protects.
+A store performed before a failing guard cannot be unperformed by the exit stub.
+\end{ccwarning}
+Test invalidation with a call site that first sees one target.
+After inlining and guarding, a second target loads.
+The test asserts that live activations of the old code resume correctly and that later calls use the new target.
+The \enquote{load then call} sequence exercises the dependency between hierarchy changes and installed code; concurrent invalidation requires additional tests.
+
+\section{Speculation Budgets and Failure Accounting}\label{sec:ch35-budgets}
+
+Guards are cheap individually but unbounded in aggregate.
+A method with hundreds of guards pays hundreds of tests on every pass, even when no bet ever fails.
+A \term{speculation budget} caps how many active guards one method or loop may carry.
+The optimizer ranks candidate speculations by expected gain and keeps only the affordable set.
+Type stability at hot arithmetic usually outranks shape stability at cold property loads.
+Call-site monomorphism usually outranks branch-direction layout for rarely taken forks.
+\term{Failure accounting} turns guard exits into data for the next compilation.
+Each deoptimization point counts its exits by cause: wrong type, new target, changed shape, or failed range.
+One exit is noise.
+Repeated exits with one cause mark the assumption as wrong and widen the next compilation.
+Repeated exits with many causes mark the site as megamorphic and drop speculation there entirely.
+Consider a call site that first sees target $A$ ninety-eight times, then $B$ once, then $C$ once.
+A single-target speculation with a fallback covers this shape well.
+If later runs show $A$, $B$, and $C$ in equal thirds, the accounting promotes the site and the next compile uses a small dispatch instead of a guard.
+Test budgets by compiling a method with more candidates than its allowance and asserting the kept set matches the ranking.
+Test accounting by replaying a recorded exit mix and asserting the recompilation decision.
+The \enquote{decide from counts} rule keeps speculation policy reproducible and reviewable.
+
+\section{Implementation Notes and Complexity}\label{sec:ch35-implementation}
+
+Each guard costs one test and one rarely-taken branch, typically $O(1)$.
+Descriptor size grows with the live interpreter values at each point.
+Sharing descriptors across nearby points and compressing locations keeps metadata small.
+Deoptimization itself costs $O(V)$ where $V$ is the live-value count at the exit, plus frame allocation.
+Invalidation costs $O(A)$ where $A$ is the affected-method count found through dependencies.
+Production systems tier their response: count single failures, recompile after a few, and invalidate broadly only on program change.
+They also limit speculation depth so nested inlines do not multiply descriptors.
+A common pitfall guards too much and spends the speedup on tests.
+Another pitfall records descriptors lazily and discovers gaps only when a guard fires in production.
+We record eagerly, test exits with injected failures, and measure guard overhead separately from body speed.
+Speculation here connects to tiering in the previous chapter and to vector guards in the next.
+The descriptor discipline also previews the testing chapter: every exit is a contract with a replayable test.
+% TODO(cite): need a primary reference for deoptimization-point liveness rules.
+
+\section{Exercises}\label{sec:ch35-exercises}
+
+\begin{enumerate}
+\item A loop starts with total zero and adds integer input $i$ at iteration $i$ for $0\le i<600$; input $600$ is a float. Place the guards in this $800$-iteration loop, compute the total before the failed guard, and list the descriptor entries needed to resume.\label{ex:ch35-guard-math}
+\item Distinguish a rare-event guard failure from a program-change invalidation, stating for each whether code stays installed and what counters should record.\label{ex:ch35-rare-vs-change}
+\item Write a test that injects a guard failure at a chosen point, listing the expected interpreter values after recovery and the assertion that catches a dropped temporary.\label{ex:ch35-inject-test}
+\end{enumerate}
+
+\section{Further Reading}\label{sec:ch35-reading}
+
+Appel presents the analysis and transformation ideas that speculation builds upon~\cite{appel-1998-modern}.
+Morgan discusses profile-driven code shape and its risks~\cite{morgan-1998-optimizing}.
+Safonov treats assumption changes as trustworthiness obligations~\cite{safonov-2010-trustworthy}.
+The C standard draft defines the observable effects that constrain guard placement~\cite{wg14-2011-c11}.

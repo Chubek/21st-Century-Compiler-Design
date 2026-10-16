@@ -1,0 +1,203 @@
+\chapter{Vectorization and Parallel Execution}\label{ch:vectorization-parallel-execution}
+
+One instruction can do the work of many when data elements are independent.
+A vector unit applies the same operation to a lane of values at once.
+A parallel loop spreads iterations across threads or cores.
+Both techniques exploit the same property: operations that do not interfere can share control.
+This chapter shows how to test for that property and how to transform loops that have it.
+We treat legality first, profitability second, and code shape last.
+A fast loop that computes the wrong answer is not an optimization.
+
+\section{What Independence Means}\label{sec:ch36-independence}
+
+Two operations are independent when swapping their order changes nothing observable.
+A loop is \term{vectorizable} when its iterations can run in lockstep lanes without changing results.
+It is \term{parallelizable} when its iterations can run in any order, or concurrently, without changing results.
+The obstacle is the \term{dependence}: a read or write whose value flows from one iteration to another.
+Consider scaling an array by a constant.
+Each iteration reads one element, multiplies, and writes it back.
+No iteration touches another element, so all iterations are independent.
+Now consider a running prefix sum where each iteration adds the previous total.
+Iteration $i$ reads the value written by iteration $i - 1$.
+That chain forbids both vector and parallel execution in its direct form.
+Figure~\ref{fig:ch36-lanes} contrasts scalar execution with lane execution for the scaling example.
+Scalar code handles one element per step.
+Vector code handles four elements per step with one control decision.
+Table~\ref{tab:ch36-patterns} lists common loop patterns with their dependence shape and verdict.
+The table is qualitative because hardware widths and costs vary.
+Element-wise maps usually succeed.
+Reductions succeed with a combine step.
+Recurrences with loop-carried flows fail without algorithmic change.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=0.9cm and 1.2cm]
+\node[basic block] (s1) {scalar\\ one element};
+\node[basic block, below=of s1] (s2) {scalar\\ next element};
+\node[basic block, right=of s1, minimum width=2.6cm] (v1) {vector\\ lanes 0--3};
+\node[basic block, below=of v1, minimum width=2.6cm] (v2) {vector\\ lanes 4--7};
+\draw[cfg edge] (s1) -- (s2);
+\draw[cfg edge] (v1) -- (v2);
+\end{tikzpicture}
+\caption{Scalar code steps through elements one at a time while vector code covers four lanes per step, which pays only when lanes are independent.}
+\label{fig:ch36-lanes}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{Loop patterns differ in dependence shape and in their threading verdict.}
+\label{tab:ch36-patterns}
+\begin{tabular}{lll}
+\toprule
+Pattern & Dependence & Verdict \\
+\midrule
+Element-wise map & None & Vectorize and parallelize \\
+Reduction & Combine only & Tree reduce then combine \\
+Stencil, shift 1 & Bounded neighbors & Vectorize with alignment plan \\
+Recurrence & Loop-carried chain & Reject without rewrite \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Testing Legality: Distance and Direction}\label{sec:ch36-legality}
+
+A \term{dependence distance} measures how many iterations separate a write from its later read.
+Distance zero means the flow stays inside one iteration and rarely blocks transformation.
+Positive distances mean later iterations consume earlier results.
+A \term{direction vector} records per-loop whether the flow goes forward, backward, or stays put.
+Algorithm~\ref{alg:ch36-vector-check} gives the legality test for simple affine loops over arrays.
+It assumes subscripts are linear functions of loop indices with known coefficients.
+It requires alias facts for pointer accesses: two accesses that may overlap are treated as a dependence.
+It returns a verdict of vectorize, parallelize, or reject with the blocking dependence.
+The test walks each pair of accesses to the same array.
+It solves for index pairs that touch the same element.
+It converts the iteration gap into a distance and a direction.
+Zero distances everywhere permit vectorization at the innermost level.
+Parallelization needs the stronger property that no positive distance crosses thread boundaries, possibly after privatization.
+Privatization gives each thread or lane a private copy of a temporary that would otherwise serialize the loop.
+Reductions receive special handling: the combine operator must be associative, with a documented identity and a tree that preserves the sequential result up to stated rounding.
+Floating-point reassociation changes results, so the compiler needs explicit permission before reordering those operations.
+
+\begin{algorithm}[htbp]
+\caption{Legality check for vectorizing an affine loop nest}\label{alg:ch36-vector-check}
+\begin{pseudocode}
+\Require affine loop nest $L$, complete scalar and memory dependence information, operations safe for proposed lane execution
+\Ensure verdict: vectorize, parallelize, or reject with cause
+\State $D \gets$ all dependences with distance and direction
+\If{any pair may alias without disambiguation}
+\State \Return reject with cause
+\EndIf
+\If{there is a reduction and all loop-carried dependences belong to it, with a legal combine order}
+\State \Return parallelize with tree reduction
+\EndIf
+\If{any remaining loop-carried dependence exists on the target loop}
+\State \Return reject with cause
+\EndIf
+\State \Return vectorize innermost loop
+\end{pseudocode}
+\end{algorithm}
+
+\section{Worked Example: Distances in Three Loops}\label{sec:ch36-worked}
+
+We compute distances for three loops over arrays of length $8$ with indices $0$ through $7$.
+Loop one scales in place: \code{a[i] = a[i] + 1}.
+The read and write in iteration $i$ touch element $i$.
+Equal indices give distance $0$.
+All distances are zero, so Algorithm~\ref{alg:ch36-vector-check} returns vectorize.
+With width $4$, iterations $0$--$3$ form one vector and $4$--$7$ form the next.
+Loop two shifts right: \code{a[i] = a[i - 1] + 1} for $i$ from $1$ to $7$.
+Iteration $i$ reads the element written by iteration $i - 1$.
+The distance is $1$ in the forward direction.
+The algorithm returns reject for direct vectorization because a positive distance crosses lanes.
+Loop three accumulates a total: \code{s = s + a[i]}.
+Every iteration reads and writes $s$.
+The distance is $1$ on a scalar, not an array element.
+The algorithm returns parallelize with tree reduction when addition is the documented combine.
+Hand arithmetic confirms the reduction shape: partial sums over $0$--$3$ and $4$--$7$ combine once at the end.
+The listing below shows the vector shape for loop one.
+\begin{irlisting}
+; vector scale, width 4, length 8
+; v0 = load a[0..3]
+; v1 = add v0, 1
+; store v1 -> a[0..3]
+; v2 = load a[4..7]
+; v3 = add v2, 1
+; store v3 -> a[4..7]
+\end{irlisting}
+Remainder handling follows the same rule.
+A length of $10$ uses two full vectors and a scalar tail of $2$.
+The tail executes the original scalar body with indices $8$ and $9$.
+
+\section{Profitability, Alignment, and Tail Code}\label{sec:ch36-profit}
+
+Legality permits transformation but does not require it.
+\term{Profitability} weighs vector speedup against masks, tails, gathers, and extra memory traffic.
+Short trip counts may not fill one vector.
+Conditional bodies need masks that idle some lanes.
+Noncontiguous access needs gathers or a layout change.
+A simple model guides the decision: gain comes from lanes per instruction, cost comes from setup plus tail plus memory stalls.
+\begin{ccnote}[Measure the memory]
+Vector arithmetic is cheap and memory is not.
+A loop that misses the cache at every step stays slow in any lane width.
+\end{ccnote}
+Alignment adds a concrete constraint.
+Vector loads run fastest at aligned addresses and fault or slow down otherwise.
+The compiler peels a few iterations to reach alignment, aligns the main body, and handles the tail separately.
+Alias uncertainty adds another.
+When two pointers may overlap, the compiler versions the loop: a fast vector body for the disjoint case and a scalar body otherwise, selected by a run-time check.
+The \enquote{version then vectorize} pattern keeps the common case fast without assuming facts the analysis cannot prove.
+
+\section{Tiling for Caches Before Parallelism}\label{sec:ch36-tiling}
+
+Threads do not fix memory bottlenecks.
+A loop that streams past the cache on one thread streams past the cache on every thread, only with more contention.
+\term{Loop tiling} restructures nested loops so each block of iterations reuses data while it is still cached.
+The classic case is matrix multiplication over $N$-by-$N$ inputs.
+The triple nest performs $O(N^3)$ arithmetic operations.
+Its cache misses depend on loop order, layout, cache capacity, and cache-line size; operation count alone does not determine them.
+Tiling seeks to reuse resident submatrices before eviction, and any quantitative transfer bound needs an explicit memory model.
+The block size $B$ comes from cache capacity, line size, and associativity, not from the algorithm.
+Tiling composes with vectorization and threading in a fixed order.
+Tile first so working sets fit private caches.
+Vectorize the innermost body so each thread issues wide operations.
+Parallelize the outer tile loop so threads share no working set.
+Consider an $8$-by-$8$ product with $4$-by-$4$ tiles.
+Four $4$-by-$4$ tiles cover the output.
+Each output tile traverses two reduction-dimension tiles, reading a pair of $4$-by-$4$ input blocks and performing $4^3=64$ multiply-add updates for each pair.
+Thus each output tile performs $128$ updates and the four tiles perform $512$, equal to $8^3$.
+Counting multiplication and addition separately gives $1024$ scalar arithmetic operations; fusion into machine instructions is a separate target decision.
+The bounded integer model in \code{example-code/refinement\_checks.c} compares this $8$-by-$8$ tiled product with a naive nest and checks all $512$ updates.
+A general implementation should also test prime-dimension inputs that leave partial edge tiles.
+The \enquote{edges match} check catches the defect where edge tiles read past the input or skip the final rows.
+
+\section{Implementation Notes and Complexity}\label{sec:ch36-implementation}
+
+For $P$ candidate access pairs, dependence testing costs the sum of $P$ query costs; affine integer feasibility is not a constant-time operation in general.
+Exact testing is expensive in general, so compilers use layered tests: fast sufficient checks first, exact solving only for survivors.
+Vector code generation is linear in the loop body size plus tail and peel code.
+Threading adds synchronization: barriers cost $O(T)$ wakeups for $T$ threads and reductions cost $O(\log T)$ combine depth in the ideal case.
+Memory bandwidth caps both.
+Production compilers vectorize innermost loops, parallelize outer loops, and tile for caches before either.
+They respect floating-point ordering rules and require explicit flags before reassociation.
+They keep scalar, masked, and threaded versions behind run-time checks when static facts run out.
+A common pitfall vectorizes a loop with a hidden carried dependence through a scalar temporary.
+Privatization must cover every such temporary or the lanes interfere.
+Another pitfall parallelizes a loop with an unprotected reduction and reports nondeterministic sums.
+The tree reduction with a stated combine order prevents that surprise.
+Test each transformed loop against its scalar result on full, empty, and prime-length inputs.
+% TODO(cite): need a primary reference for direction-vector legality proofs.
+
+\section{Exercises}\label{sec:ch36-exercises}
+
+\begin{enumerate}
+\item Compute distances for \code{a[i] = a[i] + a[i - 2]} over $i$ from $2$ to $7$, state the direction, and give the verdict of Algorithm~\ref{alg:ch36-vector-check}.\label{ex:ch36-distance-math}
+\item Plan aligned vector code for length $10$ at width $4$ starting at a misaligned address, giving peel count, main-vector count, and tail count.\label{ex:ch36-tail-plan}
+\item Write a reduction test for a sum over $1000$ values that detects a missing combine step, describing the thread split and the expected partial sums.\label{ex:ch36-reduction-test}
+\end{enumerate}
+
+\section{Further Reading}\label{sec:ch36-reading}
+
+Appel covers loop structure and dataflow facts that dependence testing builds upon~\cite{appel-1998-modern}.
+Morgan relates loop shape and memory behavior to optimization choices~\cite{morgan-1998-optimizing}.
+Safonov discusses preserving program meaning under aggressive transformation~\cite{safonov-2010-trustworthy}.
+The C standard draft defines the aliasing and ordering rules that vectorization must respect~\cite{wg14-2011-c11}.

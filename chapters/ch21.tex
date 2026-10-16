@@ -1,0 +1,230 @@
+\chapter{Memory Optimization}
+\label{ch:ch21-memory-optimization}
+
+\section{When Memory Limits Performance}
+\label{sec:ch21-bottleneck}
+
+Memory accesses can dominate execution cost when latency or bandwidth limits progress.
+The cost depends on locality, hardware, and overlap with other work; it must be measured for the workload rather than assumed for every program.
+\term{Memory optimization} attacks that wait from the compiler side.
+It removes loads and stores the program does not need, forwards values directly from stores to loads, replaces memory traffic with registers, and arranges the remaining accesses into friendly patterns.
+The earlier chapters built the pieces: redundancy in Chapter~\ref{ch:ch16-value-numbering-redundancy}, motion in Chapter~\ref{ch:ch17-code-motion}, loops in Chapters~\ref{ch:ch18-loop-analysis} and~\ref{ch:ch19-loop-transformations}, and the alias facts that make memory reasoning sound in Chapter~\ref{ch:ch20-alias-analysis}.
+This chapter assembles those pieces into optimizations whose currency is memory traffic rather than operation counts.
+The central theme is that every memory optimization is a value optimization guarded by an alias query.
+If the compiler knows two references cannot overlap, loads become reusable values and stores become removable.
+If it cannot prove separation, the memory operation stays.
+
+\section{Removing Redundant Loads and Stores}
+\label{sec:ch21-redundant-accesses}
+
+Three transformations carry most of the weight.
+\term{Redundant load elimination} replaces a load with a previously loaded value when the address must read the same cell.
+\term{Store-to-load forwarding} replaces a load with the value of a dominating store to the same address.
+\term{Dead store elimination} removes a store that no later load can observe.
+Listing~\ref{lst:ch21-diamond} shows a diamond where the join block reloads a value available on both paths.
+
+\begin{irlisting}[caption={A diamond where the join repeats a load from before the branch.},label={lst:ch21-diamond}]
+entry: x = load p
+       store q = 1
+       br c, left, right
+left:  y = x + 1
+       goto join
+right: z = x + 2
+       goto join
+join:  w = load p
+       ret w
+\end{irlisting}
+
+The load in the join block is redundant when two conditions hold on every path.
+First, the address \code{p} still holds the value loaded in the entry, which requires that no store on any path write a location that may overlap \code{p}.
+The store to \code{q} is harmless exactly when the alias oracle answers no-alias for \code{p} and \code{q}.
+Second, the load must be available on every path, meaning each path carries the value forward without killing it.
+Here both paths carry \code{x} untouched, so the join load reduces to the copy \code{w = x}.
+The analysis behind this decision is \term{available-load} dataflow, a forward analysis in the same family as the availability used for expressions.
+A load is available at a point when every path computed that address with no intervening may-store to it.
+Algorithm~\ref{alg:ch21-load-elim} computes availability and rewrites the redundant loads.
+
+\begin{algorithm}
+  \caption{Redundant load elimination with alias kills}\label{alg:ch21-load-elim}
+  \begin{pseudocode}
+    \Require reachable SSA CFG, ordinary nonvolatile non-atomic loads, sound effect and alias information
+    \Ensure replace loads only with a dominating, unchanged value of matching address, type, and width
+    \State $Avail(B) \gets$ empty set for every block $B$
+    \State $changed \gets true$
+    \While{$changed$}
+      \State $changed \gets false$
+      \For{each block $B$}
+        \State $In \gets \bigcap_{P \in \Pred(B)} Avail(P)$; use the empty set at entry
+        \State scan $B$ in order; kill clobbered facts and add each original load's typed address-value fact
+        \State $New \gets$ facts remaining at the end of the scan
+        \If{$New \neq Avail(B)$}
+          \State $Avail(B) \gets New$; $changed \gets true$
+        \EndIf
+      \EndFor
+    \EndWhile
+    \State replay each block from its converged input, recording facts before each instruction
+    \For{each load $l$ of address $a$ in block $B$}
+      \If{a matching fact before $l$ names a value dominating $l$}
+        \State replace $l$ with a copy of the recorded value
+      \EndIf
+    \EndFor
+  \end{pseudocode}
+\end{algorithm}
+
+The algorithm assumes loads are keyed by the value number of their address, so equal addresses with equal numbers are comparable.
+Facts also include the original load's SSA result, type, and access width; keep all such facts during solving rather than choosing a changing representative.
+Starting from empty computes a conservative solution that can miss loop-carried availability.
+It is a simple baseline, not the greatest must solution obtained by universal initialization over a fixed fact universe.
+Replacement occurs only after convergence, uses facts before the candidate load, and updates uses so later replacements cannot refer to a deleted definition.
+It assumes the alias oracle is sound: every store that might overlap a tracked address kills it.
+Kills are deliberately coarse for calls, which remove every tracked load unless interprocedural summaries from Chapter~\ref{ch:ch22-interprocedural-analysis} say otherwise.
+Dead store elimination runs the mirror analysis backward.
+A store is dead only when its value cannot be observed before a complete overwrite or the end of the object's lifetime, and removing the access preserves required effects and faults.
+Function return is not the end of observation for globals or escaped objects: their final values can be read by a caller.
+The backward pass must seed those externally observable locations as live at exits and include possible reads by calls.
+A may-write is not a guaranteed overwrite; killing backward memory liveness requires a must-write covering the relevant bytes.
+
+\section{Worked Example: Availability Across the Diamond}
+\label{sec:ch21-worked-availability}
+
+We run the analysis of Algorithm~\ref{alg:ch21-load-elim} on Listing~\ref{lst:ch21-diamond} by hand, assuming the oracle reports no-alias for \code{p} and \code{q}.
+Denote the load of \code{p} by $L$.
+The entry block generates $L$ with value \code{x}: its input set is empty, it computes the load, and the store to \code{q} kills nothing because of the no-alias answer.
+So $Avail(entry) = \{L\}$.
+The left block generates nothing and kills nothing, passing its input through unchanged.
+The right block behaves identically.
+In the first iteration, the left and right blocks read the entry result, giving $Avail(left) = \{L\}$ and $Avail(right) = \{L\}$.
+The join block meets its predecessors by intersection: $\{L\} \cap \{L\} = \{L\}$.
+Its load of \code{p} therefore finds $L$ in its input set; after convergence it rewrites to \code{w = x}.
+A second iteration changes nothing, so the fixed point is reached; the original join load also contributes its own result fact during solving.
+Table~\ref{tab:ch21-avail} records the sets per block.
+
+\begin{table}
+  \centering
+  \caption{Available-load sets for Listing~\ref{lst:ch21-diamond} with a no-alias answer for the store.}
+  \label{tab:ch21-avail}
+  \begin{tabular}{lll}
+    \toprule
+    Block & Input set & Output set \\
+    \midrule
+    entry & empty & $L$ \\
+    left & $L$ & $L$ \\
+    right & $L$ & $L$ \\
+    join & $L$ & $L$, plus original join-load fact \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Now change one fact and watch the conclusion flip.
+If the oracle instead answers may-alias for \code{p} and \code{q}, the store in the entry kills $L$ immediately.
+The branch-arm outputs and join input become empty, so the join load stays.
+That retained load generates a new fact at the join exit.
+Figure~\ref{fig:ch21-diamond} draws the diamond with the store annotated by the oracle answer that decides the outcome.
+One alias answer is the entire difference between removing a load and keeping it, which is why memory optimization budgets so much effort for pointer precision.
+
+\begin{figure}
+  \centering
+  \begin{tikzpicture}[node distance=14mm and 20mm]
+    \node[basic block] (ch21e) {E: x = load p; store q = 1};
+    \node[basic block,below left=of ch21e] (ch21l) {L: y = x + 1};
+    \node[basic block,below right=of ch21e] (ch21r) {R: z = x + 2};
+    \node[basic block,below right=of ch21l] (ch21j) {J: w = load p};
+    \draw[cfg edge] (ch21e) -- (ch21l);
+    \draw[cfg edge] (ch21e) -- (ch21r);
+    \draw[cfg edge] (ch21l) -- (ch21j);
+    \draw[cfg edge] (ch21r) -- (ch21j);
+  \end{tikzpicture}
+  \caption{The join load is redundant only when the store cannot reach the loaded address, which is exactly what the alias oracle decides.}
+  \label{fig:ch21-diamond}
+\end{figure}
+
+\section{Registers Instead of Memory}
+\label{sec:ch21-registers}
+
+Eliminating one load at a time wins battles, but the larger victory is promoting memory locations into registers wholesale.
+\term{Scalar replacement} takes an array element or structure field accessed repeatedly in a loop and holds it in a temporary across iterations.
+A loop that accumulates \code{a[0]} on every pass loads and stores the same cell each time.
+After replacement, the loop works on a register temporary and writes the cell back once after the exit.
+\term{Loop-invariant loads} are the motion counterpart: a load whose address never changes in the loop hoists to the preheader like any other invariant.
+Promotion must account for every read and write that may observe the location: accesses replaced by the temporary are allowed, but unrewritten aliases and calls need proof or synchronization with memory.
+Load hoisting additionally requires a safe execution point; an invariant address alone does not justify a faulting load on a zero-trip loop.
+Delayed write-back must cover every relevant exit, including exceptional exits, and must not invent an access when the original loop executes zero times.
+\term{Alignment and padding} handle the layout side.
+A value split across a cache-line boundary costs extra transfers, and a structure with poorly ordered members wastes space on padding.
+Reordering fields is legal only when layout is under compiler or runtime control and every dependent access is updated.
+Published ABIs, C structure layout, address arithmetic, and serialization can make member offsets observable.
+Table~\ref{tab:ch21-menu} collects the transformations with the fact each one needs.
+
+\begin{table}
+  \centering
+  \caption{Memory optimizations with the fact that makes each one legal.}
+  \label{tab:ch21-menu}
+  \begin{tabular}{lll}
+    \toprule
+    Optimization & What it removes & Legality fact \\
+    \midrule
+    Load elimination & Repeated loads & Address available, no may-store \\
+    Store forwarding & Load after store & Must-alias with nothing between \\
+    Dead stores & Unread stores & Location not live on any path \\
+    Scalar replacement & Loop traffic & All observers accounted for \\
+    Invariant loads & Repeated hoists & Address invariant, safe to speculate \\
+    Layout tuning & Wasted lines & Unobservable layout, updated uses \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Two language features restrict all of the above.
+A \code{volatile} access in C has side effects the abstract machine defines, so the compiler must preserve its count and order relative to other volatile accesses and cannot remove or invent them~\cite{wg14-2011-c11}.
+Atomic operations and synchronization likewise constrain motion across their boundaries, since reordering them would change what other threads can observe.
+Treat volatile locations, atomics, and synchronization points as opaque barriers in every memory analysis.
+Optimizers describe such locations as \enquote{hands off} memory, meaning no analysis may claim facts across them.
+Calls are barriers too unless summaries describe them, which is the subject of Chapter~\ref{ch:ch22-interprocedural-analysis}.
+
+\section{Implementation Notes}
+\label{sec:ch21-implementation}
+
+For $N$ blocks and $L$ original load facts, the tables need $O(NL)$ bits with a dense representation; this is a space bound, not the total running time.
+Time includes repeated predecessor intersections, block scans, and alias queries until convergence.
+Numbering addresses with value numbers keeps $L$ small by merging equal addresses before the analysis starts.
+Dead-store elimination needs its own location universe, exit boundary, and byte-coverage checks before a comparable cost can be derived.
+Scalar replacement is linear in the number of candidate references once alias answers exist, because each candidate needs one promotion check and one rewrite.
+The real cost hides in the alias queries: each may-store asks the oracle about each live load, so caching answers per address pair matters.
+Production compilers layer these passes: alias analysis first, then load elimination with forwarding, then dead stores, then scalar replacement inside loops, then cleanup numbering to merge the exposed values.
+Memory dependence testing for loops adds a pairwise check over references scaled by dependence distance, which stays cheap for the inner loops that matter.
+Cache behavior guides profitability rather than legality.
+Blocking from Chapter~\ref{ch:ch19-loop-transformations} shapes the working set, prefetching hides latency for predictable streams, and both rely on the trip counts of Chapter~\ref{ch:ch18-loop-analysis}.
+Measure with miss counters rather than static estimates, because a transformation that removes loads but doubles misses is a loss.
+
+\begin{ccwarning}[Volatile means hands off]
+Never eliminate, forward, or move a volatile access to save traffic.
+The language defines its observable behavior, and the optimizer must preserve every such access exactly.
+Fence volatile regions out of every memory analysis before tuning anything else.
+\end{ccwarning}
+
+\section{Exercises}
+\label{sec:ch21-exercises}
+
+\begin{enumerate}
+  \item \label{ex:ch21-forward-vs-elim}
+  Given the sequence \code{store p = 7}, \code{x = load p}, \code{store q = 2}, and \code{y = load p} with a must-alias answer for the first store and the first load and a no-alias answer for \code{p} and \code{q}, decide for each load whether forwarding or elimination applies.
+  Rewrite the sequence, showing which stored value reaches each load.
+  Then change only the second oracle answer to may-alias and redo the decision for the second load.
+  \item \label{ex:ch21-dead-store}
+  Draw a CFG where block $A$ stores to \code{m}, block $B$ stores to \code{m} again, and both reach an exit with no intervening load of \code{m} on one path but a load on the other.
+  Compute live memory locations backward by hand and decide which store, if any, is dead.
+  Explain why overwriting alone does not make the first store dead on the path that loads.
+  \item \label{ex:ch21-scalar-replace}
+  Write a loop that reads and writes \code{a[k]} each iteration for a loop-invariant index \code{k} and also reads \code{a[i]} for the varying index \code{i}.
+  State the alias query that decides whether \code{a[k]} promotes to a register, perform the replacement under a no-alias answer, and show the write-back after the exit.
+  Explain what breaks if a later edit adds a call inside the loop with unknown effects.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch21-further-reading}
+
+Morgan's \emph{Building an Optimizing Compiler} treats memory optimizations alongside the dataflow analyses that enable them~\cite{morgan-1998-optimizing}.
+Read it for how load and store motion fits the book's wider optimization pipeline.
+Appel's \emph{Modern Compiler Implementation in ML} shows the aliasing and liveness facts these passes consume~\cite{appel-1998-modern}.
+Use it to place memory optimization correctly among its neighboring passes.
+The C11 committee draft specifies volatile semantics, sequencing, and the observable behavior that bounds every transformation here~\cite{wg14-2011-c11}.
+Check those clauses before removing or moving any access whose effects the program can observe.

@@ -1,0 +1,83 @@
+\chapter{Storage and Identity}
+\label{ch:pebble-storage}
+
+A compiler can preserve every arithmetic identity and still fail because an edit invalidates a pointer into a growing vector.
+Memory policy is therefore part of the IR contract.
+The initial PebbleIR policy is unusually plain: one caller-owned object contains all function storage, and IDs refer to slots rather than addresses.
+
+\section{A bounded arena without allocation}
+\label{sec:pebble-arena}
+The function's fixed arrays act as a \term{region}: all value records share the function's lifetime.
+Creating a value consumes a slot; deleting it leaves a tombstone; destroying the function releases the region at once.
+There is no per-node allocation and no individual free.
+The public API never returns a pointer to a value record, so clients need not keep interior pointers stable across a whole-function copy.
+
+A caller can put a \code{Pir} on the stack, in static storage, or in a separately allocated owner object.
+Those choices have different resource limits.
+The teaching tests use stack storage, including temporary transaction copies; an embedded compiler with a small stack should put those workspaces in caller-owned heap storage instead.
+The absence of allocation inside the API does not imply zero memory cost.
+
+\section{Publication has one commit point}
+\label{sec:pebble-publish}
+Listing~\ref{lst:pebble-allocation} is the actual allocation path.
+It checks all local failure conditions before changing either the count or the revision.
+Once those checks pass, storing a bounded record cannot fail in this representation.
+The builder checks only local construction conditions; the supplied opcode and operands still need full verification.
+
+\begin{listing}[htbp]
+\inputminted[firstline=22,lastline=33]{c}{example-code/pebbleir/pebbleir.c}
+\caption{A failed value allocation leaves the function unchanged.}
+\label{lst:pebble-allocation}
+\end{listing}
+
+The \term{revision} increases on a committed edit.
+Derived facts carry both the owning object pointer and the revision they describe.
+An observer must compare both before reusing a cached answer.
+The counter is checked against \code{ULONG\_MAX}; wrapping it could make a very old result appear current.
+
+Initialization, successful parsing, and successful source compilation begin a new logical function lifetime.
+They can reset the revision, so every prior fact and ID association for the destination must be discarded even if its C address is reused.
+A long-lived service should add an owner-generation token or globally unique function identity if such lifetime transitions cannot be enforced by its calling convention.
+
+\begin{algorithm}[htbp]
+\caption{Replacing a complete function as a transaction.}
+\label{alg:pebble-transaction}
+\begin{pseudocode}
+\Require destination $F$, candidate-producing operation $P$
+\Ensure verified replacement or unchanged destination
+\State construct candidate $T$ in separate storage
+\If{construction fails or verification rejects $T$}
+\State discard $T$ and report the failure
+\Else
+\State invalidate facts belonging to the old lifetime
+\State publish $T$ into $F$
+\EndIf
+\end{pseudocode}
+\end{algorithm}
+
+Algorithm~\ref{alg:pebble-transaction} is used by parsing and source compilation.
+Optimization instead copies an existing function, increments its revision, verifies the candidate, and commits it within the same logical lifetime.
+The distinction matters to cache owners even though both implementations end with a C structure assignment.
+
+\section{Worked capacity boundary}
+\label{sec:pebble-full}
+With 127 occupied slots, allocating a constant returns ID 128 and increments the revision once.
+The next allocation returns zero and changes neither the count nor any slot.
+The test suite fills the table and compares the object before and after the failed request.
+This is an interface property, not merely a check that a sanitizer sees no overflow.
+
+For growing programs, retain the IDs while replacing the fixed arrays with growable storage.
+Check multiplication before computing allocation sizes, define behavior on allocation failure, and publish a new buffer only after successful allocation and copying.
+If deleted IDs are reused, attach generation numbers so an old handle cannot accidentally name a new instruction in the same slot.
+These are explicit extensions; the supplied implementation never reuses a slot within a function lifetime.
+
+\section{Exercises}
+\label{sec:pebble-five-exercises}
+\begin{enumerate}
+\item \label{ex:pebble-revision} A fact has the correct owner pointer but an old revision. Can it be used if the last edit merely changed a constant? Give a client for which the answer is unsafe.
+\item \label{ex:pebble-generation} Describe a stale-handle failure when slot 12 is deleted and reused. What additional field distinguishes the old and new references?
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:pebble-five-reading}
+The C11 object-lifetime and allocation rules delimit what the host implementation may retain across storage replacement~\cite[Sections~6.2.4 and~7.22.3]{wg14-2011-c11}.

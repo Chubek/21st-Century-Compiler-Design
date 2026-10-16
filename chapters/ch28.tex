@@ -1,0 +1,217 @@
+\chapter{SSA Destruction and Machine Optimization}\label{ch:ssa-destruction-machine-opt}
+
+Static single assignment simplifies the middle end but no machine executes it directly.
+Hardware has no phi functions, no infinite temporaries, and no patience for redundant copies.
+Some pass must translate SSA away, repair the seams with real moves, and then squeeze the machine code with low-level cleanups.
+This chapter covers that exit ramp: correct SSA destruction followed by the machine optimizations that pay for the trouble.
+
+\section{Leaving SSA Correctly}\label{sec:ch28-destruction}
+
+SSA destruction replaces each phi function with moves that select the right incoming value along each path.
+\term{SSA destruction} (also called deconstruction or out-of-SSA translation) eliminates phi functions while preserving the value flow they encoded.
+\term{Phi congruence class} means the set of temporaries linked by phi functions that want the same location.
+\term{Critical edge} means an edge from a block with several successors to a block with several predecessors, where a placed move would execute on the wrong paths.
+\term{Parallel copy} means a set of moves that take effect simultaneously at a point, so that swapping two registers needs a temporary rather than sequential overwrites.
+The naive rule of copying each phi input in its predecessor works until two phis in one block interact or an edge is critical.
+
+Consider a join block with two phis that swap their inputs.
+Sequential copies in the predecessors or the join block overwrite one value before reading the other.
+Parallel-copy semantics fixes the order by reading all sources before writing any destination.
+Critical edges force a different repair: the move cannot sit in the source because it would run for all successors, and it cannot sit in the destination because values from different predecessors would collide.
+Splitting the edge with a fresh block gives the move a home that executes on exactly one path.
+The snippet below shows the swap that defeats sequential copies.
+The \code{phi} operations are \code{SSA constructs} with no direct machine equivalent.
+\begin{irlisting}
+; join block J with predecessors A and B
+J: x2 = phi(x0 from A, x1 from B)
+   y2 = phi(y0 from A, y1 from B)
+; swap case: x0 is y1 and y0 is x1 in values
+\end{irlisting}
+After destruction with parallel copies, block \code{A} ends with \code{x2, y2 := x0, y0} taken atomically, and block \code{B} ends with \code{x2, y2 := x1, y1} atomically.
+If allocation gives the sources and destinations crossed locations, a copy-sequencing pass expands the parallel copy through a temporary.
+Two distinct simultaneously live results cannot share one register.
+No use between the copy and the join observes an intermediate state.
+
+Figure~\ref{fig:visual-copy-snapshot} separates the two phases of a parallel copy: read every old source, then write the destinations.
+Listing~\ref{lst:visual-parallel-copy} implements that definition directly for eight simulated registers.
+Its temporary array is a simple reference implementation; a machine-code sequencer can use fewer temporary locations by finding cycles, as discussed below.
+
+\input{figures/parallel-copy}
+
+
+\begin{listing}[htbp]
+  \inputminted{c}{example-code/visual-labs/copy.c}
+  \caption{Snapshotting source values preserves swaps and longer copy cycles without overwriting an unread source.}
+  \label{lst:visual-parallel-copy}
+\end{listing}
+
+The header defines a \code{Copy} as a destination/source index pair and fixes \code{REGISTER\_COUNT} at eight.
+Indices must lie in that range, and each destination may appear only once; repeated sources are permitted.
+All validation and source reads finish before the first register write, so rejection leaves the register array unchanged.
+For $m$ copies the two loops take $O(m)$ time; the fixed temporary arrays provide bounded storage.
+The accompanying test checks every pair of byte-valued swap inputs, a three-register cycle, a repeated source, and rejection after an earlier valid copy.
+
+Lost-copy and swap problems are the two classic failure modes.
+The \term{lost-copy problem} drops a value when a phi result and its input share a location that an unrelated definition overwrites along one path.
+The \term{swap problem} corrupts two phis whose sources and destinations cross, as above.
+Both vanish when destruction uses parallel copies placed on non-critical edges plus systematic edge splitting.
+Extensions for predicated code, hardware register pairs, and exception edges add constraints on where copies may sit, but the skeleton stays the same.
+Figure~\ref{fig:ch28-critical} shows why the fresh block is needed.
+Table~\ref{tab:ch28-destruction-fixes} maps each failure to its fix.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\node[font=\sffamily\small] at (0.8,2.3) {Before};
+\node[basic block] (a) at (0,1.5) {A};
+\node[basic block] (c) at (2,1.5) {C};
+\node[basic block] (j) at (1,-0.3) {J: phis};
+\node[basic block] (z) at (-1,-0.3) {Z};
+\draw[cfg edge] (a) -- node[right,font=\small] {critical} (j);
+\draw[cfg edge] (a) -- (z);
+\draw[cfg edge] (c) -- (j);
+\begin{scope}[xshift=65mm]
+\node[font=\sffamily\small] at (0.8,2.3) {After};
+\node[basic block] (aa) at (0,1.5) {A};
+\node[basic block] (cc) at (2,1.5) {C};
+\node[basic block] (ss) at (0,0) {S: copies};
+\node[basic block] (jj) at (1,-1.5) {J};
+\node[basic block] (zz) at (-1.4,-1.5) {Z};
+\draw[cfg edge] (aa) -- (ss);
+\draw[cfg edge] (aa.west) -- ++(-6mm,0) -| (zz.north);
+\draw[cfg edge] (ss) -- (jj);
+\draw[cfg edge] (cc) -- (jj);
+\end{scope}
+\end{tikzpicture}
+\caption{Splitting $A\to J$ puts its phi copies in $S$, so they run neither on $A\to Z$ nor on $C\to J$.}
+\label{fig:ch28-critical}
+\end{figure}
+
+\begin{table}[htbp]
+\caption{SSA-destruction hazards with their standard repairs.}
+\label{tab:ch28-destruction-fixes}
+\begin{tabular}{lll}
+\toprule
+Hazard & Symptom & Repair \\
+\midrule
+Critical edge & No single home for copy & Split the edge \\
+Lost copy & Overwritten shared location & Parallel copy plus split \\
+Swap & Crossed sources clobbered & Temporary in sequence \\
+Dead phi & Useless copies survive & Dead-code pass after \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Destruction order interacts with coalescing and copy folding.
+Merging a phi result with one of its inputs removes a copy but creates a congruence that later spilling must respect.
+Over-eager merging reintroduces the lost-copy shape under register pressure.
+Modern out-of-SSA schemes therefore keep the parallel copies explicit, let the allocator coalesce what stays colorable, and sequence whatever remains.
+A final dead-code pass removes phis whose results are unused, which happens more often than newcomers expect after earlier simplification.
+\begin{ccwarning}[Do not place copies by intuition]
+Hand-placed moves on critical edges look right on the common path and corrupt the rare path.
+Always split first, use parallel-copy semantics, and expand to sequential moves mechanically.
+Test with swapped inputs explicitly.
+\end{ccwarning}
+
+\section{Out-of-SSA Translation}\label{sec:ch28-algorithm}
+
+Algorithm~\ref{alg:ch28-out-of-ssa} gives the standard destruction pass used before or during register allocation.
+It splits critical edges on demand, installs parallel copies, sequences them without breaking swaps, and cleans up.
+The input is SSA with explicit phi functions and a correct control-flow graph.
+The output is ordinary three-address or machine IR with no phis and equivalent value flow.
+The algorithm preserves semantics because each copy executes exactly along the path its phi input described, and parallel semantics removes ordering hazards.
+
+\begin{algorithm}[htbp]
+\caption{Out-of-SSA translation with edge splitting}\label{alg:ch28-out-of-ssa}
+\begin{pseudocode}
+\Require SSA function with phi nodes, CFG $G$
+\Ensure equivalent function with no phi nodes
+\ForAll{critical edge $e$ that needs a phi copy}
+\State split $e$ with a fresh block $S_e$
+\EndFor
+\ForAll{block $J$ with phi nodes}
+\ForAll{predecessor $P$ of $J$}
+\State build parallel copy $C_P$ mapping each phi input from $P$ to its result
+\State place $C_P$ on edge $P\to J$: before $P$'s terminator if it has one successor, otherwise at $J$'s entry if it has one predecessor, or in the split block
+\EndFor
+\State delete the phi nodes in $J$
+\EndFor
+\State sequence each parallel copy with temporaries for swaps
+\State run dead-code elimination on orphaned copies
+\end{pseudocode}
+\end{algorithm}
+
+Sequencing a parallel copy needs its own small routine: repeatedly emit copies whose destination is not a remaining source, and break cycles with one fresh temporary per cycle.
+With source-use counts and a queue of ready copies, sequencing is linear in the copy count; repeatedly scanning all remaining copies can be quadratic.
+The whole pass costs $O(N + E + P)$, where $N$ is the instruction count, $E$ is the edge count, and $P$ is the total phi-input count, plus the cost of the edge splits it creates.
+Memory behavior is predictable because each phi input becomes exactly one parallel-copy element and then at most two sequential moves.
+The pass runs once per function in the common pipeline, before allocation, with a small post-allocation repair for copies the allocator could not coalesce.
+% TODO(cite): need a primary reference for parallel-copy SSA destruction.
+
+\section{Worked Example}\label{sec:ch28-worked}
+
+We destroy two phis by hand on a diamond with a critical edge.
+Blocks \code{A} and \code{C} feed join block \code{J}, and \code{A} also branches to an unrelated block \code{Z}, so edge \code{A -> J} is critical.
+\begin{irlisting}
+A: x0 = const 1; y0 = const 2; br J or Z
+C: x1 = const 3; y1 = const 4; jmp J
+J: x2 = phi(x0 from A, x1 from C)
+   y2 = phi(y0 from A, y1 from C)
+   use x2, y2
+\end{irlisting}
+The second phi takes \code{y0} from \code{A} and \code{y1} from \code{C}.
+The values alone do not create a swap; a swap arises when register assignment crosses the source and destination locations.
+Step one splits edge \code{A -> J} with fresh block \code{S}.
+Step two installs parallel copies: at the end of \code{S} put \code{x2, y2 := x0, y0}, and at the end of \code{C} put \code{x2, y2 := x1, y1}.
+Step three deletes both phis from \code{J}.
+Step four sequences the copies.
+The \code{C} copy has disjoint sources and destinations in this numbering, so it becomes two plain moves in either order.
+Suppose \code{x0} occupies register $r_1$, \code{y0} occupies $r_2$, and the destinations \code{x2} and \code{y2} occupy $r_2$ and $r_1$, respectively.
+The required parallel copy is $r_2\gets r_1, r_1\gets r_2$.
+Save $r_1$ in a temporary, copy $r_2$ into $r_1$, and copy the temporary into $r_2$.
+Starting with $(r_1,r_2)=(1,2)$ leaves $(r_1,r_2)=(2,1)$, so \code{x2} is $1$ and \code{y2} is $2$ as required.
+
+Verify path by path.
+Along \code{A -> S -> J}, the join observes \code{1} and \code{2} in the right slots with no leakage into the \code{A -> Z} path, because the copy sits in \code{S} rather than in \code{A}.
+Along \code{C -> J}, the join observes \code{3} and \code{4}.
+Delete-check: if \code{y2} were unused after \code{J}, dead-code elimination would remove its copy elements and leave only the \code{x2} moves.
+Count the final moves: two on the \code{C} path, three (including the temporary) on the swap path.
+That count is minimal for the chosen assignment; a different register assignment could drop the temporary, which is exactly the coalescing decision left to the allocator.
+
+\section{Machine Optimizations After SSA}\label{sec:ch28-machine-opt}
+
+Once phis are gone, a family of machine-level cleanups reclaims the copies and sharpens the code.
+Copy propagation and \term{peephole optimization} remove redundant moves, fold flag-setting comparisons into branches, and replace generic sequences with target idioms.
+\term{Branch tuning} shortens jumps, aligns hot targets, removes unreachable blocks, and converts predictable branches into conditional moves or predication where profitable.
+\term{Machine-level dead-code elimination} drops flag computations, unused condition codes, and copies whose results never reach a use.
+\term{Stack-slot compaction} and frame-index elimination shrink the frame that allocation pessimized.
+Each of these is a small pattern rewrite, but together they decide whether the backend output looks hand-tuned or machine-generated.
+
+The ordering rule is simple: destroy SSA, allocate registers, then optimize the machine code with full knowledge of real registers and frame offsets.
+Running peephole logic before allocation wastes effort on copies the allocator will rewrite anyway.
+Running branch tuning after emission is too late to fix layout.
+A compact post-allocation loop of copy cleanup, dead-code removal, branch shortening, and block placement captures most of the gain in linear or near-linear time per pass.
+Profile-guided block placement deserves a mention because it moves cold code out of line, shortens hot fall-through paths, and improves instruction-cache density with no semantic risk beyond edge-count fidelity.
+
+Test destruction and machine cleanup together rather than separately.
+Random CFG fuzzers with phi swaps and critical edges catch lost-copy regressions that unit tests miss.
+Check exception edges and debug ranges after edge splitting, since fresh blocks shift line mappings.
+Differential-test optimized machine code against unoptimized machine code on input corpora, including NaN, signed zero, and overflow corners for the folded flag sequences.
+Background on backend pass structure and low-level cleanup appears in~\cite{morgan-1998-optimizing} and see~\cite{appel-1998-modern}.
+Validation discipline for these late semantics-preserving rewrites follows see~\cite{safonov-2010-trustworthy}.
+Language facts about observable behavior that late rewrites must preserve are stated in~\cite{wg14-2011-c11}.
+
+\section{Exercises}\label{sec:ch28-exercises}
+
+\begin{enumerate}
+\item A join block has one phi fed by two predecessors, and one incoming edge is critical. \label{ex:ch28-split-place} Split the edge, place the copies, and show why placing the copy in the source block misexecutes.
+\item Two phis in one join swap their inputs along one path. \label{ex:ch28-swap-seq} Write the parallel copy, sequence it with a temporary, and count the final moves.
+\item A post-allocation peephole sees \code{cmp r, 0} followed by \code{br\_eq L}. \label{ex:ch28-peephole} Give the folded target idiom, state its preconditions, and explain what the dead-code pass removes if the flags are otherwise unused.
+\end{enumerate}
+
+\section{Further Reading}\label{sec:ch28-reading}
+
+Low-level pass structure, peephole design, and branch handling are covered in~\cite{morgan-1998-optimizing}.
+SSA handling and backend organization from a complementary view appear in~\cite{appel-1998-modern}.
+Trust arguments for late semantics-preserving transformations appear in~\cite{safonov-2010-trustworthy}.
+Observable-behavior rules that constrain late rewrites are defined in~\cite{wg14-2011-c11}.

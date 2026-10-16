@@ -1,0 +1,296 @@
+\chapter{Dataflow Analysis}
+\label{ch:ch09-dataflow-analysis}
+
+An optimizer cannot trust what it sees at one program point alone.
+A variable that holds zero on one path may hold a table address on another path.
+A store that looks redundant in isolation may be the only store that reaches a load on some branch.
+A transformation that is safe on straight-line code can therefore be unsafe once control flow joins and loops repeat.
+The problem of this chapter is to compute facts that hold across control flow, conservatively and automatically, before any transformation uses them.
+We solve it with techniques that propagate facts along control-flow edges until no fact changes anymore.
+These techniques share one engine, one correctness argument, and one implementation shape.
+They differ only in what facts they track, which direction facts flow, and how facts combine at joins.
+
+\section{Facts that depend on paths}
+\label{sec:ch09-path-facts}
+
+A \term{dataflow analysis} computes, for every program point, a set of facts that approximates what may happen along some or all execution paths to that point.
+The approximation must be conservative in a direction that keeps clients safe.
+A \term{may analysis} includes every fact that can hold on an execution path, and may include additional facts because of approximation.
+A \term{must analysis} reports a fact only when it holds on every path, and clients use it to act whenever the fact is guaranteed.
+The choice between may and must belongs to the client, not to the solver.
+Liveness is a may analysis because a variable is live when some path needs it.
+Available expressions is a must analysis because an expression is available only when every path has computed it without a later kill.
+Reaching definitions is a may analysis because a definition reaches when some path carries it forward.
+Section~\ref{sec:ch09-equations} turns these intuitions into equations, and Section~\ref{sec:ch09-worked} computes them by hand on a small graph.
+Appel develops the same client-driven view of safety for flow analyses, see~\cite{appel-1998-modern}.
+
+Consider a function that reads a configuration flag and then computes a price.
+One branch sets \code{discount} to zero and computes \code{total} from \code{price}.
+The other branch sets \code{discount} from a coupon table and computes \code{total} the same way.
+After the join, an optimizer wants to know whether \code{discount} is zero, whether \code{total} is redundant, and whether an earlier store to \code{total} still reaches.
+No local inspection of the join block answers these questions.
+The answers live on the paths, and only a whole-graph computation recovers them.
+That computation is the subject of Algorithm~\ref{alg:ch09-worklist}, whose result feeds the sets in Table~\ref{tab:ch09-reaching} and the graph in Figure~\ref{fig:ch09-diamond}.
+
+\begin{irlisting}
+; B1 reads the flag, then branches to B2 or B3
+; B2 computes with zero discount, B3 with table discount
+; B4 joins both paths and consumes total and discount
+B1: t0 = read_flag()
+B1: br t0, B2, B3
+B2: discount = 0
+B2: total = price - discount
+B2: jmp B4
+B3: discount = load coupon[i]
+B3: total = price - discount
+B3: jmp B4
+B4: store total
+B4: store discount
+\end{irlisting}
+
+The listing already shows why direction matters.
+Information about \code{discount} flows forward from assignments to uses.
+Information about whether \code{total} is needed flows backward from uses to assignments.
+A forward problem propagates facts along successor edges, while a backward problem propagates facts along predecessor edges.
+The solver does not care which direction the client chose, as long as the equations name which neighbor sets feed each block.
+We therefore treat direction as a parameter of one uniform framework.
+The framework also explains why the join operator differs between may and must problems.
+A may join takes a union because one witness path suffices, while a must join takes an intersection because every path must agree.
+
+\section{Gen, kill, and transfer within a block}
+\label{sec:ch09-gen-kill}
+
+A \term{transfer function} summarizes what one block does to an incoming fact set.
+Most classical analyses use the gen-kill form, which keeps the summary small and easy to compose.
+The set \Gen{B} holds facts that block $B$ creates and that survive to the block exit.
+The set \Kill{B} holds facts that block $B$ destroys on every path through the block.
+The transfer function then has the shape $\Tf{B}(X) = \Gen{B} \cup (X - \Kill{B})$.
+This shape says that incoming facts survive unless the block kills them, and locally created facts are added.
+The form is simple enough to compute by scanning instructions once, yet expressive enough for reaching definitions, liveness, and available expressions.
+Morgan presents transfer summaries in the same compositional style for optimization passes, see~\cite{morgan-1998-optimizing}.
+
+Reaching definitions gives the cleanest example of gen and kill.
+Each definition generates a fact named by its location, for example the pair of variable \code{discount} and block $B2$.
+It kills every other definition of the same variable, for example the definition in $B3$.
+A block that assigns \code{discount} twice generates only the last assignment, because the first dies inside the block.
+A block that never assigns \code{discount} generates nothing for it and kills nothing for it.
+Liveness swaps the roles of definitions and uses without changing the pattern.
+Its \Gen{B} set holds variables used in $B$ before any assignment to them, and its \Kill{B} set holds variables assigned anywhere in $B$.
+Available expressions uses a similar summary where a block generates an expression it computes with all operands intact, and kills an expression when it assigns to any operand.
+The shared shape lets one solver serve all three clients.
+
+A \term{basic block} contributes its summary by scanning its instructions in order.
+The scan maintains a local gen set and a local kill set, both starting empty.
+An assignment adds its own fact to the local gen set and removes shadowed facts from it.
+It also adds every shadowed fact in the chosen finite universe to the local kill set.
+A use without a preceding assignment adds the variable to the live-gen set for backward problems.
+The scan visits each instruction once; its cost also includes the set operations used to construct the summaries.
+The per-block summaries stay valid while the control-flow graph keeps the same instructions.
+When an optimization rewrites a block, it recomputes the affected summaries and reruns the solver with valid initialization.
+This locality is what makes dataflow practical inside an iterative compiler.
+\section{Equations over the graph}
+\label{sec:ch09-equations}
+
+Each block satisfies two equations that relate its entry set to its exit set.
+For a forward problem, the entry set combines the exits of predecessors, and the exit applies the transfer function.
+For a backward problem, the exit combines the entries of successors, and the entry applies the transfer function.
+We write $\In{B}$ for the entry set and $\Out{B}$ for the exit set.
+We write $\Pred(B)$ for predecessors and $\Succ(B)$ for successors.
+The forward equations are $\In{B} = \meet_{P \in \Pred(B)} \Out{P}$ together with $\Out{B} = \Tf{B}(\In{B})$.
+The backward equations are $\Out{B} = \meet_{S \in \Succ(B)} \In{S}$ together with $\In{B} = \Tf{B}(\Out{B})$.
+The operator $\meet$ is union for may analyses and intersection for must analyses.
+The entry block of a forward problem and the exit blocks of a backward problem receive fixed boundary sets, usually empty, that model function entry and exit.
+
+\begin{equation}
+\Out{B} = \Gen{B} \cup (\In{B} - \Kill{B})
+\label{eq:ch09-forward-transfer}
+\end{equation}
+
+Equation~\ref{eq:ch09-forward-transfer} shows the forward gen-kill transfer in isolation.
+It says that exit facts are either created locally or carried through untouched.
+The equation is monotone in $\In{B}$ because enlarging the input can only enlarge the output.
+Monotonicity guarantees that iteration from a safe starting point cannot oscillate forever on finite sets.
+Chapter 10 explains the lattice theory behind that guarantee, but the operational idea already works here.
+We start every block at the identity of the join, namely empty for union and universal for intersection.
+We then repeatedly apply the equations until no block changes.
+The process always stops for bit-vector problems because each may set only grows and each must set only shrinks, both bounded by the finite universe of facts.
+We call the limit the \term{fixed point}, and we use it as the analysis answer.
+The slogan \enquote{start safe, then move monotonically} summarizes the whole method.
+
+Joins deserve care when a block has no predecessors or no successors.
+The entry block has no predecessors, so its meet ranges over an empty family.
+For a may problem the empty union is the empty set, which correctly says that nothing reaches function entry from inside.
+For a must problem the empty intersection is the universal set, but function entry is governed by a separate boundary equation, often with the empty set as its value.
+These are different rules: an algebraic identity does not specify the program's initial state.
+Prune blocks unreachable from entry before solving, so their generated facts cannot contaminate reachable joins.
+For backward liveness, retain reachable loops even if they cannot reach a function exit; uses in such loops still matter.
+We return to precision around unreachable code in the chapter on dead code and control dependence.
+
+\section{One worklist solver for many analyses}
+\label{sec:ch09-solver}
+
+Algorithm~\ref{alg:ch09-worklist} solves every gen-kill problem with one worklist loop.
+It initializes all block sets to the join identity, places every block on the worklist, and then processes blocks until the list empties.
+Processing a block recomputes its meet from neighbors and then its transfer.
+When the result differs from the stored value, the algorithm updates the stored value and enqueues the neighbors that read it.
+Forward problems enqueue successors on change, while backward problems enqueue predecessors on change.
+The algorithm terminates because each update moves one set strictly closer to the fixed point along a finite chain.
+Upon termination every block satisfies its equations; starting at the specified extreme selects the intended extremal solution.
+Soundness additionally requires conservative transfer functions and boundary facts: solving an unsound system exactly does not make it safe.
+We use the word \term{worklist} for the queue itself and for the discipline of reprocessing only readers of changed facts.
+
+\begin{algorithm}
+\caption{Worklist iterative dataflow for gen-kill problems}\label{alg:ch09-worklist}
+\begin{pseudocode}
+\Require entry-reachable CFG $G$, gen-kill summaries, direction $d$, join $\meet$, boundary facts
+\Ensure $\In{B}$ and $\Out{B}$ satisfy the dataflow equations for every $B$
+\State initialize $\In{B}$ and $\Out{B}$ to the identity of $\meet$ for all $B$
+\State set the boundary block to its fixed boundary value
+\State $W \gets$ all blocks in $G$
+\While{$W \neq \emptyset$}
+\State remove some $B$ from $W$
+\If{$d$ is forward}
+\State $newIn \gets \meet_{P \in \Pred(B)} \Out{P}$, or boundary if $B$ is entry
+\State $newOut \gets \Gen{B} \cup (newIn - \Kill{B})$
+\If{$newOut \neq \Out{B}$ or $newIn \neq \In{B}$}
+\State $\In{B} \gets newIn$
+\State $\Out{B} \gets newOut$
+\State add $\Succ(B)$ to $W$
+\EndIf
+\Else
+\State $newOut \gets \meet_{S \in \Succ(B)} \In{S}$, or boundary if $B$ is exit
+\State $newIn \gets \Gen{B} \cup (newOut - \Kill{B})$
+\If{$newIn \neq \In{B}$ or $newOut \neq \Out{B}$}
+\State $\In{B} \gets newIn$
+\State $\Out{B} \gets newOut$
+\State add $\Pred(B)$ to $W$
+\EndIf
+\EndIf
+\EndWhile
+\end{pseudocode}
+\end{algorithm}
+
+Reverse postorder processes forward problems quickly because it visits predecessors before successors along acyclic paths.
+Postorder does the same service for backward problems by visiting successors first.
+The cost depends on both the number of value changes and the work done on each visit, as Section~\ref{sec:ch09-implementation} explains.
+An implementation should therefore invest in ordering, and use bit vectors where union, intersection, and difference are word-level operations.
+
+A common bug is to seed must analyses with the empty set and thereby miss facts carried around loops.
+Local generation can still produce nonempty answers; the error is selecting the wrong fixed point, not necessarily obtaining empty sets everywhere.
+The correct seed for a must problem is the universal set of facts in the function, refined by iteration downward.
+A related bug updates $\In{B}$ and $\Out{B}$ in place while still iterating over neighbors, which can hide a change from the comparison.
+Algorithm~\ref{alg:ch09-worklist} avoids that trap by computing \code{newIn} and \code{newOut} into temporaries before comparing.
+\section{Worked example on a diamond}
+\label{sec:ch09-worked}
+
+We now compute reaching definitions on the diamond from Figure~\ref{fig:ch09-diamond} by hand.
+The universe has four facts, named $d1$ through $d4$ for the two definitions in each branch.
+Block $B1$ is empty for these variables and has empty gen and kill sets.
+Block $B2$ defines \code{discount} at $d1$ and \code{total} at $d2$, so its gen set is $\{d1, d2\}$ and its kill set is $\{d3, d4\}$.
+Block $B3$ defines \code{discount} at $d3$ and \code{total} at $d4$, so its gen set is $\{d3, d4\}$ and its kill set is $\{d1, d2\}$.
+Block $B4$ uses both variables without defining them, so its gen and kill sets are empty.
+The boundary is $\In{B1} = \emptyset$, and the join is union because reaching is a may problem.
+Figure~\ref{fig:visual-reaching-union} shows the facts crossing the merge, rather than only the control-flow edges.
+Both definitions of a variable may reach $B4$ even though one execution took only one arm.
+
+\input{figures/dataflow-merge}
+
+Table~\ref{tab:ch09-reaching} records the iteration, and the paragraphs below explain each pass.
+
+\begin{figure}
+\begin{tikzpicture}
+\node[basic block] (b1) {B1: t0 = read flag};
+\node[basic block, below left=1.2cm and 0.8cm of b1] (b2) {B2: discount = 0};
+\node[basic block, below right=1.2cm and 0.8cm of b1] (b3) {B3: discount = load};
+\node[basic block, below=2.6cm of b1] (b4) {B4: use total, discount};
+\draw[cfg edge] (b1) -- (b2);
+\draw[cfg edge] (b1) -- (b3);
+\draw[cfg edge] (b2) -- (b4);
+\draw[cfg edge] (b3) -- (b4);
+\end{tikzpicture}
+\caption{The diamond control-flow graph used for hand computation, where $B1$ branches to $B2$ and $B3$ and both join at $B4$.}
+\label{fig:ch09-diamond}
+\end{figure}
+
+\begin{table}
+\caption{Reaching definitions on the diamond, shown as entry and exit sets after each pass over the blocks.}
+\label{tab:ch09-reaching}
+\begin{tabular}{lcc}
+\toprule
+Block & Pass 1 entry and exit & Pass 2 entry and exit \\
+\midrule
+B1 & In empty, Out empty & In empty, Out empty \\
+B2 & In empty, Out d1 d2 & In empty, Out d1 d2 \\
+B3 & In empty, Out d3 d4 & In empty, Out d3 d4 \\
+B4 & In d1 d2 d3 d4, Out same & In d1 d2 d3 d4, Out same \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Initialization sets every entry and exit set to empty except the boundary.
+The first pass visits $B1$, computes its entry from the boundary, and keeps its exit empty.
+It visits $B2$ next, reads $\In{B2} = \Out{B1} = \emptyset$, and produces $\Out{B2} = \{d1, d2\}$.
+It visits $B3$ next, reads $\In{B3} = \Out{B1} = \emptyset$, and produces $\Out{B3} = \{d3, d4\}$.
+It visits $B4$ last, forms $\In{B4} = \Out{B2} \cup \Out{B3} = \{d1, d2, d3, d4\}$, and copies it to $\Out{B4}$.
+The second pass recomputes every block and finds no change, so the worklist empties.
+The fixed point says that both definitions of \code{discount} and both definitions of \code{total} reach the join.
+These facts do not justify replacing \code{discount} by zero at $B4$; other analyses might still justify restructuring the branches.
+The same graph run backward for liveness would instead show that \code{price} is live on entry to both branches, a fact worth checking in the exercises.
+
+The example also shows why union is the right join for reaching.
+An intersection at $B4$ would report the empty set and claim that no definition reaches, which holds on no path.
+May facts grow from empty by union, while must facts shrink from universal by intersection.
+
+\section{Implementation notes and cost}
+\label{sec:ch09-implementation}
+
+A production implementation represents each classical fact set as a bit vector over a numbered universe.
+Reaching definitions numbers every definition point, liveness numbers every variable, and available expressions numbers every expression.
+Union becomes bitwise OR, intersection becomes bitwise AND, and difference becomes AND-NOT.
+The per-block transfer becomes two vector operations after the one-time gen-kill scan.
+A teaching compiler can stay dense throughout, while an industrial compiler tunes the representation per function size.
+
+Let $N$ be the block count, $E$ the edge count, $U$ the fact count, and $K=\lceil U/w\rceil$ the words per bit vector on a machine with word size $w$.
+The subset lattice has height $U+1$, counting elements; each stored set changes strictly at most $U$ times.
+With duplicate-free queue membership, there are $O(N+EU)$ removals from the worklist, including visits that change nothing.
+If $\Delta$ is the maximum number of neighbors read by a visit, recomputing every meet gives the conservative bound $O((N+EU)(\Delta+1)K)$ time after summary construction.
+This bound deliberately counts repeated edge scans; a solver that propagates only newly changed bits needs a separate analysis.
+Reverse postorder often reduces reprocessing by carrying facts through acyclic regions in one sweep.
+Incremental solving requires an invalidation policy: deleting a definition can require removing an old may fact, which a grow-only restart from the old solution cannot do.
+Reinitializing the analysis is the simple correct baseline after an edit.
+Safonov discusses engineering trade-offs of this form when trusted optimization must remain predictable, see~\cite{safonov-2010-trustworthy}.
+
+A bit-vector analysis tracks only the chosen universe, so it cannot discover that two different expressions always hold equal values.
+A path-sensitive variant would separate the two branches past the join and recover that \code{discount} is zero along the left path alone.
+Each step up the precision ladder costs compile time and implementation effort.
+The right choice depends on which client needs the fact and how often that client runs.
+The C standard leaves many evaluation and representation choices to implementations, so a portable optimizer stays conservative where the language is silent, see~\cite{wg14-2011-c11}.
+% TODO(cite): need a primary reference for Kam-Ullman monotone dataflow frameworks beyond the four listed books.
+
+\section{Exercises}
+\label{sec:ch09-exercises}
+
+\begin{enumerate}
+\item \label{ex:ch09-live-diamond} Compute live variables backward on Figure~\ref{fig:ch09-diamond} by hand.
+Assume that $B4$ uses \code{total}, \code{discount}, and \code{price}, that $B2$ and $B3$ define \code{total} and \code{discount}, and that neither branch uses \code{price}.
+Show the gen, kill, entry, and exit sets for every block at the fixed point.
+Explain in one paragraph why \code{price} is live on exit from $B1$ even though no block before $B4$ mentions it.
+\item \label{ex:ch09-available-kill} Compute available expressions forward on the same diamond.
+Let expression $e$ be \code{price - discount}, computed in both $B2$ and $B3$ and used in $B4$.
+Show the gen and kill sets when $B2$ assigns zero to \code{discount} and $B3$ loads \code{discount} from memory.
+Decide whether $e$ is available on entry to $B4$ and justify the answer from the must join.
+Then change $B3$ to copy the constant zero as well and recompute the answer.
+\item \label{ex:ch09-order-effect} Implement Algorithm~\ref{alg:ch09-worklist} for bit-vector reaching definitions in the language of your choice.
+Run it on a chain of $N$ blocks followed by a loop back to the middle, with $N$ set to $10$, $100$, and $1000$.
+Compare FIFO order, LIFO order, and reverse-postorder seeding by counting block visits to convergence.
+Report the three counts for each $N$ and explain why ordering matters more as $N$ grows.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch09-reading}
+
+Kildall gives a foundational unified treatment of global optimization by dataflow equations; read it for the relationship between the equation system and its solution~\cite{kildall-1973-dataflow}.
+Appel covers flow analysis and its use in optimization passes with implementation detail, see~\cite{appel-1998-modern}.
+Morgan organizes classical optimizations around dataflow facts and transfer summaries, see~\cite{morgan-1998-optimizing}.
+Safonov explains how trusted compilers bound analysis cost while keeping the safety argument explicit, see~\cite{safonov-2010-trustworthy}.
+The C language definition constrains what facts an optimizer may assume across sequence points and aliasing, see~\cite{wg14-2011-c11}.

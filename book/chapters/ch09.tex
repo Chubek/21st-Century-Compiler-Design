@@ -1,0 +1,107 @@
+\chapter{Control Flow and Dominance}
+\label{ch:pebble-dominance}
+
+An ID tells us where a value is stored in the compiler, not whether its definition executes before a use.
+Control flow supplies the missing condition.
+PebbleIR derives its graph from terminators rather than maintaining a second editable graph that could disagree with the instructions.
+
+\section{One source of truth for edges}
+\label{sec:pebble-edges}
+A return has no successors, a jump has one, and a branch has two distinct successors.
+Invert these edges to obtain predecessor sets.
+The verifier stores one bit per predecessor in an unsigned word; the eight-block limit makes the shifts and masks fit even on an implementation with 16-bit unsigned integers.
+The graph contains only declared blocks and validated targets before any traversal begins.
+
+Figure~\ref{fig:pebble-diamond} is the graph of the executable diamond fixture.
+The left arm returns an incremented input to the join; the right arm returns a doubled input.
+The join's phi selects the arm that actually ran.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=13mm and 15mm]
+\node[basic block] (e) {0: test x < 10};
+\node[basic block,below left=of e] (l) {1: left = x + 1};
+\node[basic block,below right=of e] (r) {2: right = x * 2};
+\node[basic block,below right=of l] (j) {3: phi; return};
+\draw[cfg edge] (e)--node[above left]{true}(l);
+\draw[cfg edge] (e)--node[above right]{false}(r);
+\draw[cfg edge] (l)--(j); \draw[cfg edge] (r)--(j);
+\end{tikzpicture}
+\caption{Neither arm dominates the join, but entry dominates every block.}
+\label{fig:pebble-diamond}
+\end{figure}
+
+Reachability begins at block zero and follows successor relationships to closure.
+An unreachable block can have predecessors; an unreachable cycle is the simplest counterexample to an in-degree test.
+Our verifier rejects all unreachable declared blocks.
+A future pass that folds a branch must therefore remove newly unreachable blocks and repair phis before it publishes a verified function.
+The current optimizer avoids that extra obligation by retaining the original CFG.
+
+\section{Compute the property the client needs}
+\label{sec:pebble-dom-equations}
+A block $D$ \term{dominates} a block $B$ when every entry-to-$B$ path contains $D$.
+The equations are $\dom(0)=\{0\}$ and, for other blocks,
+\[
+  \dom(B)=\{B\}\cup\bigcap_{P\in\Pred(B)}\dom(P).
+\]
+Algorithm~\ref{alg:pebble-dom} computes their greatest fixed point by beginning with an overestimate.
+The entry's fixed boundary is not recomputed from an empty predecessor intersection.
+
+\begin{algorithm}[htbp]
+\caption{Dominator sets for a verified, entry-reachable graph.}
+\label{alg:pebble-dom}
+\begin{pseudocode}
+\Require reachable blocks $V$, predecessor sets, predecessor-free entry 0
+\Ensure dominator set for every block
+\State $D[0]\gets\{0\}$; $D[B]\gets V$ for $B\ne0$
+\Repeat
+\State $changed\gets false$
+\ForAll{$B\ne0$}
+\State $new\gets\{B\}\cup\bigcap_{P\in\Pred(B)}D[P]$
+\If{$new\ne D[B]$}
+\State $D[B]\gets new$; $changed\gets true$
+\EndIf
+\EndFor
+\Until{not $changed$}
+\end{pseudocode}
+\end{algorithm}
+
+Each strict update removes at least one candidate dominator, so the finite process terminates.
+At termination the equations hold; the standard path characterization identifies this greatest solution with dominance on the reachable graph.
+Starting every set empty would select the wrong solution in the presence of cycles.
+Do not substitute a different initialization merely because the iteration still terminates.
+
+\section{Work the diamond and the loop}
+\label{sec:pebble-dom-worked}
+For the diamond, the predecessor sets are empty, $\{0\}$, $\{0\}$, and $\{1,2\}$.
+The final dominators are respectively $\{0\}$, $\{0,1\}$, $\{0,2\}$, and $\{0,3\}$.
+At the join, intersecting $\{0,1\}$ and $\{0,2\}$ retains only entry; adding the join itself yields $\{0,3\}$.
+Thus neither arm's result can be used as an ordinary join operand without a phi.
+
+For the loop graph $0\to1$, $1\to2$, $2\to1$, and $1\to3$, the final sets are $\{0\}$, $\{0,1\}$, $\{0,1,2\}$, and $\{0,1,3\}$.
+The header dominates the body and exit.
+A header phi may consequently use its own old value as an incoming operand from the body, provided the edge-use rule is satisfied.
+This property is used by the parallel-swap fixture.
+
+\section{Representation cost and invalidation}
+\label{sec:pebble-dom-cost}
+One sweep scans predecessor candidates for every nonentry block, costing $O(B^2)$ with one-word masks.
+For $R$ sweeps the cost is $O(RB^2)$.
+These small bounds describe the implementation, not an asymptotically competitive dominator algorithm for huge functions.
+A larger graph should use adjacency lists and a suitable dominator algorithm while preserving the same query meaning.
+
+Changing any terminator can change reachability, predecessors, and dominance.
+Even a value-only edit changes the function revision in the conservative cache policy.
+That policy sometimes recomputes unchanged graph facts, but it is easier to audit than a preservation declaration that quietly misses one edge mutation.
+
+\section{Exercises}
+\label{sec:pebble-nine-exercises}
+\begin{enumerate}
+\item \label{ex:pebble-shortcut} Add edge $0\to3$ to the diamond as a graph exercise. Recompute $\dom(3)$ and explain why a previously two-input join phi needs repair.
+\item \label{ex:pebble-unreachable-cycle} Give predecessor sets for an unreachable two-block cycle and explain why neither block has in-degree zero.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:pebble-nine-reading}
+Cytron and colleagues connect dominance to SSA placement and control dependence~\cite{cytron-1991-ssa}.
+Kildall supplies the broader dataflow perspective behind iterative equation solving~\cite{kildall-1973-dataflow}.

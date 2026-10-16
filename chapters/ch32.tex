@@ -1,0 +1,227 @@
+\chapter{Runtime Representation}\label{ch:runtime-representation}
+
+Compiled code is only half of a running program.
+The other half is the layout of values, objects, frames, and tables that code manipulates.
+Those layouts decide the cost of every field access, call, and type test.
+They also decide what the collector, the debugger, and the just-in-time compiler can observe.
+This chapter fixes representations that are simple, documented, and checkable.
+We start from scalar values, build up to objects and frames, and end with the maps that let tools walk the heap and the stack.
+
+\section{Values Need Tags or Proof}\label{sec:ch32-values}
+
+Every operation must know the kind of data it handles.
+That knowledge comes from a \term{tag} stored with the value or from a proof carried elsewhere.
+A tag costs bits and a test on each use.
+A proof costs analysis effort and a fallback when the proof fails.
+Consider adding two values in a dynamic language.
+With tags, the add handler checks both operands, unboxes integers, adds, and reboxes.
+With a proof, compiled code skips the checks and jumps to a slow path when a guard fails.
+Figure~\ref{fig:ch32-tagged-value} shows a tagged 64-bit value with two tag bits and a 62-bit payload.
+Small integers live directly in the payload.
+Heap references keep a distinct tag and a pointer to an object header.
+Table~\ref{tab:ch32-tagging} compares common tagging schemes by capacity, test cost, and collector support.
+The table is qualitative because bit budgets depend on the target.
+Pointer tagging steals low bits that alignment guarantees are zero.
+Not-a-number boxing reuses quiet patterns in floating-point values.
+Separate kind words avoid bit stealing at the cost of wider values.
+We adopt two-bit low tags for this chapter.
+Integers with tag \code{00} hold 62-bit signed payloads after an arithmetic shift.
+Heap references with tag \code{01} point to eight-byte-aligned headers.
+The remaining tags cover booleans with the value in the payload and a fallback box for floats and odd shapes.
+Every handler states which tags it accepts before it reads any payload.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=0.6cm and 0.8cm]
+\node[basic block] (tag) {tag\\ 2 bits};
+\node[basic block, right=of tag, minimum width=4.5cm] (pay) {payload\\ 62 bits: integer or pointer};
+\draw[cfg edge] (tag) -- (pay);
+\end{tikzpicture}
+\caption{A 64-bit tagged value keeps its kind in two low bits and its content in the remaining payload, so a type test is one mask and one compare.}
+\label{fig:ch32-tagged-value}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{Tagging schemes trade value capacity against test cost and collector complexity.}
+\label{tab:ch32-tagging}
+\begin{tabular}{llll}
+\toprule
+Scheme & Capacity & Test cost & Notes \\
+\midrule
+Low-bit tags & 62-bit integer & Mask and compare & Needs aligned pointers \\
+NaN boxing & 51-bit payload & Range compare & Shares float encoding \\
+Kind word & Full width & One load & Wider values everywhere \\
+Static proof & Full width & Guard on change & Needs fallback path \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Objects, Arrays, and Headers}\label{sec:ch32-objects}
+
+Objects add identity, layout, and method dispatch to plain values.
+An \term{object header} records the kind, the size, and the information the collector needs.
+A fixed-layout object stores fields at constant offsets after the header.
+An array stores a length and a run of identical elements.
+A hash-backed object supports changing field sets at the cost of lookup and storage overhead; whether a fixed layout is worthwhile depends on the workload.
+Algorithm~\ref{alg:ch32-layout} computes field offsets for fixed-layout classes with single inheritance.
+It assumes fields are listed from the root class down and each field declares a size and an alignment.
+It requires that the header size and alignment are already fixed.
+It returns the aligned offset of every field and the total object size.
+Padding appears wherever alignment forces a gap.
+Documenting each gap matters because padding is observable to native interfaces.
+Method dispatch needs one more structure.
+A \term{virtual table} holds one function pointer per method in a fixed order.
+Each object points at the table for its class.
+A call loads the table, loads the slot, and jumps indirectly.
+Inline caches, covered in a later chapter, memoize the frequent target at a call site.
+The layout rule stays small on purpose.
+Fixed offsets make field access one load.
+One header shape makes the collector walk every object with one routine.
+Subclasses append fields without moving inherited offsets, so inherited code keeps working.
+
+\begin{algorithm}[htbp]
+\caption{Field offset assignment for single-inheritance classes}\label{alg:ch32-layout}
+\begin{pseudocode}
+\Require header size $H$ and alignment, root-to-leaf field list $F$, power-of-two alignments, checked size arithmetic
+\Ensure offset $off(f)$ for each field and total size $S$
+\State $cur \gets H$
+\State $align_{max} \gets$ header alignment
+\ForAll{$f \in F$}
+\State $cur \gets$ round $cur$ up to alignment of $f$
+\State $off(f) \gets cur$
+\State $cur \gets cur +$ size of $f$
+\State $align_{max} \gets \max(align_{max},$ alignment of $f)$
+\EndFor
+\State $S \gets$ round $cur$ up to $align_{max}$
+\State \Return offsets and $S$
+\end{pseudocode}
+\end{algorithm}
+
+Using the maximum alignment works here because power-of-two alignments divide the largest one.
+For unrelated positive alignments, maximum is insufficient: the object alignment must be a common multiple, subject to the target's layout rules.
+This simple runtime lays out the flattened inherited field list and permits reuse of base tail padding; a runtime that preserves the complete base size must advance past that padding before appending derived fields.
+
+\section{Worked Example: Laying Out Two Classes}\label{sec:ch32-worked}
+
+We lay out a root class with two fields and a subclass that adds one field.
+The header occupies $16$ bytes with $8$-byte alignment.
+The root declares \code{a} as a $4$-byte integer with $4$-byte alignment and \code{b} as an $8$-byte reference with $8$-byte alignment.
+The subclass appends \code{c} as a $1$-byte flag with $1$-byte alignment.
+We run Algorithm~\ref{alg:ch32-layout} by hand.
+Initialization sets $cur = 16$ and maximum alignment to $8$.
+Field \code{a} is already $4$-aligned at $16$, so $off(a) = 16$ and $cur = 20$.
+Field \code{b} needs $8$-alignment, so $cur$ rounds up from $20$ to $24$, giving $off(b) = 24$ and $cur = 32$.
+Field \code{c} needs only $1$-alignment, so $off(c) = 32$ and $cur = 33$.
+The total rounds $33$ up to $8$-alignment, giving $S = 40$.
+The four bytes from $20$ to $23$ are padding.
+The seven bytes from $33$ to $39$ are trailing padding.
+The listing below shows the resulting map.
+\begin{irlisting}
+; object layout, header 16 bytes, total 40 bytes
+; off 0:  header.kind (8 bytes)
+; off 8:  header.size (8 bytes)
+; off 16: a (4 bytes)
+; off 20: padding (4 bytes)
+; off 24: b (8 bytes)
+; off 32: c (1 byte)
+; off 33: padding (7 bytes)
+\end{irlisting}
+A reader can verify each line independently.
+Removing \code{c} gives total $32$ with the same offsets for \code{a} and \code{b}.
+Widening \code{a} to $8$ bytes removes the interior padding and keeps total $40$.
+Both variants follow from the same rounding rule, which is the property tests should pin down.
+
+Figure~\ref{fig:visual-object-byte-map} draws the byte ranges to scale.
+The one-byte field $c$ is small enough to be easily lost in a schematic box diagram, so its boundaries at $32$ and $33$ are marked separately.
+Padding is storage reserved by the layout; it is not another field for the collector to scan as a reference.
+
+\input{figures/object-byte-map}
+
+
+Listing~\ref{lst:visual-align-offset} supplies the checked rounding step used by the layout algorithm.
+At offset $20$ with alignment $8$, the remainder is $4$, the padding is $4$, and the result is $24$.
+At offset $33$, the remainder is $1$, so final rounding adds $7$ bytes and gives $40$.
+
+\begin{listing}[htbp]
+  \inputminted{c}{example-code/visual-labs/layout.c}
+  \caption{Alignment rounding rejects zero alignment and checks host overflow before adding padding.}
+  \label{lst:visual-align-offset}
+\end{listing}
+
+This helper accepts any positive alignment, rather than assuming a power of two.
+It takes constant time under fixed-width host arithmetic and leaves its output unchanged on failure.
+A complete layout implementation must also check the addition of each field's size and apply the target runtime's inheritance and alignment rules.
+The test suite checks 8,192 small offset/alignment pairs against a byte-at-a-time oracle, plus zero alignment and overflow cases.
+
+\section{Frames and Stack Maps}\label{sec:ch32-frames}
+
+Activation records carry the same design pressure as objects.
+A \term{frame} holds saved registers, locals, spill slots, and outgoing arguments in a fixed order.
+The compiler emits a \term{stack map} that names every slot holding a reference at each safe point.
+The collector and the deoptimizer read that map instead of guessing.
+Callees address locals by frame-pointer offsets.
+Callers build argument areas to a documented alignment.
+A frame header records the return address, the previous frame pointer, and an index into the stack-map table.
+Figure~\ref{fig:ch32-tagged-value} already showed value tags; the same discipline applies here.
+Frames also contain unboxed nonreferences, return addresses, and saved machine state.
+At each safepoint, the map and tag conventions must identify every live managed reference, including those held in registers, without treating arbitrary integers as pointers.
+\begin{ccnote}[Maps are contracts]
+A missing map entry corrupts the heap walk as surely as a wrong offset corrupts a field load.
+Review map emission with the same care as code emission.
+\end{ccnote}
+To check maps, build a walker test with a three-deep call chain, force a collection at the deepest safepoint, and verify every live reference.
+A separate deoptimization test should suspend at the same point and reconstruct locals from recovery metadata; a GC root map alone need not describe nonreference locals.
+These are proposed integration tests, beyond the executable alignment helper above.
+
+\section{Calling Conventions and Native Boundaries}\label{sec:ch32-calling}
+
+Compiled code rarely runs alone.
+It calls libraries, receives callbacks, and crosses into code the compiler never saw.
+A \term{calling convention} fixes argument order, return channels, stack alignment, and caller versus callee duties.
+Common conventions pass the first few arguments in registers and the rest on the stack.
+The caller aligns the stack before the call and owns the outgoing area.
+The callee saves the registers it disturbs and restores them before returning.
+Variadic calls need extra rules because the callee cannot know the argument count from its own signature.
+Native boundaries add representation duties on top of control duties.
+A managed reference crossing into native code must stay visible to the collector for the whole call.
+Handles or pinning scopes provide that visibility.
+A native pointer entering managed code must be wrapped with a documented owner and lifetime.
+Callbacks need the reverse map: a small trampoline recovers the managed closure from a native function pointer.
+Test boundaries with round-trip calls that pass every supported kind in both directions.
+Each test asserts the returned value, the stack alignment on entry, and that no reference was collected mid-call.
+The \enquote{aligned on entry} check catches the defect where one convention assumes sixteen-byte alignment and the other guarantees only eight.
+
+\section{Implementation Notes and Complexity}\label{sec:ch32-implementation}
+
+Algorithm~\ref{alg:ch32-layout} runs in $O(F)$ where $F$ is the field count, using $O(F)$ space for offsets.
+Field access after layout is $O(1)$.
+A method call through a virtual table is $O(1)$ plus cache effects.
+Stack-map size grows with the number of safe points times the live references at each point.
+Sharing map encodings across nearby points keeps binaries small.
+Production runtimes compress maps, split hot and cold entries, and intern common shapes.
+They also align frames and headers for atomic access and vector loads.
+Each refinement keeps the documented offsets stable or versions them explicitly.
+A common pitfall changes a header without updating the collector, the walker, and the native interface together.
+Another pitfall stores untagged raw pointers in spill slots to save one instruction.
+The saved instruction costs a heap walk that cannot find the reference.
+We keep every reference tagged or mapped from the start.
+The layouts here feed the collector of the next chapter directly.
+Headers carry the mark bits and forwarding pointers it needs.
+Stack maps name the roots it must scan.
+% TODO(cite): need a primary reference for stack-map encoding trade-offs.
+
+\section{Exercises}\label{sec:ch32-exercises}
+
+\begin{enumerate}
+\item Lay out a class with fields of sizes $8$, $1$, and $4$ in that order under header $H = 16$, then reorder the fields to minimize padding and report both totals.\label{ex:ch32-layout-order}
+\item Decode the bit pattern with low tag \code{01} and payload $4096$ under the two-bit scheme, state whether it is an integer or a reference, and give the denoted value or address relation.\label{ex:ch32-decode-tag}
+\item Write a stack-map entry for a safe point with three live references and two integers, then describe a test that detects one wrong entry.\label{ex:ch32-map-test}
+\end{enumerate}
+
+\section{Further Reading}\label{sec:ch32-reading}
+
+Appel covers value and frame representation as part of code generation and runtime design~\cite{appel-1998-modern}.
+Morgan relates object layout and calling structure to optimization opportunities~\cite{morgan-1998-optimizing}.
+Safonov examines how representation choices affect trustworthy execution~\cite{safonov-2010-trustworthy}.
+The C standard draft specifies alignment, padding, and address rules for C-visible layouts~\cite{wg14-2011-c11}.

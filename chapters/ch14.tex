@@ -1,0 +1,224 @@
+\chapter{Constant Propagation}
+\label{ch:ch14-constant-propagation}
+
+Programmers write symbolic names where machines want concrete numbers.
+Loop bounds arrive as configuration constants, feature flags arrive as command-line booleans, and table sizes arrive as header macros.
+By the time control reaches the hot loop, many variables hold one fixed value along every path that matters.
+The problem of this chapter is to discover those values flow-sensitively, substitute them into uses, and fold the operations they enable.
+Discovery must be conservative: a variable becomes constant only when every reaching path agrees, and any disagreement demotes it permanently.
+Section~\ref{sec:ch14-lattice} defines the value domain, Section~\ref{sec:ch14-algorithm} propagates it, and Section~\ref{sec:ch14-worked} computes the diamond in Figure~\ref{fig:ch14-diamond} by hand.
+
+\section{A lattice of constant claims}
+\label{sec:ch14-lattice}
+
+A \term{constant lattice} for one variable holds top above every integer constant and every constant above bottom.
+Top means \enquote{not yet known to be anything}, which seeds every variable before analysis.
+A concrete constant such as $7$ means \enquote{known to be exactly this on all paths seen so far}.
+Bottom means \enquote{known not to be any single constant}, which covers disagreement as well as genuinely varying values.
+The meet of top with any value returns that value, because an unseen path contributes no evidence.
+The meet of equal constants returns that constant, because all evidence agrees.
+The meet of distinct constants returns bottom, because no one constant covers both.
+Bottom absorbs every operand of meet.
+An assignment can still establish a new constant at a later program point; the descending-chain statement applies to successive solver states at one fixed point.
+Table~\ref{tab:ch14-meet} tabulates the meet over representative pairs, and the \enquote{once bottom} rule is the column to memorize.
+
+Consider \code{d = 0} on the left arm and \code{d = load p} on the right arm.
+The left contributes constant $0$, the right contributes bottom because a load is not a known constant.
+Their meet is bottom, so the join block reports \code{d} as nonconstant.
+Substituting zero at the join would miscompile every execution taking the right arm.
+Now change the right arm to \code{d = 0} as well, and the meet of $0$ with $0$ stays $0$.
+Substitution at the join is then safe, and folding \code{t = d + 1} to $1$ follows.
+The lattice distinguishes these cases with one table lookup, which is why constant propagation scales where manual inspection does not.
+The \enquote{load means bottom} default is deliberately harsh: memory may hold a constant today and another tomorrow, and only alias analysis can soften it.
+We revisit that harshness in Section~\ref{sec:ch14-implementation} with SSA-based sparse variants.
+
+\begin{irlisting}
+; Diamond with agreeing and disagreeing arms for hand analysis
+; B1 branches on flag, B2 and B3 assign d and e, B4 uses both
+B1: br flag, B2, B3
+B2: d = 7
+B2: e = d + 1
+B2: jmp B4
+B3: d = 7
+B3: e = d * 2
+B3: jmp B4
+B4: use d
+B4: use e
+\end{irlisting}
+
+The listing sets up both outcomes in one graph: \code{d} agrees at $7$ on both arms, while \code{e} computes $8$ on the left and $14$ on the right.
+A tally that treats every multiply-defined variable as varying loses the agreement for \code{d}; flow-insensitive analyses need not make that particular approximation.
+A flow-sensitive propagation instead meets the arm values at $B4$ and keeps \code{d} constant while demoting \code{e}.
+The uses in $B4$ then fold for \code{d} and stay symbolic for \code{e}.
+No test run could establish this for all flags without enumerating the flag, yet the lattice does it in two passes.
+Algorithm~\ref{alg:ch14-constprop} is the engine, and Figure~\ref{fig:ch14-diamond} draws the graph it traverses.
+
+Transfer functions evaluate each operation in the lattice rather than in integers.
+Addition of two constants folds to their sum, addition with bottom yields bottom, and addition with top waits by returning top.
+A phi meets its arm values with the same table, which is why agreeing arms stay constant and disagreeing arms fall.
+A load, call, or volatile read returns bottom unless a trusted domain fact says otherwise.
+A store kills constant facts about aliased locations, conservatively demoting them to bottom.
+Monotonicity holds throughout: refining an input from top to constant to bottom never refines an output backward.
+Each scalar cell has height three; a state with $V$ cells has height $2V+1$, so the product still has finite height.
+\section{Forward propagation over the lattice}
+\label{sec:ch14-algorithm}
+
+\begin{algorithm}
+\caption{Forward constant propagation on the flat lattice}\label{alg:ch14-constprop}
+\begin{pseudocode}
+\Require entry-reachable CFG with predecessor-free entry, monotone transfers $\Tf{B}$, sound boundary $in_0$
+\Ensure $\In{B}$ and $\Out{B}$ over-approximate runtime values; constants may be substituted
+\State $\In{B} \gets \top$ and $\Out{B} \gets \top$ for every block $B$
+\State $\In{entry} \gets in_0$
+\State $W \gets$ all blocks in $G$
+\While{$W \neq \emptyset$}
+\State remove some $B$ from $W$
+\State $in \gets \meet_{P \in \Pred(B)} \Out{P}$, or $in_0$ if $B$ is entry
+\State $out \gets \Tf{B}(in)$
+\If{$in \neq \In{B}$ or $out \neq \Out{B}$}
+\State $\In{B} \gets in$
+\State $\Out{B} \gets out$
+\State add $\Succ(B)$ to $W$
+\EndIf
+\EndWhile
+\end{pseudocode}
+\end{algorithm}
+
+Algorithm~\ref{alg:ch14-constprop} seeds every block with top and descends toward constants and bottom.
+Seeding with top is the load-bearing choice: top contributes nothing to meets, so first evidence decides.
+Seeding with bottom would instead poison every meet immediately and report nothing constant anywhere.
+Each visit folds the block operations in lattice arithmetic and propagates the result along successors.
+A cell moves at most twice, from top to constant to bottom; a block with many cells can need many visits.
+Unknown runtime inputs must start at bottom, not top: lack of information about a parameter is not an unvisited path.
+Require definite assignment before each use, or model the language's uninitialized-value semantics explicitly.
+At a reachable use, a constant licenses substitution and bottom forbids it; top is a solver marker, not a runtime value that may be chosen arbitrarily.
+Substitution rewrites uses of constant variables to the constant and deletes the defining copy when dead-code analysis agrees.
+Folding then evaluates newly constant operations, which can turn branches into jumps and enable the cascade of the previous chapter.
+Morgan organizes redundancy and motion passes around exactly this discovered-constant feed, see~\cite{morgan-1998-optimizing}.
+
+Sparse conditional constant propagation, usually shortened to \term{SCCP}, improves on this dense form in two ways.
+It tracks values per SSA name rather than per program point, which removes most block visits.
+It also treats branches conditionally: an edge from a provably untaken arm contributes nothing to the meet at its join.
+An over-eager dense pass meets both arms even when the condition is constant, demoting variables that only disagree along dead paths.
+SCCP instead marks edges executable as constants emerge, and joins meet only over executable predecessors.
+The result finds more constants at lower cost, at the price of interleaving branch folding with propagation.
+We implement dense propagation first for clarity, then treat SCCP as the production upgrade in Section~\ref{sec:ch14-implementation}.
+Appel presents the executable-edge idea with the data structures it needs, see~\cite{appel-1998-modern}.
+\section{Worked example on the diamond}
+\label{sec:ch14-worked}
+
+We propagate by hand over Figure~\ref{fig:ch14-diamond} with the unknown input \code{flag} at bottom.
+The not-yet-assigned locals \code{d} and \code{e} start at top; both arms define them before any use.
+Block $B1$ passes these states through unchanged.
+Block $B2$ evaluates \code{d} to $7$ and \code{e} to $8$ by folding $7 + 1$.
+Block $B3$ evaluates \code{d} to $7$ and \code{e} to $14$ by folding $7 \times 2$.
+Block $B4$ meets \code{d} as $7 \meet 7 = 7$ and \code{e} as $8 \meet 14 = \bot$.
+Table~\ref{tab:ch14-meet} confirms each pair lookup, and Table~\ref{tab:ch14-trace} records the per-block lattice states across two passes.
+The hand arithmetic below checks every meet and every fold explicitly.
+
+\begin{figure}
+\begin{tikzpicture}
+\node[basic block] (b1) {B1: br flag};
+\node[basic block, below left=1.1cm and 0.7cm of b1] (b2) {B2: d = 7, e = 8};
+\node[basic block, below right=1.1cm and 0.7cm of b1] (b3) {B3: d = 7, e = 14};
+\node[basic block, below=2.4cm of b1] (b4) {B4: use d, use e};
+\draw[cfg edge] (b1) -- (b2);
+\draw[cfg edge] (b1) -- (b3);
+\draw[cfg edge] (b2) -- (b4);
+\draw[cfg edge] (b3) -- (b4);
+\end{tikzpicture}
+\caption{The constant-propagation diamond where \code{d} agrees at $7$ on both arms and \code{e} disagrees, so only \code{d} folds at the join.}
+\label{fig:ch14-diamond}
+\end{figure}
+
+\begin{table}
+\caption{Meet table for the flat constant lattice over representative values, read as row meet column.}
+\label{tab:ch14-meet}
+\begin{tabular}{lccc}
+\toprule
+Meet & Top & Constant c & Bottom \\
+\midrule
+Top & top & constant c & bottom \\
+Constant d & constant d & c if same else bottom & bottom \\
+Bottom & bottom & bottom & bottom \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}
+\caption{Lattice states for \code{d} and \code{e} at each block exit across two propagation passes.}
+\label{tab:ch14-trace}
+\begin{tabular}{lcc}
+\toprule
+Block & Pass 1 exit values & Pass 2 exit values \\
+\midrule
+B1 & d top, e top & d top, e top \\
+B2 & d 7, e 8 & d 7, e 8 \\
+B3 & d 7, e 14 & d 7, e 14 \\
+B4 & d 7, e bottom & d 7, e bottom \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Pass one visits $B1$ and holds top, visits $B2$ and folds to $(7, 8)$, visits $B3$ and folds to $(7, 14)$, then visits $B4$ and meets to $(7, \bot)$.
+Pass two revisits every block: $B1$ unchanged, $B2$ recomputes $(7, 8)$ identically, $B3$ recomputes $(7, 14)$ identically, and $B4$ remeets to $(7, \bot)$ identically.
+No value changes, so the worklist empties and the fixed point stands.
+Substitution replaces \code{d} by $7$ at its uses in $B4$ and folds any operation on it, for example \code{d + 1} to $8$.
+A \term{folding} step evaluates newly constant operations, which can turn branches into jumps and enable the cascade of the previous chapter.
+It leaves \code{e} symbolic because bottom forbids substitution.
+The \enquote{agreeing versus disagreeing} pattern is now a mechanical table lookup rather than an informal inspection.
+A second example worth tracing changes $B3$ to compute \code{e} as $8$ as well, after which $B4$ keeps $(7, 8)$ and both uses fold.
+
+The same graph exposes the dense-pass weakness that SCCP repairs.
+Suppose $B1$ branches on a flag that earlier propagation proves true, so the edge to $B3$ never executes.
+Dense propagation still meets $B3$ values into $B4$, demoting \code{e} to bottom even though no execution brings $14$ to the join.
+SCCP instead marks only the true edge executable, meets over executable predecessors alone, and keeps \code{e} at $8$.
+The difference matters whenever a flag guards a stale or exceptional arm with wild values.
+Dense form is safe in both cases, but infeasible paths can reduce its precision even when its final constants remain correct.
+Conditional form recovers the precision by refusing to pollute joins with dead arms.
+
+\section{Implementation notes and cost}
+\label{sec:ch14-implementation}
+
+A dense implementation stores one lattice cell per variable per block, updated by the block transfer on each visit.
+Let $N$ be blocks, $E$ edges, and $V$ variables.
+Each cell changes at most twice, yielding $O(N+EV)$ worklist visits with duplicate-free queue membership.
+A visit to $B$ additionally costs $O(V(|\Pred(B)|+1)+I_B)$ for dense meets and a scan of its $I_B$ bounded-arity instructions.
+Multiply visit counts by these costs rather than treating a whole-state update as one cell update.
+Memory is $O(N \cdot V)$ cells, which dominates for large functions and motivates the sparse upgrade.
+SSA-based sparse propagation stores one cell per SSA name globally, cutting memory to $O(V)$ names and visits to definition-use edges only.
+The executable-edge marking adds one flag per CFG edge with negligible cost.
+Safonov discusses bounding such passes so trusted builds stay predictable, see~\cite{safonov-2010-trustworthy}.
+
+Precision hazards cluster around memory, calls, and undefined behavior.
+A store through a pointer demotes every potentially aliased variable to bottom unless alias analysis refines the may-alias set.
+A call demotes globals and escaped locals for the same reason, unless interprocedural facts prove them preserved.
+Signed overflow folds only when the language standard defines wrapping for the type; otherwise the folder must preserve the trap or the undefined latitude explicitly.
+The C definition of sequence points, effective types, and trap representations governs each of these guards, see~\cite{wg14-2011-c11}.
+% TODO(cite): need a primary reference for Wegman-Zadeck conditional techniques beyond the four listed books.
+
+\section{Exercises}
+\label{sec:ch14-exercises}
+
+\begin{enumerate}
+\item \label{ex:ch14-hand-variant} Recompute Table~\ref{tab:ch14-trace} on Figure~\ref{fig:ch14-diamond} after changing $B3$ to \code{d = 8}.
+Show every meet with Table~\ref{tab:ch14-meet} and state which uses in $B4$ still fold.
+Then change $B1$ to branch on constant true and explain why dense propagation still demotes \code{d} while SCCP keeps it.
+Give the executable-edge set SCCP marks in each case.
+\item \label{ex:ch14-bottom-poison} Seed the nonboundary states of Algorithm~\ref{alg:ch14-constprop} with bottom instead of top and run it on Figure~\ref{fig:ch14-diamond}.
+Show why literal assignments still establish constants and why the diamond reaches the same result.
+Then analyze a loop whose preheader assigns \code{x = 7} and whose body leaves \code{x} unchanged.
+Show that the header equation $X=7\meet X$ admits both $7$ and bottom, and explain why the prescribed initialization selects the useful solution.
+\item \label{ex:ch14-sparse-build} Implement dense propagation and an SSA-based sparse variant for the diamond family with $V$ variables and two arms.
+Measure block visits and cell writes for $V$ set to $10$, $100$, and $1000$ with agreeing and disagreeing arms.
+Report where sparse wins, where dense ties, and how executable-edge marking changes the disagreeing case.
+Recommend which variant a just-in-time compiler should run under a tight time budget.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch14-reading}
+
+Appel implements the executable-edge marking that makes conditional propagation practical, see~\cite{appel-1998-modern}.
+Morgan shows how discovered constants feed redundancy elimination and code motion, see~\cite{morgan-1998-optimizing}.
+Safonov examines cost-bounded analysis design for trusted compilers, see~\cite{safonov-2010-trustworthy}.
+The C language definition states the overflow, aliasing, and sequencing rules that folding guards must respect, see~\cite{wg14-2011-c11}.

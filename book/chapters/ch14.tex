@@ -1,0 +1,95 @@
+\chapter{Implementing Useful Optimizations}
+\label{ch:pebble-optimization}
+
+The first optimization should expose weaknesses in the IR interface without requiring a second research project to justify it.
+Constant folding and conservative dead-code elimination meet that requirement.
+Together they exercise operand inspection, typed replacement, dependency traversal, tombstones, verification, and cross-client equivalence.
+
+\section{Fold only what the semantics permits}
+\label{sec:pebble-fold}
+The folder handles \code{add}, \code{mul}, and \code{lt} when both operand records are constants.
+It computes the result in the byte semantics and keeps the original result type.
+It does not infer values through phis, fold branches, exploit algebraic identities with unknown operands, or specialize the function for a test input.
+An input that is 9 in the demo remains arbitrary in the compiler contract.
+
+Repeated scans propagate new constants through dependency chains.
+For an acyclic expression built in operand-before-user order, one scan can fold every literal-only subexpression.
+The implementation still uses a fixed-point loop so the mechanism does not rely on that construction order across different blocks.
+Every successful fold changes an arithmetic or comparison opcode into a constant, and no phase changes it back.
+There are therefore at most $N$ successful folds.
+
+\begin{algorithm}[htbp]
+\caption{Monotone constant folding in the fixed instruction set.}
+\label{alg:pebble-fold}
+\begin{pseudocode}
+\Require verified function with total byte arithmetic
+\Ensure all directly constant-foldable supported operations become constants
+\Repeat
+\State $changed\gets false$
+\ForAll{live supported binary operations $v$}
+\If{both operands of $v$ are constant records}
+\State evaluate the operation with the specified arithmetic
+\State replace $v$ with a typed constant, preserving its ID and block
+\State clear unused fields; $changed\gets true$
+\EndIf
+\EndFor
+\Until{not $changed$}
+\end{pseudocode}
+\end{algorithm}
+
+Algorithm~\ref{alg:pebble-fold} has a simple $O(N^2)$ worst-case scan bound, excluding verification.
+A use-list worklist can avoid rescanning unrelated instructions, but only after the use lists have a correct update contract.
+The bounded implementation favors a scan whose termination argument fits beside its code.
+
+\section{Demand starts at observations and control}
+\label{sec:pebble-dce}
+The demand roots are every return value and every branch condition.
+Following a demanded instruction marks both operands, including both incoming operands of a demanded phi.
+The closure stops when a complete scan marks nothing new.
+Unmarked values become tombstones.
+Because every operation is pure and total, deleting such a definition does not remove an effect or trap.
+Keeping branch conditions and all terminators preserves the original execution paths and divergence behavior.
+
+A cycle of phis and arithmetic with no path to a return or branch condition is unmarked and can be removed.
+A cycle that determines a loop condition is marked and remains.
+This is a dependency argument, not the rule \enquote{delete everything whose result is not returned directly}.
+The marking loop performs at most $N$ strict additions to its marked set and has an $O(N^2)$ repeated-scan bound.
+
+\section{Work the transformation}
+\label{sec:pebble-opt-worked}
+Initially the running function returns value 7, which depends on values 3 and 6.
+Value 3 depends on input 1 and constant 2.
+Value 6 depends on constants 4 and 5.
+All seven values are initially demanded.
+Folding changes value 6 to constant 8, removing its operand edges.
+The next demand closure marks precisely $\{1,2,3,6,7\}$.
+Values 4 and 5 become tombstones.
+
+At input 250, value 3 is still 1 and value 7 is still 8.
+At input 9, they are still 16 and 128.
+The tests compare all 256 inputs before and after the transformation, then compare the lowered VM results as well.
+The local proof covers why each fold is valid; the finite tests check the implementation of that proof on the selected programs.
+
+\section{Toward richer propagation}
+\label{sec:pebble-sccp-extension}
+Sparse conditional constant propagation would add a value lattice and executable-edge state.
+A phi would merge only operands on executable incoming edges, and a discovered constant condition could reduce the edge set.
+That design introduces new obligations: unknown input is not an unvisited value, a newly executable edge must revisit dependent phis, and deleting dead blocks must repair every surviving phi.
+None of those facts follows from the current literal-only folder.
+
+The next useful pass should be chosen from a client need, not from a list of famous optimizations.
+For expression programs, local value numbering may expose more benefit than branch reasoning.
+For the loop fixtures, loop-aware constant propagation or identity simplification may be more useful.
+Each addition should keep the source oracle and both interpreters in the test loop.
+
+\section{Exercises}
+\label{sec:pebble-fourteen-exercises}
+\begin{enumerate}
+\item \label{ex:pebble-fold-count} Compile and optimize \code{(2+3)*(4+5)}. Predict the live value count and VM instruction count afterward, including the return.
+\item \label{ex:pebble-root} Explain why a value used only as a loop's branch condition is live even when the function's return value is constant.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:pebble-fourteen-reading}
+Kildall gives the foundational dataflow setting for more general propagation~\cite{kildall-1973-dataflow}.
+Cousot and Cousot explain why abstract-domain meaning and sound transfer functions matter when extending beyond literal evaluation~\cite{cousot-1977-abstract}.

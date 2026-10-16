@@ -1,0 +1,253 @@
+\chapter{Value Numbering and Redundancy}
+\label{ch:ch16-value-numbering-redundancy}
+
+\section{Programs Repeat Themselves}
+\label{sec:ch16-repeated-work}
+
+Real programs compute the same value many times.
+Address arithmetic reappears in every array reference inside a loop.
+A common subexpression shows up once in the source and twice in the expanded IR.
+Copy propagation and inlining create fresh duplicates that the programmer never wrote.
+Each duplicate costs time, registers, and energy, and each one is an opportunity the compiler can take without changing what the program means.
+The difficulty is recognizing duplicates reliably.
+Textual identity is too weak, because \code{a + b} and \code{b + a} compute the same value with different text.
+Textual identity is also too strong in the other direction, because two copies of \code{x + y} compute different values when \code{x} changes between them.
+We need a notion of sameness that follows values through the program rather than comparing characters.
+\term{Value numbering} gives every computed value a number, and two expressions share a number only when the compiler can prove they produce the same result.
+A repeated expression with a known number is a candidate for \term{redundancy elimination}; replacement also needs a still-available value and compatible effects.
+This chapter builds that signal from the ground up, starting inside a single basic block and then reaching across control flow.
+The payoff is practical as well as conceptual.
+Value numbering subsumes local common-subexpression elimination, copy propagation, and constant folding in one uniform mechanism.
+It also prepares the ground for Chapter~\ref{ch:ch17-code-motion}, where expressions that are redundant on only some paths need code to move rather than merely disappear.
+
+\section{Giving Equal Values Equal Numbers}
+\label{sec:ch16-naming-values}
+
+A \term{value number} names a runtime value rather than a storage location.
+The variable \code{a} may hold different values at different points, so it carries different numbers at those points.
+Two variables carry the same number at some point only when they are guaranteed to hold equal values there.
+Constants receive numbers too, because folding \code{2 + 3} into \code{5} is the same phenomenon as recognizing that \code{a + b} appeared before.
+The numbering starts by assigning fresh, distinct numbers to every variable and constant that has no known history.
+Each new operation then forms a key from its operator and the value numbers of its operands.
+When addition is commutative, the key sorts its operand numbers so that \code{a + b} and \code{b + a} form the same key.
+A hash table maps each key seen so far to the number it was given.
+A repeated key means a repeated value, and the compiler replaces the second computation with a copy from the first.
+Replacements chain naturally, because a copied variable carries the number of its source.
+The compiler asks one question at every expression, namely \enquote{have we computed this value before under these operand numbers}.
+Everything else in the algorithm is bookkeeping that keeps that question honest.
+The bookkeeping matters because a stale entry lies.
+An assignment to \code{x} changes the value held in that variable, not values already computed from its former contents.
+Expression keys over immutable value numbers can remain; a variable that has been overwritten must cease to represent its old number.
+A store changes what a future load may return, not a scalar value already loaded into a temporary.
+The local algorithm below handles pure, total scalar operations; memory numbering needs the additional state described in Chapter~\ref{ch:ch20-alias-analysis}.
+
+\section{Numbering One Block at a Time}
+\label{sec:ch16-local-numbering}
+
+\term{Local value numbering} processes one basic block from top to bottom.
+Straight-line code has no joins and no loops, so every earlier statement dominates every later one.
+That property removes the dominance problem, but does not make the analysis complete for all algebraic equalities.
+The algorithm keeps three maps while it scans.
+One map sends each live expression key to its value number.
+The second map sends each variable to the number of the value it currently holds.
+The third records the current variable holders of each number, so replacement never reads an overwritten representative.
+Listing~\ref{lst:ch16-block} shows a block that exercises every behavior of the algorithm.
+It contains a genuine repetition, a repetition hidden by commutativity, a constant expression, a kill, and a repetition that survives the kill.
+
+\begin{irlisting}[caption={A block with local redundancies, a kill, and a surviving repetition.},label={lst:ch16-block}]
+; x and y hold unknown inputs on entry
+t1 = x + y
+t2 = y + x
+t3 = 2 + 3
+t4 = t1 * t3
+x = 0
+t5 = x + y
+t6 = t1 * t3
+\end{irlisting}
+
+The first two lines compute the same sum in different orders, so the second line is redundant once commutativity is canonicalized.
+The third line folds to the constant \code{5}.
+The fourth line builds a product keyed by the numbers of \code{t1} and \code{5}.
+The assignment to \code{x} removes \code{x} from the holders of its old number and gives it the number for zero.
+The sum in line six therefore needs a fresh number, because its operand changed.
+The product in line seven still matches, because neither \code{t1} nor \code{5} changed.
+A purely textual comparison would miss the second line and would wrongly flag the sixth.
+Value numbers get both cases right for the price of one hash lookup per expression.
+Algorithm~\ref{alg:ch16-lvn} states the procedure precisely.
+
+\begin{algorithm}
+  \caption{Local value numbering with current value holders}\label{alg:ch16-lvn}
+  \begin{pseudocode}
+    \Require block $B$ of pure total scalar assignments with defined inputs
+    \Ensure reuse only equal values with a current holder or literal representative
+    \State $keynum \gets$ empty map from expression key to value number
+    \State $varnum \gets$ empty map from variable to value number
+    \State $holders \gets$ empty map from number to set of current variables
+    \For{each instruction $I$ in $B$ in order}
+      \State record destination $v$; give unknown input variables fresh numbers and register their holders
+      \State read operand numbers before changing $varnum[v]$
+      \State fold literal-only operations; intern typed literals by value
+      \State copies use their source number; other operations use a canonical typed key
+      \State $n \gets$ source number for a copy; otherwise look up or intern the value's key in $keynum$
+      \If{$n$ has a literal representative or a nonempty holder set}
+        \State replace $I$ with that literal or a copy from a current holder of $n$
+      \EndIf
+      \State remove $v$ from its former holder set, if any
+      \State $varnum[v] \gets n$; add $v$ to $holders[n]$
+    \EndFor
+  \end{pseudocode}
+\end{algorithm}
+
+The algorithm assumes bounded-arity, pure total operations and no hidden definitions.
+Keys include result type and semantic flags; commutativity is used only when valid for that operation.
+Its invariant is that every variable in $holders[n]$ currently contains the value denoted by $n$.
+Operand numbers are read before the destination mapping changes, so \code{x = x + y} is handled correctly.
+If a key is known but has no surviving holder, keep the computation and register its destination as a new holder of the old number.
+For example, after \code{t = a + b; t = 0}, a later \code{u = a + b} cannot become \code{u = t}.
+Across an unmodeled effect, conservatively end the numbering region and start fresh; extending the region requires explicit memory and exception semantics.
+
+\section{Worked Example: Numbering the Block}
+\label{sec:ch16-worked-numbering}
+
+We now run Algorithm~\ref{alg:ch16-lvn} on Listing~\ref{lst:ch16-block} by hand.
+Inputs \code{x} and \code{y} receive the fresh numbers $1$ and $2$.
+The key for line one is $plus(1, 2)$, which is new, so it receives number $3$ and \code{t1} maps to $3$.
+Line two builds $plus(2, 1)$, and canonicalization sorts the operands into $plus(1, 2)$.
+That key is present with number $3$, so line two becomes the copy \code{t2 = t1} and \code{t2} maps to $3$.
+Line three folds the literal expression $2+3$ into the constant \code{5}, which receives the fresh number $4$, and \code{t3} maps to $4$.
+Line four builds $mul(3, 4)$, which is new, so it receives number $5$ and \code{t4} maps to $5$.
+Line five assigns the constant \code{0}, which receives number $6$, and \code{x} now maps to $6$.
+The holder update removes \code{x} from number $1$; the key $plus(1,2)$ remains valid and its result is still held by \code{t1} and \code{t2}.
+Line six builds $plus(6, 2)$, which is absent, so it receives number $7$ and \code{t5} maps to $7$.
+Line seven builds $mul(3,4)$ and finds number $5$ still held by \code{t4}, so it becomes the copy \code{t6 = t4}.
+Table~\ref{tab:ch16-trace} records the full trace for checking.
+
+\begin{table}
+  \centering
+  \caption{Value numbers assigned while scanning Listing~\ref{lst:ch16-block} from top to bottom.}
+  \label{tab:ch16-trace}
+  \begin{tabular}{llll}
+    \toprule
+    Line & Instruction & Key & Action \\
+    \midrule
+    1 & \code{t1 = x + y} & $plus(1,2)$ & new number 3 \\
+    2 & \code{t2 = y + x} & $plus(1,2)$ & reuse 3, copy \code{t1} \\
+    3 & \code{t3 = 2 + 3} & const 5 & new number 4 \\
+    4 & \code{t4 = t1 * t3} & $mul(3,4)$ & new number 5 \\
+    5 & \code{x = 0} & const 0 & new number 6, update holder \\
+    6 & \code{t5 = x + y} & $plus(6,2)$ & new number 7 \\
+    7 & \code{t6 = t1 * t3} & $mul(3,4)$ & reuse 5, copy \code{t4} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Two replacements survive, one folding happens, and one near miss is correctly rejected.
+The rewritten block computes three fewer operations than the original.
+Updating the mapping of \code{x} in line five is essential.
+The new number $6$ makes the next addition's key differ from $plus(1,2)$ even if the old expression key remains in the table.
+Deleting that old key is conservative rather than necessary in this value-numbered example; reusing an overwritten representative variable would be the real hazard.
+When in doubt, kill more and let a later pass clean up, because a wrong reuse miscompiles while a missed reuse merely runs slower.
+
+\section{Reaching Across Basic Blocks}
+\label{sec:ch16-global-numbering}
+
+Local numbering stops at block boundaries, but redundancy does not.
+Figure~\ref{fig:ch16-join} shows the classic cross-block shape.
+The entry block computes \code{a + b}, both branches compute it again, and the join block computes it a third time.
+The computation in the join block is redundant only when every path into the join carries the same value.
+Here both branches recompute rather than inherit, yet each branch computation is itself redundant with the entry.
+Local numbering alone cannot see the entry computation from another block; a dominator-scoped or global pass can replace all three later additions with the entry value.
+\term{Global value numbering} reasons about all paths at once instead of rescanning each block in isolation.
+The standard formulation runs over SSA form, where each variable has a single definition and each join carries explicit \code{phi} functions.
+Matching operations and operand numbers can establish equal SSA values; phi comparison must also preserve the correspondence between inputs and incoming edges.
+Equality does not imply availability: a replacement definition must dominate the use, or the pass must construct a suitable phi from edge-available values.
+Congruence propagates through the SSA graph the way it propagates down a block, except that joins need a fixed point.
+% TODO(cite): primary reference for SSA-based global value numbering and its congruence closure.
+An expression is \term{available} at a point when every path from the entry computes it without redefining its operands afterward.
+Availability is a forward dataflow fact, and the join-block computation above is redundant exactly when its expression is available there.
+Table~\ref{tab:ch16-kinds} classifies the three shapes of redundancy and the remedy each one needs.
+
+\begin{figure}
+  \centering
+  \begin{tikzpicture}[node distance=14mm and 18mm]
+    \node[basic block] (ch16b0) {t0 = a + b};
+    \node[basic block,below left=of ch16b0] (ch16b1) {t1 = a + b};
+    \node[basic block,below right=of ch16b0] (ch16b2) {t2 = a + b};
+    \node[basic block,below right=of ch16b1] (ch16b3) {t3 = a + b};
+    \draw[cfg edge] (ch16b0) -- (ch16b1);
+    \draw[cfg edge] (ch16b0) -- (ch16b2);
+    \draw[cfg edge] (ch16b1) -- (ch16b3);
+    \draw[cfg edge] (ch16b2) -- (ch16b3);
+  \end{tikzpicture}
+  \caption{The join block recomputes a sum available on every path, so it is fully redundant once the branches reuse the entry value.}
+  \label{fig:ch16-join}
+\end{figure}
+
+\begin{table}
+  \centering
+  \caption{Three shapes of redundancy differ in where the earlier computation sits and what fix each one needs.}
+  \label{tab:ch16-kinds}
+  \begin{tabular}{lll}
+    \toprule
+    Shape & Where the duplicate sits & Remedy \\
+    \midrule
+    Local & Same basic block & Copy from the first computation \\
+    Global & Every path to the use & Dataflow availability plus reuse \\
+    Partial & Some paths to the use & Insert on missing paths, then reuse \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The third row is deliberately unresolved here.
+Partial redundancy needs code to move, not just code to vanish, and Chapter~\ref{ch:ch17-code-motion} takes up that problem.
+Global numbering also interacts with the kills discussed earlier.
+A call or a possibly aliasing store inside one branch ends availability for expressions it might redefine.
+Precision therefore depends on the alias answers of Chapter~\ref{ch:ch20-alias-analysis}, and production compilers rerun numbering after inlining precisely because new paths create new redundancies.
+
+\section{Implementation Notes}
+\label{sec:ch16-implementation}
+
+For $n$ bounded-arity instructions, the scalar algorithm takes expected $O(n)$ time and $O(n)$ space with hash tables and constant-time holder insertion, removal, and representative selection.
+Store a direct holder-list link for each variable so overwriting a variable does not require searching a set.
+No expression-table scan is needed on a scalar assignment.
+This bound assumes bounded-size keys and constant-time arithmetic; arbitrary-precision folding needs its own arithmetic cost.
+Commutative canonicalization should sort operand numbers once at key construction.
+Constant folding belongs inside key construction too, so that \code{2 + 3} and \code{5} meet in the table rather than in a separate pass.
+Associative and distributive laws are tempting but dangerous.
+Reassociation changes rounding for floating-point values and changes trapping behavior for integers near overflow, so keep the key builder to identities the language guarantees.
+Production compilers run value numbering on SSA with hash consing, which shares one table entry per distinct expression across the whole function.
+% TODO(cite): modern production GVN designs and their predicate handling.
+They may use predicates from branch conditions, so a path known to have \code{x} nonzero admits simplifications unavailable elsewhere.
+Memory expressions need versioning against stores, which turns loads into keyed expressions over an abstract memory state.
+Global complexity depends on the chosen congruence solver, loop processing, and memory model; the local linear bound does not establish a bound for those extensions.
+Start with the local algorithm, add SSA-based global numbering, and only then reach for predicates and memory versioning.
+
+\section{Exercises}
+\label{sec:ch16-exercises}
+
+\begin{enumerate}
+  \item \label{ex:ch16-trace-kill}
+  Number the following block by hand with Algorithm~\ref{alg:ch16-lvn}.
+  Give the value number of every variable after each line, state which lines become copies, and show the final rewritten block.
+  \code{p = a + b}, \code{q = p + c}, \code{a = b}, \code{r = a + b}, \code{s = p + c}.
+  Explain why overwriting \code{a} does not invalidate the value already held in \code{p}, and identify the surviving holder used for the final replacement.
+  \item \label{ex:ch16-commutative-miss}
+  Give a three-line block where a purely textual common-subexpression pass finds nothing but value numbering with canonicalization removes one computation.
+  Run both the textual pass and Algorithm~\ref{alg:ch16-lvn} on your block and show the two different outputs.
+  Then insert an assignment that changes a shared operand before the repeated expression, rerun the algorithm, and explain why its key changes.
+  \item \label{ex:ch16-global-availability}
+  Draw a CFG with an entry block, two branch blocks, and a join block where the entry computes \code{m * n}, only the left branch recomputes it, and the join computes it again.
+  Compute the available expressions at the join by hand and decide whether the join computation is fully redundant.
+  Explain why no insertion is needed while the entry computation remains.
+  Then remove the entry computation, recompute availability, and identify the missing-path insertion needed for partial redundancy elimination, assuming pure total multiplication.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch16-further-reading}
+
+Morgan's \emph{Building an Optimizing Compiler} treats redundancy elimination as a core optimization with attention to its dataflow foundations~\cite{morgan-1998-optimizing}.
+Read it for how availability and related facts connect local rewriting to whole-function reasoning.
+Appel's \emph{Modern Compiler Implementation in ML} places these ideas inside a complete compiler where ordering among passes matters~\cite{appel-1998-modern}.
+Use it to see where numbering fits relative to SSA construction and later cleanup passes.
+Safonov's \emph{Trustworthy Compilers} discusses what must hold for an optimization to preserve meaning~\cite{safonov-2010-trustworthy}.
+Consult it before extending the key builder with algebraic laws that the source language does not guarantee.

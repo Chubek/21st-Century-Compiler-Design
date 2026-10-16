@@ -1,0 +1,215 @@
+\chapter{Alias and Pointer Analysis}
+\label{ch:ch20-alias-analysis}
+
+\section{Two Names, One Cell}
+\label{sec:ch20-two-names}
+
+Every optimization that touches memory must answer one question first.
+Do these two references access overlapping bytes?
+If \code{*p} and \code{*q} name the same cell, then a store through \code{q} changes the value a later load through \code{p} returns.
+If they never overlap, the load is independent of the store and all the machinery of earlier chapters applies unchanged.
+Guessing wrong in either direction hurts.
+Assuming independence when the locations overlap miscompiles.
+Assuming overlap when the locations are disjoint kills motion, numbering, and scheduling for no reason.
+\term{Alias analysis} computes, for each pair of references, whether they may, must, or cannot reach the same location.
+\term{Pointer analysis} computes, for each pointer, the set of abstract objects it may target.
+Intersecting points-to sets indicate possible aliasing; abstraction and lost path correlations can make that intersection a false positive.
+Disjoint sound sets prove no alias within the memory model being analyzed.
+Precision is undecidable in general, so every analysis approximates.
+The rule for soundness is that a \term{may} answer must over-approximate: it must report overlap whenever overlap is possible, even at the cost of false alarms.
+A \term{must} answer must under-approximate: it may claim identity only when identity holds on every execution.
+This chapter builds a small but honest analysis, classifies its answers, shows how clients consume them, and explains what more expensive analyses buy.
+
+\section{May, Must, and Cannot}
+\label{sec:ch20-relations}
+
+Distinguish semantic relations from conservative query answers.
+Semantically, two accesses may alias when some execution makes their byte ranges overlap.
+An analysis answer of \term{may-alias} means that overlap has not been ruled out; it need not supply such an execution.
+Here \term{must-alias} means equal starting addresses on every relevant execution; access sizes must be checked separately.
+\term{No-alias} holds when no execution overlaps them.
+May-alias is the workhorse, because it gates every motion and reuse: a store kills a load exactly when the two may alias.
+Must-alias supports forwarding when an ordinary dominating store supplies all bytes of the load, with compatible representation and no intervening clobber.
+No-alias is the prize, because it restores the full power of value-based reasoning to memory.
+Consider three tiny situations.
+After \code{p = \&x}, the expressions \code{*p} and \code{x} must alias, since every execution binds \code{p} to \code{x}.
+After a join where one branch sets \code{p = \&x} and the other sets \code{p = \&y}, the pair \code{*p} and \code{x} may alias but does not must alias.
+After \code{p = \&x} followed by \code{q = \&y} for distinct locals \code{x} and \code{y}, the pair \code{*p} and \code{*q} cannot alias.
+Distinct locals, distinct globals, and distinct heap allocation sites give the analysis its base facts of separation.
+Everything else is propagation of those facts through assignments, joins, and calls.
+Two design axes separate the many published analyses.
+\term{Flow sensitivity} distinguishes program points, so a pointer can target \code{x} before an assignment and \code{y} after it.
+\term{Context sensitivity} distinguishes call sites, so a helper called with \code{\&x} in one place and \code{\&y} in another keeps the two cases apart.
+Flow-insensitive and context-insensitive analyses merge all of this information into one global answer per pointer.
+They are cheaper and less precise, and they are the right starting point for a first implementation.
+Chapter~\ref{ch:ch21-memory-optimization} builds its load and store optimizations directly on the answers defined here.
+% TODO(cite): primary references for inclusion-based and unification-based pointer analyses.
+
+\section{A Flow-Insensitive Inclusion Analysis}
+\label{sec:ch20-inclusion}
+
+The simplest useful analysis treats the program as a bag of constraints and solves them to a fixed point.
+Each variable \code{v} gets a \term{points-to set} $\mathit{pts}(v)$ holding the abstract objects \code{v} may target.
+Each kind of statement contributes one constraint.
+An address assignment \code{p = \&x} adds the object \code{x} to $\mathit{pts}(p)$.
+A copy \code{p = q} adds everything in $\mathit{pts}(q)$ to $\mathit{pts}(p)$.
+A load \code{p = *q} adds, for every object \code{o} in $\mathit{pts}(q)$, everything in $\mathit{pts}(o)$ to $\mathit{pts}(p)$.
+A store \code{*p = q} adds, for every object \code{o} in $\mathit{pts}(p)$, everything in $\mathit{pts}(q)$ to $\mathit{pts}(o)$.
+The inclusion direction matters: information flows from right to left along assignments, and sets only grow.
+Because sets only grow, iterating the constraints in any order reaches the same least fixed point.
+Listing~\ref{lst:ch20-constraints} gives the example we will solve by hand.
+
+\begin{irlisting}[caption={Five statements whose points-to constraints interact through two copies.},label={lst:ch20-constraints}]
+p = &x
+q = &y
+p = q
+r = p
+s = &x
+\end{irlisting}
+
+The constraints read directly off the statements.
+First, $\{x\} \subseteq \mathit{pts}(p)$, $\{y\} \subseteq \mathit{pts}(q)$, and $\{x\} \subseteq \mathit{pts}(s)$.
+Second, $\mathit{pts}(q) \subseteq \mathit{pts}(p)$ from the copy \code{p = q}.
+Third, $\mathit{pts}(p) \subseteq \mathit{pts}(r)$ from the copy \code{r = p}.
+Algorithm~\ref{alg:ch20-points-to} solves constraints of this form with a worklist.
+
+\begin{algorithm}
+  \caption{Worklist solver for inclusion points-to constraints}\label{alg:ch20-points-to}
+  \begin{pseudocode}
+    \Require finite closed-world constraints over pointer cells and abstract objects
+    \Ensure least fixed point of all points-to sets
+    \State set every $\mathit{pts}(v)$ to $\emptyset$
+    \State place every constraint on the worklist $W$
+    \While{$W \neq \emptyset$}
+      \State remove a constraint $c$ from $W$
+      \State evaluate $c$ using current sets, registering every set read as a dependency
+      \State union its contributions into the destination sets
+      \If{some target set gained a new object}
+        \State add every constraint reading that set to $W$
+      \EndIf
+    \EndWhile
+  \end{pseudocode}
+\end{algorithm}
+
+The algorithm assumes a closed world of abstract objects: locals, globals, and one object per allocation site.
+Each pointer-valued object also has a points-to set describing its stored contents.
+For a load \code{p = *q}, register reads of $\mathit{pts}(q)$ and every $\mathit{pts}(o)$ for $o\in\mathit{pts}(q)$.
+If $q$ later gains a target, revisit the load, register the new dependency, and immediately propagate the target's existing contents.
+For a store \code{*p = q}, register reads of both pointer sets and update every object currently in $\mathit{pts}(p)$.
+Missing a newly discovered dependency can leave a load permanently stale even after its target's contents grow.
+Keeping obsolete dependency registrations is safe; it only causes extra work.
+Unknown external pointers require an explicit unknown-object policy or conservative initial sets; an empty set must not stand for an arbitrary external address.
+It ignores control flow entirely, including the order of statements and the conditions on branches.
+That choice is the source of both its speed and its imprecision.
+Termination follows because each set grows monotonically and the universe of objects is finite.
+Each constraint re-enters the worklist only when an input set grows, so total work stays proportional to the number of propagations.
+
+\section{Worked Example: Solving the Constraints}
+\label{sec:ch20-worked-solving}
+
+We solve Listing~\ref{lst:ch20-constraints} by hand, tracking every set after each round.
+Initially all sets are empty: $\mathit{pts}(p) = \emptyset$, $\mathit{pts}(q) = \emptyset$, $\mathit{pts}(r) = \emptyset$, and $\mathit{pts}(s) = \emptyset$.
+Round one applies the three address constraints.
+The statement \code{p = \&x} sets $\mathit{pts}(p) = \{x\}$.
+The statement \code{q = \&y} sets $\mathit{pts}(q) = \{y\}$.
+The statement \code{s = \&x} sets $\mathit{pts}(s) = \{x\}$.
+For this trace, process only address constraints in round one and defer copies to round two; thus $\mathit{pts}(r)$ is still empty.
+Round two propagates the copies with the newly grown inputs.
+The copy \code{p = q} adds $\mathit{pts}(q) = \{y\}$ to $\mathit{pts}(p)$, giving $\mathit{pts}(p) = \{x, y\}$.
+The copy \code{r = p} adds the current $\mathit{pts}(p) = \{x, y\}$ to $\mathit{pts}(r)$, giving $\mathit{pts}(r) = \{x, y\}$.
+Round three rechecks every constraint against the final sets.
+The copy \code{p = q} contributes nothing new, the copy \code{r = p} contributes nothing new, and the address constraints are already satisfied.
+The fixed point is $\mathit{pts}(p) = \{x, y\}$, $\mathit{pts}(q) = \{y\}$, $\mathit{pts}(r) = \{x, y\}$, and $\mathit{pts}(s) = \{x\}$.
+Notice the deliberate imprecision: the statement \code{p = q} overwrites \code{p} in execution order, so a flow-sensitive analysis would report $\mathit{pts}(p) = \{y\}$ afterward.
+Our flow-insensitive result $\{x, y\}$ keeps the stale \code{x}, which is sound but weaker.
+Table~\ref{tab:ch20-queries} turns the fixed point into alias answers for the queries clients actually ask.
+
+\begin{table}
+  \centering
+  \caption{Alias answers derived from the fixed point by intersecting target sets.}
+  \label{tab:ch20-queries}
+  \begin{tabular}{lll}
+    \toprule
+    Query pair & Shared targets & Answer \\
+    \midrule
+    \code{*p} versus \code{*q} & $y$ & may-alias \\
+    \code{*r} versus \code{x} & $x$ & may-alias \\
+    \code{*q} versus \code{*s} & none & no-alias \\
+    \code{*p} versus \code{*s} & $x$ & may-alias \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The third row shows the analysis earning its keep: \code{q} targets only \code{y} while \code{s} targets only \code{x}, so a store through \code{q} never disturbs a load through \code{s}.
+The first row is a genuine possible alias: after \code{p = q}, both point to \code{y}.
+The fourth row shows the loss of flow sensitivity: at the listing's end, \code{p} points to \code{y} and \code{s} to \code{x}, but the merged set for \code{p} retains its earlier target.
+Figure~\ref{fig:ch20-merge} shows why merging at joins forces this conservatism even in a flow-sensitive setting.
+
+\begin{figure}
+  \centering
+  \begin{tikzpicture}[node distance=14mm and 20mm]
+    \node[basic block] (ch20e) {E: p = \&x; q = \&y};
+    \node[basic block,below left=of ch20e] (ch20t) {T: p = q};
+    \node[basic block,below right=of ch20e] (ch20f) {F: };
+    \node[basic block,below right=of ch20t] (ch20j) {J: r = p};
+    \draw[cfg edge] (ch20e) -- (ch20t);
+    \draw[cfg edge] (ch20e) -- (ch20f);
+    \draw[cfg edge] (ch20t) -- (ch20j);
+    \draw[cfg edge] (ch20f) -- (ch20j);
+  \end{tikzpicture}
+  \caption{The join block sees both bindings of the pointer, so its target set is the union of the two branches.}
+  \label{fig:ch20-merge}
+\end{figure}
+
+At block $J$, the pointer \code{p} targets \code{y} along the left path and \code{x} along the right path.
+Any analysis that merges paths reports $\{x, y\}$, and only a path-sensitive analysis keeps the two cases apart.
+Path sensitivity is precise but expensive, so most compilers accept the merge and spend their budget on context sensitivity instead.
+
+\section{Implementation Notes}
+\label{sec:ch20-implementation}
+
+Let $P$ count pointer cells, including pointer-valued objects, $O$ count abstract objects, and $C$ count constraints.
+At most $PO$ distinct memberships can be added.
+A simple reference solver can rescan all constraints until a sweep adds nothing: with $K=\lceil O/w\rceil$ words per set, one sweep costs at most $O(COK)$ for the load and store constraints, and at most $PO+1$ sweeps are needed.
+This loose bound belongs to that reference implementation; efficient inclusion solvers use dynamic copy edges and delta propagation rather than repeatedly scanning every target set.
+% TODO(cite): published complexity bounds for inclusion-based points-to analysis.
+Sparse representations change the constant factors dramatically: bitsets for points-to sets, difference propagation so only new objects travel, and offline constraint-graph collapsing before solving.
+Context insensitivity is the main precision lever after sparsity.
+Cloning the analysis per call site, or summarizing each procedure once and instantiating the summary per caller, recovers the common case where a helper is called with different objects.
+Must-alias and no-alias answers need extra care at scale.
+Intersecting may-points-to sets does not establish must-alias: a shared abstract allocation site may represent distinct live objects.
+Equal singleton targets justify must-alias only when the target denotes one concrete object and both references select the same offset on every relevant execution.
+Type-based separation must follow the source language's access rules, including C's character-type, aggregate, union, and effective-type cases, rather than a blanket test for unequal types.
+% TODO(cite): effective-type and aliasing rules in the C specification.
+But type rules have exceptions, unsafe casts break them silently, and a wrong no-alias answer miscompiles, so verify the language rules before enabling type-based reasoning.
+Heap abstraction is the other scaling decision.
+One object per allocation site is the standard choice: precise enough to separate unrelated structures, coarse enough to stay small.
+Field sensitivity refines each object by member, which pays off in object-oriented code with many small fields.
+
+\section{Exercises}
+\label{sec:ch20-exercises}
+
+\begin{enumerate}
+  \item \label{ex:ch20-solve-by-hand}
+  Solve the constraints for \code{a = \&m}, \code{b = a}, \code{c = \&n}, \code{*b = c}, and \code{d = *a} with Algorithm~\ref{alg:ch20-points-to}.
+  Show every points-to set after each round until the fixed point.
+  Give $\mathit{pts}(d)$ and explain which store constraint placed each of its members there.
+  \item \label{ex:ch20-must-vs-may}
+  Give a three-block CFG where \code{*p} and \code{z} must alias at the end of the left branch but only may alias at the join.
+  Compute the points-to sets at each point and at the join, showing the union that weakens the answer.
+  State which client optimization the must-alias answer enables on the left branch and why the join answer no longer enables it.
+  \item \label{ex:ch20-context-loss}
+  Write a procedure \code{set} that stores its pointer argument into a global, called once with \code{\&x} and once with \code{\&y}.
+  Run the analysis of this chapter on the whole program and give the points-to set of the global.
+  Explain why the answer merges the two call sites, state the alias query this imprecision defeats, and describe what per-caller information would recover it.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch20-further-reading}
+
+Morgan's \emph{Building an Optimizing Compiler} treats aliasing as a practical constraint on every memory optimization~\cite{morgan-1998-optimizing}.
+Read it for how alias answers gate the transformations in the surrounding chapters.
+Appel's \emph{Modern Compiler Implementation in ML} presents pointer-related reasoning inside a working compiler framework~\cite{appel-1998-modern}.
+Use it to see where the analysis results plug into the rest of the pipeline.
+The C11 committee draft defines the object, pointer, and effective-type rules that ground any sound C alias analysis~\cite{wg14-2011-c11}.
+Check its clauses on object identity and pointer comparison before trusting a separation fact.

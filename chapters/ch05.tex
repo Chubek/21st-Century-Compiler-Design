@@ -1,0 +1,174 @@
+\chapter{Names, Types, and Diagnostics}
+\label{ch:names-types-diagnostics}
+
+A program that parses is not yet a program that makes sense.
+The text \code{x + 1} parses perfectly and means nothing if \code{x} is never defined.
+The text \code{if 3 then print 1 else print 0} parses too, yet it asks a number to act as a condition.
+This chapter adds the static checks that catch such mistakes before execution.
+It resolves every name to its declaration, checks that every operation receives the right kind of value, and reports failures as \term{diagnostics} that point at the offending code.
+
+\section{What names mean}
+\label{sec:ch05-what-names-mean}
+
+Consider the Mini fragment \code{x = 1; let x = 2 in print x; print x}, with an existing outer integer binding for \code{x}.
+The two prints display different numbers even though both mention \code{x}.
+The first print sits inside the \code{let} and sees the inner binding, so it prints $2$.
+The second print sits outside and sees the outer binding, so it prints $1$.
+\term{Name resolution} assigns each variable use to exactly one declaration using the nesting of scopes.
+A \term{scope} is a region of the program in which a set of declarations is visible.
+Inner scopes may \term{shadow} outer declarations by reusing a name, as the example shows.
+Uses in the inner region refer to the inner declaration, and uses elsewhere are unaffected.
+Each use must be resolved before its declaration's type is consulted; resolution and checking can share one traversal.
+The fragment \code{print y} with no declaration of \code{y} fails resolution, so asking for the type of \code{y} is meaningless.
+Mini types are deliberately tiny: every expression is either an integer or a boolean.
+Arithmetic operators take integers and produce integers.
+Comparisons take integers and produce booleans.
+Conditions in \code{if} and \code{while} must be booleans, and both branches of a conditional must agree where the language requires a single result kind.
+These rules fit in one page yet already catch the classic errors: adding a boolean, comparing with a missing variable, and branching on a number.
+Table~\ref{tab:ch05-diagnostics} lists the diagnostic kinds Mini reports with an example trigger and the message shape for each.
+\begin{table}
+\caption{Diagnostic kinds in Mini with a triggering example and the message each one produces.}
+\label{tab:ch05-diagnostics}
+\centering
+\begin{tabular}{lll}
+\toprule
+Kind & Triggering example & Message shape \\
+\midrule
+Undefined variable & \code{print y} & undefined name \code{y} at line $L$ \\
+Redefinition & \code{let x = 1 in let x = 2} & allowed shadowing, no error \\
+Type mismatch & \code{1 + (2 > 3)} & operator needs integers, found boolean \\
+Bad condition & \code{if 3 then print 1} & condition must be boolean, found integer \\
+Arity error & \code{print} with no operand & \code{print} needs one operand \\
+\bottomrule
+\end{tabular}
+\end{table}
+The table distinguishes hard errors from legal shadowing on purpose.
+Shadowing is a feature with clear rules, not an accident, so the second row reports no error.
+Every other row is a hard error that stops compilation of the enclosing unit.
+The message shape always includes the construct, the values or kinds involved, and the position.
+Positions come from the spans attached during lexing and parsing, which finally pay for themselves here.
+\section{Scopes as a stack}
+\label{sec:ch05-scopes-stack}
+
+Resolution walks the tree carrying a stack of scopes from the outermost region to the current one.
+Entering a \code{let} pushes its binding, and leaving the body pops it.
+Looking up a name scans the stack from the top down and stops at the first match.
+This single discipline handles nesting of any depth with no special cases.
+Figure~\ref{fig:ch05-scope-chain} shows the stack while resolving the inner print of the shadowing example.
+\begin{figure}
+\centering
+\begin{tikzpicture}[node distance=1.4cm]
+\node[basic block] (global) {global: x maps to int};
+\node[basic block, below of=global] (letb) {let body: x maps to int};
+\node[basic block, below of=letb] (use) {use of x};
+\draw[cfg edge] (use) -- node[right, font=\sffamily\scriptsize] {lookup} (letb);
+\draw[cfg edge] (letb) -- node[right, font=\sffamily\scriptsize] {outer} (global);
+\end{tikzpicture}
+\caption{Resolving the inner use of \code{x} finds the nearest binding first and consults the outer scope only on a miss.}
+\label{fig:ch05-scope-chain}
+\end{figure}
+The use points at the \code{let} binding because that frame sits on top of the stack.
+The global frame remains reachable for other names but is not consulted for \code{x}.
+When the walk leaves the \code{let} body, its frame is popped and later uses of \code{x} find the global binding again.
+Types are checked during the same walk with one synthesized kind per expression node.
+A number literal has kind integer and a comparison has kind boolean regardless of context.
+An arithmetic node checks that both children are integers and reports a mismatch naming the offending child kind.
+A conditional checks that its test is boolean and then checks both branches under the same scope stack.
+This interleaving is safe because resolution of a subtree finishes before its kind is ever needed.
+
+\section{The checker}
+\label{sec:ch05-checker}
+
+Algorithm~\ref{alg:ch05-check} resolves names and checks types in one pass over the tree.
+\begin{algorithm}
+\caption{Single-pass name resolution and type checking for Mini.}
+\label{alg:ch05-check}
+\begin{pseudocode}
+\Require syntax tree node $N$, scope stack $S$
+\Ensure kind of $N$ with all names resolved, or a diagnostic
+\Function{Check}{$N, S$}
+\If{$N$ is a number} \State \Return integer
+\ElsIf{$N$ is a variable} \State resolve it in $S$ or report an undefined name; \Return its kind
+\ElsIf{$N$ is a let binding} \State check the value, push the name with its kind, check the body, then pop
+\ElsIf{$N$ is an assignment} \State resolve the target; check that the value has its declared kind; \Return unit
+\ElsIf{$N$ is an arithmetic node} \State check both children, require integers, and \Return integer
+\ElsIf{$N$ is a comparison} \State check both children, require integers, and \Return boolean
+\ElsIf{$N$ is a conditional or loop} \State require a boolean test and check the branches or body
+\Else \State check each child in order and combine the resulting kinds
+\EndIf
+\EndFunction
+\end{pseudocode}
+\end{algorithm}
+The algorithm assumes the tree is well formed and that each scope frame maps names to their declared kinds.
+It guarantees that any name it accepts refers to exactly one declaration and that any kind it returns follows from the rules.
+The \code{let} case is the only one that changes the stack, and it always pops what it pushed, even when checking the body reports an error.
+This balance keeps later lookups correct after an error and allows the checker to continue with sibling subtrees.
+Continuing after an error needs care to avoid cascades, where one mistake produces ten messages.
+The standard remedy is to give the erroneous node a placeholder kind and suppress further complaints that depend only on that placeholder.
+The programmer then sees the root cause first and the noise never appears.
+The checker records one diagnostic per independent fault: an undefined name, a kind mismatch with both kinds named, or a bad condition with the actual kind found.
+Each diagnostic carries the span of its node so the renderer can underline the exact text.
+
+\section{Worked example}
+\label{sec:ch05-worked-example}
+
+We now check a program with shadowing and a planted type error by hand.
+\begin{irlisting}
+x = 1;
+let x = 2 in print x + (x > 0);
+print x
+\end{irlisting}
+The checker starts with the global scope containing \code{x} of kind integer from the first assignment.
+It enters the \code{let}, checks the value \code{2} as integer, and pushes a second binding of \code{x} to integer.
+The stack now holds $2$ frames and $2$ bindings for \code{x}.
+Inside the body it checks the print operand \code{x + (x > 0)}.
+The left child \code{x} resolves to the inner binding with kind integer.
+The comparison \code{x > 0} checks both sides as integers and yields kind boolean.
+The addition then sees an integer on the left and a boolean on the right and reports a type mismatch.
+The diagnostic names the operator, the two kinds found, and the span of the addition.
+The checker assigns the addition a placeholder kind and continues without further messages for that subtree.
+After the body it pops the inner frame, leaving $1$ frame.
+The final print resolves \code{x} to the global binding of kind integer and checks cleanly.
+The run therefore produces exactly $1$ diagnostic from $3$ statements, $2$ pushes and $1$ pop aside, with $2$ live bindings at the deepest point.
+The numbers confirm the mechanism: the stack depth tracks scope nesting, and the single error is reported once at its true location.
+
+\section{Implementation notes}
+\label{sec:ch05-implementation}
+
+Scope frames are usually hash tables mapping names to declaration records.
+Pushing a frame allocates a table, and popping it discards the table, so shadowing needs no save-and-restore bookkeeping.
+An alternative keeps one global table with a per-name stack of declarations, which shares memory across scopes at the cost of trickier cleanup.
+A per-name stack gives expected constant-time lookup with hashing; separate scope tables may require probing every enclosing scope.
+Both preserve the nearest-binding rule of Figure~\ref{fig:ch05-scope-chain}.
+Kinds can be small integers rather than heap objects, since Mini has only two of them.
+Real languages need structured kinds with variables, constructors, and sharing, plus unification or constraint solving.
+The single-pass shape of Algorithm~\ref{alg:ch05-check} still survives there: resolution first within each node visit, then kind combination.
+Diagnostics deserve a dedicated rendering path with severity levels for errors, warnings, and notes.
+Errors stop code generation, warnings do not, and notes attach context to a primary message.
+Capping the number of reported errors keeps a broken file readable; compilers commonly stop after a few dozen and invite a recompile.
+The running time is $O(V \cdot L)$, where $V$ is the number of tree nodes visited and $L$ is the worst-case cost of one scope lookup.
+With $D$ separate hash-table frames, lookup can take expected $O(D)$ time even when each individual table probe is expected constant time.
+Memory use is $O(D + B)$, where $D$ is the maximum scope nesting depth and $B$ is the number of simultaneously live bindings.
+Production front ends add recovery rules so that parsing continues after a missing semicolon and checking continues after a bad type.
+The guiding rule is that every diagnostic must suggest a fix the programmer can apply without understanding compiler internals.
+\begin{ccwarning}[No cascades]
+After one fault, suppress every follow-on complaint that could be mere fallout.
+Ten messages for one missing declaration teach the programmer to ignore diagnostics, which defeats the whole chapter.
+\end{ccwarning}
+
+\section{Exercises}
+\label{sec:ch05-exercises}
+
+\begin{enumerate}
+\item \label{ex:ch05-resolve-shadow} Resolve every name in \code{a = 1; let a = 2 in let b = a in print a + b; print a} by hand. Give the binding each use refers to, the stack depth at each point, and the final output. Confirm the maximum depth is $3$ frames.
+\item \label{ex:ch05-find-mismatch} Find all static faults in \code{if x + 1 then print x} where \code{x} is undeclared. List each diagnostic in the message shape of Table~\ref{tab:ch05-diagnostics} with kinds and positions. Explain the order your checker reports them and which placeholder kinds it uses.
+\item \label{ex:ch05-warn-design} Design a warning for an unused \code{let} binding that never triggers on shadowing uses. State the analysis your warning needs beyond Algorithm~\ref{alg:ch05-check}, its running time in terms of $V$ and $B$, and one program where your warning would be wrong.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch05-further-reading}
+
+Appel covers name binding and type checking as the semantic phase that turns parsed trees into checked programs, which is the direct model for Algorithm~\ref{alg:ch05-check}, see~\cite{appel-1998-modern}.
+The C language definition shows how a production standard specifies scopes, linkage, and type constraints with exact rules for shadowing and conversions, see~\cite{wg14-2011-c11}.
+Morgan discusses how front-end checks fit into a compiler that must keep compiling large code bases quickly and noisily only when it matters, see~\cite{morgan-1998-optimizing}.
+Safonov treats precise diagnostics as part of compiler trustworthiness, since a checker the programmer distrusts will be worked around rather than obeyed, see~\cite{safonov-2010-trustworthy}.

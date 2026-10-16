@@ -1,0 +1,257 @@
+\chapter{A Small Language and Its Interpreter}
+\label{ch:small-language-interpreter}
+
+A compiler is easier to build correctly when its input language already has a precise meaning.
+Without an executable definition of what programs do, every later phase argues about taste instead of behavior.
+This chapter fixes that problem by defining a small language completely and implementing it directly.
+The implementation is a \term{tree-walking interpreter}, which is a program that evaluates the abstract syntax tree of a program node by node.
+Later chapters will lex, parse, check, lower, and optimize this same language.
+Each of those phases must preserve exactly the behavior defined here.
+
+\section{A first program}
+\label{sec:ch02-first-program}
+
+Consider a language, called Mini, that works over integers with variables, arithmetic, comparisons, conditional statements, loops, and printed output.
+Here is a short Mini program that scales a value, selects an output, and counts down.
+Its initial environment contains mutable integer bindings for \code{x} and \code{y}; their initial values are irrelevant because both are assigned before use.
+Mini uses mathematical integers in this chapter, with division truncated toward zero and division by zero reported as a runtime error.
+A fixed-width implementation must either implement these semantics or explicitly change the language contract; host integer overflow is not an implementation of mathematical arithmetic.
+\begin{irlisting}
+x = 2;
+y = x * 10 + 3;
+if y > 20 then print y else print 0;
+while x > 0 do x = x - 1;
+print x
+\end{irlisting}
+A reader can already guess what this program does.
+The variable \code{x} starts at $2$.
+Then \code{y} becomes $2 \times 10 + 3$, which is $23$.
+Since $23$ exceeds $20$, the program prints $23$.
+The loop then decrements \code{x} from $2$ down to $0$ and prints $0$.
+The observable output is therefore the two numbers $23$ and $0$ in that order.
+This informal reading is the starting point, not the definition.
+The rest of the chapter turns that reading into rules a machine can follow.
+Mini distinguishes \term{expressions}, which produce values, from \term{statements}, which perform actions.
+The expression \code{x * 10 + 3} denotes the number $23$ in the state where \code{x} holds $2$.
+The statement \code{print y} has no value but appends $23$ to the output.
+Keeping these two categories separate makes both the interpreter and the later type rules simpler.
+An expression never prints, and a statement never appears inside arithmetic.
+
+\section{From text to trees}
+\label{sec:ch02-text-to-trees}
+
+The interpreter does not work on characters or lines.
+It works on an \term{abstract syntax tree}, which is a tree that records the structure of a program and discards punctuation and spacing.
+The assignment \code{y = x * 10 + 3} becomes a tree whose root is an assignment node.
+That root has two children: the variable name \code{y} and an addition node.
+The addition node in turn has children \code{x * 10} and \code{3}, and the multiplication node has children \code{x} and \code{10}.
+Parentheses never appear in the tree because grouping is already encoded by its shape.
+Whitespace and redundant parentheses do not affect the tree; parentheses that change grouping do.
+Table~\ref{tab:ch02-ast-nodes} lists every node kind in Mini with the data each node carries and a one-line summary of its meaning.
+\begin{table}
+\caption{Abstract syntax tree nodes of Mini with the data each node carries and its evaluation rule.}
+\label{tab:ch02-ast-nodes}
+\centering
+\begin{tabular}{lll}
+\toprule
+Node & Fields & Evaluation rule \\
+\midrule
+Num & integer value & yields the value \\
+Var & variable name & looks the name up \\
+Add, Sub, Mul, Div & left, right & evaluates both, combines \\
+Lt, Gt, Eq & left, right & evaluates both, compares \\
+Let & name, value, body & binds the name, evaluates the body \\
+Assign & name, value & updates the name, yields nothing \\
+If & test, then, else & evaluates one branch \\
+While & test, body & repeats the body while true \\
+Seq & first, second & evaluates both in order \\
+Print & expression & evaluates, appends to output \\
+\bottomrule
+\end{tabular}
+\end{table}
+The table separates pure expression nodes from statement nodes by their rules.
+Expression nodes yield values and change nothing.
+Statement nodes may change variable bindings or output and are sequenced explicitly by \code{Seq}.
+The \code{Let} node introduces a fresh binding that is visible only inside its body.
+The \code{Assign} node updates an existing binding instead.
+This distinction gives Mini block-scoped declarations plus mutable variables, which is enough to exercise name resolution in Section~\ref{sec:ch02-environments} and in a later chapter on names and types.
+A tree also settles precedence questions once and for all.
+The text \code{x * 10 + 3} could in principle mean \code{x * (10 + 3)}.
+The parser resolves this choice while building the tree, so the interpreter never reconsiders it.
+We return to how parsing makes that decision in the chapter on parsing.
+
+\section{Environments and state}
+\label{sec:ch02-environments}
+
+A \term{environment} is a mapping from variable names to their current values.
+Evaluating \code{x + 1} requires an environment that binds \code{x}, because the expression alone does not say which number \code{x} stands for.
+We write environments as lists of bindings such as $\{x \mapsto 2, y \mapsto 23\}$.
+Looking up a name means scanning from the most recent binding toward the oldest and taking the first match.
+This order implements shadowing: a new binding for \code{x} hides older ones until its scope ends.
+The interpreter state has two parts: the environment and the output produced so far.
+Expression evaluation reads the environment and leaves it unchanged.
+Statements take an environment and an output list and return updated versions of both.
+Threading the output through every statement in order guarantees that printed values appear in execution order.
+Figure~\ref{fig:ch02-eval-while} shows the evaluation order for a loop as a small flowchart.
+\begin{figure}
+\centering
+\begin{tikzpicture}[node distance=1.6cm]
+\node[basic block] (test) {eval test};
+\node[basic block, below of=test] (branch) {true or false};
+\node[basic block, below left of=branch, xshift=-1.2cm] (body) {eval body};
+\node[basic block, below right of=branch, xshift=1.2cm] (done) {next statement};
+\draw[cfg edge] (test) -- (branch);
+\draw[cfg edge] (branch) -- node[left, font=\sffamily\scriptsize] {true} (body);
+\draw[cfg edge] (branch) -- node[right, font=\sffamily\scriptsize] {false} (done);
+\draw[back edge] (body) -- (test);
+\end{tikzpicture}
+\caption{Evaluation order for a while loop uses three steps and one repeated edge that returns to the test.}
+\label{fig:ch02-eval-while}
+\end{figure}
+The test evaluates first and selects one of two continuations.
+The true continuation evaluates the body and returns to the test along the dashed edge.
+The false continuation leaves the loop and runs the next statement.
+Every other statement in Mini follows the same discipline of choosing an order explicitly.
+The \code{Seq} node evaluates its first child completely, including all its output, before starting its second child.
+The \code{If} node evaluates its test exactly once and then evaluates exactly one branch.
+These ordering promises matter because later optimization phases are allowed to change instruction order only when the observable output stays identical.
+
+\section{The evaluator}
+\label{sec:ch02-evaluator}
+
+Algorithm~\ref{alg:ch02-eval} evaluates any Mini tree in a given environment.
+\begin{algorithm}
+\caption{Tree-walking evaluation of Mini statements and expressions.}
+\label{alg:ch02-eval}
+\begin{pseudocode}
+\Require syntax tree node $N$, environment $E$, output list $O$
+\Ensure if evaluation terminates, a value or unit with updated state, or a runtime error
+\Function{Eval}{$N, E, O$}
+\If{$N$ is a number} \Return its value with $E$ and $O$ unchanged
+\ElsIf{$N$ is a variable} \Return the looked-up binding or an undefined-variable error
+\ElsIf{$N$ is an arithmetic or comparison} \State evaluate the left child, then the right child
+\State combine the two values with the operator
+\ElsIf{$N$ is a sequence} \State evaluate the first child, threading $E$ and $O$ into the second
+\ElsIf{$N$ is an assignment} \State evaluate the value, update its resolved binding in $E$, and return unit
+\ElsIf{$N$ is a let binding} \State evaluate the initializer, extend $E$ for the body, and restore the outer scope afterward
+\ElsIf{$N$ is a print} \State evaluate the child and append the result to $O$
+\ElsIf{$N$ is a conditional} \State evaluate the test once and evaluate exactly one branch
+\ElsIf{$N$ is a loop} \While{the test evaluates to true} \State evaluate the body \EndWhile
+\EndIf
+\EndFunction
+\end{pseudocode}
+\end{algorithm}
+The algorithm assumes that the tree is well formed, which means every child it accesses exists and every operator has operands of the right kind.
+It does not assume that variables are defined or that operations succeed.
+Division by zero, for example, is a runtime error rather than a missing case in the dispatch.
+Errors abort evaluation with a message that names the offending construct and the values involved.
+This fail-fast behavior keeps the definition simple and gives later static checks a clear target: rule out programs that would abort.
+The dispatch evaluates children before combining their values.
+For a finite expression tree, each recursive call visits a smaller subtree, proving termination of expression traversal when primitive arithmetic terminates.
+Termination of the evaluator as a whole still depends on loops, because a loop body can run an unbounded number of times.
+A loop whose test never becomes false diverges, and that divergence is part of the language semantics rather than an implementation accident.
+An important detail is that the test of a loop re-evaluates on every iteration.
+The flowchart in Figure~\ref{fig:ch02-eval-while} shows this repeated edge explicitly.
+An implementation that hoisted the test out of the loop would change the meaning of programs whose bodies assign to tested variables.
+Later chapters on loop analysis revisit exactly which such motions are safe and which are not.
+\section{Worked example}
+\label{sec:ch02-worked-example}
+
+We now evaluate a small program completely by hand.
+The program binds two variables, combines them, and prints the result.
+\begin{irlisting}
+x = 2;
+y = 3;
+z = x + y * 4;
+print z
+\end{irlisting}
+Evaluation starts with the empty environment $\emptyset$ and the empty output $[\,]$.
+The first statement binds \code{x} to $2$, giving $\{x \mapsto 2\}$ with output $[\,]$.
+The second statement binds \code{y} to $3$, giving $\{x \mapsto 2, y \mapsto 3\}$ with output $[\,]$.
+The third statement evaluates its right-hand side before touching the environment.
+It looks up \code{y} and finds $3$, then multiplies by $4$ to obtain $12$.
+It looks up \code{x} and finds $2$, then adds $12$ to obtain $14$.
+The binding for \code{z} is recorded, giving $\{x \mapsto 2, y \mapsto 3, z \mapsto 14\}$.
+The final statement evaluates \code{z} to $14$ and appends it, so the output becomes $[14]$.
+The program therefore prints exactly one number, namely $14$.
+We can also count the work performed.
+The evaluator visits $4$ statement nodes and $8$ expression nodes, for $12$ node visits in total.
+It performs $3$ environment lookups: one for \code{y}, one for \code{x}, and one for \code{z} in the print.
+The two assignments to \code{x} and \code{y} bind constants and need no lookup.
+The maximum environment size during the run is $3$ bindings.
+These small numbers illustrate the general cost model of Section~\ref{sec:ch02-implementation}: running time grows with executed nodes times lookup cost, and memory grows with live bindings plus recursion depth.
+
+\section{Implementation notes}
+\label{sec:ch02-implementation}
+
+A direct implementation follows Algorithm~\ref{alg:ch02-eval} with one function per node kind or a single dispatch on the node tag.
+Environments are conveniently represented as a linked chain of frames, where each \code{Let} pushes a frame and pops it when its body finishes.
+Lookup then walks the chain from the newest frame to the oldest.
+An alternative is a single hash table with explicit save and restore of shadowed entries on scope entry and exit.
+The hash table gives faster average lookup while the chain gives simpler backtracking, and either choice preserves the observable semantics.
+Error reporting deserves care even in a tiny interpreter.
+Every error should name the construct, the values involved, and the source position where the construct began.
+Positions require cooperation from the lexer and parser, which must attach a span to each tree node when they build it.
+Without spans, an undefined-variable error can name the variable but cannot point at it, which slows down every debugging session that follows.
+The running time is $O(V \cdot D)$, where $V$ is the number of executed tree nodes and $D$ is the maximum nesting depth of scopes active during lookup.
+The factor $V$ counts one dispatch per visited node, and the factor $D$ bounds the worst-case chain walk per variable use.
+A hash table per scope gives expected constant-time probing within one frame, but searching $D$ frames still takes expected $O(D)$ time.
+Resolving each use to a binding slot ahead of execution removes the name search; the access cost then depends on the chosen frame representation.
+These dispatch bounds treat arithmetic as unit cost; mathematical integers also incur costs proportional to operand size.
+Memory use is $O(D + B)$, where $D$ is the recursion depth of evaluation and $B$ is the number of simultaneously live bindings.
+Deep expression nesting can overflow a fixed call stack, so production interpreters often cap nesting or compile hot paths to bytecode.
+Many production runtimes keep a tree walker only for startup or for rarely executed code.
+They lower frequently executed trees to a compact bytecode and interpret that instead, because dispatching on bytes in a tight loop exploits the hardware better than chasing tree pointers.
+The observable behavior stays identical, which is exactly the preservation contract this chapter defines.
+\begin{ccwarning}[Divergence is observable]
+A loop that never terminates has no final output, and that absence is part of its meaning.
+An optimization that turns a diverging program into a terminating one, or vice versa, is incorrect even when all terminating runs agree.
+\end{ccwarning}
+
+\section{More Mini programs}
+\label{sec:ch02-more-programs}
+
+A second example shows how bindings, branching, and output interact over several steps.
+The program below doubles its input while it stays small and reports each stage.
+\begin{irlisting}
+n = 3;
+print n;
+while n < 20 do n = n * 2;
+print n
+\end{irlisting}
+Evaluation binds \code{n} to $3$ and prints $3$.
+The loop test $3 < 20$ holds, so \code{n} becomes $6$.
+The test $6 < 20$ holds, so \code{n} becomes $12$.
+The test $12 < 20$ holds, so \code{n} becomes $24$.
+The test $24 < 20$ fails, so the loop ends and the program prints $24$.
+The output is therefore $[3, 24]$, and the loop body executes exactly $3$ times.
+This trace shows why the interpreter must re-evaluate the test after each body: the value of \code{n} changes on every pass.
+A third example exercises nested conditionals inside a loop.
+\begin{irlisting}
+i = 1;
+while i < 5 do i = i + 1;
+if i > 10 then print 99 else print i
+\end{irlisting}
+The loop runs with \code{i} taking the values $1$, $2$, $3$, $4$, and $5$, so the body executes $4$ times.
+After the loop, \code{i} holds $5$, the test $5 > 10$ is false, and the program prints $5$.
+The final output is $[5]$.
+These two traces use only the node rules of Table~\ref{tab:ch02-ast-nodes} and the order of Figure~\ref{fig:ch02-eval-while}.
+A reader who can reproduce both traces by hand understands the whole language.
+That understanding is the test oracle for every phase that follows: lexing must preserve the token stream, parsing must preserve the tree, and optimization must preserve the output.
+
+\section{Exercises}
+\label{sec:ch02-exercises}
+
+\begin{enumerate}
+\item \label{ex:ch02-trace-if} Trace the evaluation of a conditional that tests whether $2\times3>5$ and prints $1$ on the true branch and $0$ on the false branch, starting from the empty environment. List each evaluated node, the value it produces, and the final output. Confirm that the test evaluates exactly once.
+\item \label{ex:ch02-shadow-env} Consider the program \code{x = 1; let x = 2 in print x; print x} under the Mini scoping rules. Write down the environment at each print statement and the full output. Then change the inner binding to an assignment and explain how the second print changes.
+\item \label{ex:ch02-count-visits} Take the worked example of Section~\ref{sec:ch02-worked-example} and replace \code{y * 4} with \code{y * (4 + 1)}. Recompute the printed result, the number of node visits, and the number of environment lookups. State which of the three quantities changed and why.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch02-further-reading}
+
+Appel builds a compiler through successive representations with careful attention to interfaces between phases, and that structure explains where an interpreter definition fits in a larger pipeline, see~\cite{appel-1998-modern}.
+Morgan covers the practical side of turning source programs into efficient code once the meaning is fixed, which motivates keeping the definition of this chapter stable while later phases change, see~\cite{morgan-1998-optimizing}.
+Safonov discusses what it means for a compiler to be trustworthy, and that framing justifies the fail-fast errors and ordering promises adopted here, see~\cite{safonov-2010-trustworthy}.
+The C language definition shows how a real standard pins down evaluation, types, and undefined behavior at full scale, which is the industrial counterpart of this small exercise, see~\cite{wg14-2011-c11}.

@@ -1,0 +1,336 @@
+\section{Make a wrong translation fail on purpose}
+\label{sec:tiny-fault-lab}
+
+A passing test suite tells us that the tested programs met the tested conditions.
+It does not tell us whether those conditions would notice the mistake we fear.
+We can ask a more concrete question: if multiplication were translated as addition, which test would fail?
+This is not a proposal to damage the working compiler.
+It is a controlled experiment with a separate, deliberately faulty component.
+
+The program \code{fault\_lab.c} uses the correct compiler to emit stack code, then changes every \code{MUL8} instruction to \code{ADD8}.
+It leaves each instruction's argument field alone.
+It also leaves the source tree alone.
+The fault lives only in this laboratory program; \code{compile\_expr} in \code{stack.c} remains unchanged.
+Keeping the specimen separate makes it harder to confuse a demonstration of a bug with the implementation the reader should use.
+
+Listing~\ref{lst:tiny-mutant} shows the faulty wrapper.
+Both arithmetic instructions require two stack values and produce one.
+Both require a zero argument field.
+Replacing one with the other therefore preserves the structural properties checked by our verifier.
+The generated program remains executable by the defined stack machine, but it generally computes the wrong value.
+
+\begin{listing}
+  \inputminted[firstline=7,lastline=15]{c}{example-code/ch01/fault_lab.c}
+  \caption{This isolated wrapper deliberately changes multiplication into addition.}
+  \label{lst:tiny-mutant}
+\end{listing}
+
+The specimen illustrates a narrow form of \term{mutation testing}: introduce a controlled change and check whether the tests detect its consequence.
+One mutation does not model every compiler failure.
+It checks a particular weakness in the evidence.
+Here the question is whether we compare arithmetic meaning, rather than merely accepting structurally legal code.
+The distinction fits the broader separation between compiler assurance tasks discussed by Safonov~\cite{safonov-2010-trustworthy}.
+The specimen and its reduction procedure here are original, small experiments, not a survey of that subject.
+
+\subsection{Choose a witness with a known answer}
+\label{sec:tiny-fault-witness}
+
+Use this source expression:
+\[
+  ((x+7)\times(3+5))+11.
+\]
+Its tree has nine nodes.
+It extends the earlier seven-node tree with a final addition and the literal $11$.
+At input $9$, the correct calculation is
+\[
+  ((9+7)\times(3+5))+11=16\times8+11=139.
+\]
+Every intermediate result fits in $V$, so no reduction changes these numbers.
+The faulty target instead adds $16$ and $8$, then adds $11$, producing $35$.
+We have a concrete disagreement: the expected value is $139$, and the target value is $35$.
+
+A \term{counterexample} to a universal preservation claim is one allowed source program and input for which that claim fails.
+The word does not require a large random test or an exotic boundary value.
+Our ordinary input $9$ is enough.
+The source is valid, its operations are total, and the target passes structural verification.
+None of those facts can remove the disagreement.
+
+It is useful to freeze the input while investigating this failure.
+If a reducer changes the program and the input together, it may keep finding failures without showing which change simplified the explanation.
+Our first reduction procedure keeps the witness input at $9$.
+Later, once the program is smaller, we can ask whether the input matters at all.
+These are two separate simplification decisions.
+
+\section{Define which failure a reducer must retain}
+\label{sec:tiny-reduction-predicate}
+
+A \term{test-case reducer} searches for a smaller input that still exposes a chosen failure.
+It needs a precise predicate for that failure.
+For this laboratory, let $M(e,a)$ hold when all of the following are true:
+\begin{enumerate}
+  \item The faulty compiler successfully emits the whole program for $e$.
+  \item The emitted code passes structural verification.
+  \item The executor successfully runs it at input $a$.
+  \item The returned value differs from $\llbracket e\rrbracket_a$.
+\end{enumerate}
+We test source validity by construction: every candidate is made from valid tree pieces or valid literal leaves.
+The tree remains finite and non-sharing.
+The predicate therefore describes wrong-code behavior on a valid, executable case.
+It does not count a compilation failure or a rejected target as the same failure.
+
+Listing~\ref{lst:tiny-mismatch} implements the predicate.
+Returning false after a compilation failure does not claim that the compiler is correct.
+It says that this candidate does not satisfy the particular predicate we are preserving.
+Different investigations need different predicates.
+An investigation of a compiler crash should retain that crash, not quietly substitute a wrong numeric result for it.
+
+\begin{listing}
+  \inputminted[firstline=17,lastline=27]{c}{example-code/ch01/fault_lab.c}
+  \caption{The predicate retains successful executions with disagreeing values.}
+  \label{lst:tiny-mismatch}
+\end{listing}
+
+This distinction prevents a common reduction mistake.
+Suppose deleting part of a source program introduces an undeclared name.
+If any nonzero tool status counts as interesting, the reducer may preserve a syntax error instead of the original miscompilation.
+The final file can then be smaller but useless for explaining the bug.
+Our structured candidates avoid syntax errors, and our predicate rejects changes that no longer reach a wrong-code execution.
+
+The predicate also relies on a reference.
+Here that reference is the previously defined evaluator, with arithmetic checked independently on literal pairs and small worked examples.
+If the evaluator were wrong, a disagreement would need further investigation rather than an automatic declaration that the compiler was at fault.
+Reduction makes the evidence easier to inspect; it does not certify the reference implementation.
+
+\section{Reduce a tree without breaking its ownership}
+\label{sec:tiny-greedy-reducer}
+
+The reducer considers four kinds of replacement at each node.
+It can replace a binary node with its left child, replace it with its right child, or replace any node with the literal $0$ or $1$.
+It tries these choices in that order.
+After an accepted replacement, it restarts its search at the root.
+If no replacement at the current node is accepted, it searches its children from left to right.
+
+This is a \term{greedy algorithm}: it keeps the first acceptable local improvement rather than examining every possible smaller tree before deciding.
+It is not an algorithm for finding the smallest possible counterexample in an unrestricted language.
+The candidate choices and their order matter.
+They define which smaller cases this search can reach.
+
+We also need a measure that decreases whenever a replacement is accepted.
+Node count alone is not sufficient because replacing the input leaf with a literal keeps the node count unchanged.
+Let $N(e)$ be the number of reachable tree nodes.
+Let $W(e)$ be the sum of the weights of its leaves, assigning weight $n$ to literal $n$ and weight $256$ to the input leaf.
+Compare the pair $(N(e),W(e))$ lexicographically: prefer fewer nodes, then a smaller weight sum when the node counts agree.
+
+Every accepted replacement must decrease this pair and retain $M(e,9)$.
+Replacing a binary node by a child decreases node count.
+Replacing an input by $0$ or $1$ decreases weight without changing node count.
+Replacing literal $3$ by literal $1$ decreases weight as well.
+Replacing literal $0$ by literal $1$ is not a decrease and is not even tested for preservation.
+Both components are nonnegative integers, so a strictly decreasing sequence of these pairs cannot continue forever.
+
+Algorithm~\ref{alg:tiny-greedy-reduce} describes the outer search.
+The candidate enumeration restarts after each successful replacement because the tree and its useful sites have changed.
+The algorithm terminates when none of its permitted single replacements both reduces the measure and retains the predicate.
+That stopping condition is narrower than global minimality.
+
+\begin{algorithm}
+  \caption{Reduce a failing tree using a fixed set of local replacements.}
+  \label{alg:tiny-greedy-reduce}
+  \begin{pseudocode}
+    \Require A valid finite tree $e$ with $M(e,a)$; fixed input $a$
+    \Ensure Retain $M(e,a)$; no permitted single improving replacement remains
+    \Repeat
+      \State $\mathit{changed}\gets\mathit{false}$
+      \ForAll{sites in preorder, trying child replacements then literals $0,1$}
+        \State form a candidate tree $e'$
+        \If{$(N(e'),W(e'))<(N(e),W(e))$ and $M(e',a)$}
+          \State $e\gets e'$
+          \State $\mathit{changed}\gets\mathit{true}$
+          \State \Break
+        \EndIf
+      \EndFor
+    \Until{not $\mathit{changed}$}
+  \end{pseudocode}
+\end{algorithm}
+
+The implementation changes one node's stored structure temporarily.
+It saves the original structure, installs the proposed replacement, and evaluates the predicate on the entire root.
+If the candidate fails, it restores the saved structure.
+Predicate evaluation does not fold or otherwise mutate the tree.
+Consequently, restoring the one changed structure is enough to restore the previous reachable tree.
+
+Replacing a node with a child's structure follows the caller-owned storage rule established earlier.
+The child's storage remains alive.
+Disconnected nodes are not freed during reduction.
+The original laboratory tree uses stack storage that outlives every predicate call, and no candidate introduces a cycle or a shared reachable node.
+This is not a general-purpose reducer for arbitrary graph ownership schemes.
+Its storage reasoning depends on precisely the same non-sharing contract as the earlier folder.
+
+For the nine-node case, the C counters used by the measure are comfortably within the minimum range of unsigned integers.
+An unbounded reduction library would need a separate argument or checked arithmetic for those counters.
+The executable specimen is a bounded laboratory, not an unchecked promise about trees of arbitrary size.
+
+\section{Work through every accepted reduction}
+\label{sec:tiny-reduction-walkthrough}
+
+The first candidate replaces the root addition with its left child.
+The trailing $11$ disappears.
+The new expression is the earlier product, which still disagrees at input $9$: the correct value is $128$, and the faulty value is $24$.
+This step reduces node count from nine to seven.
+
+At the product root, neither child alone retains the failure.
+Both children contain only addition and leaves, so the faulty wrapper changes no instruction in their translations.
+Replacing the root with $0$ or $1$ also removes the fault.
+Those candidates are rejected.
+The search moves into the left subtree instead.
+
+Replacing $x+7$ with its left child gives $x\times(3+5)$.
+At the fixed input, the correct value is $9\times8=72$ and the faulty value is $9+8=17$.
+The candidate is accepted.
+Replacing the input leaf with literal $0$ then gives $0\times(3+5)$.
+The correct result is $0$; the faulty result is $8$.
+Node count stays five in this second step, but leaf weight decreases.
+
+The right subtree can next be replaced by its left child, literal $3$.
+The result $0\times3$ computes $0$ in the source and $3$ in the faulty target.
+Replacing $3$ with $0$ would erase the disagreement: both $0\times0$ and $0+0$ produce zero.
+That candidate is rejected.
+Replacing $3$ with $1$ retains the disagreement and decreases weight, so it is accepted.
+
+Table~\ref{tab:tiny-reduction-steps} records the full accepted path.
+The emitted diagnostic program prints the same node counts, input, and value pairs.
+We can therefore check the hand reasoning against an executable trace of the search rather than merely asserting that reduction succeeded.
+
+\begin{table}
+  \centering
+  \caption{Five accepted replacements retain the wrong-code failure at input 9.}
+  \label{tab:tiny-reduction-steps}
+  \begin{tabular}{lrrr}
+    \toprule
+    Source expression & Nodes & Correct & Faulty \\
+    \midrule
+    $((x+7)\times(3+5))+11$ & 9 & 139 & 35 \\
+    $(x+7)\times(3+5)$ & 7 & 128 & 24 \\
+    $x\times(3+5)$ & 5 & 72 & 17 \\
+    $0\times(3+5)$ & 5 & 0 & 8 \\
+    $0\times3$ & 3 & 0 & 3 \\
+    $0\times1$ & 3 & 0 & 1 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The final expression no longer contains the input.
+It disagrees for every allowed input, not merely for the original witness.
+Its correct translation is a push of zero, a push of one, and multiplication.
+The faulty translation ends with addition instead.
+Both sequences pass the verifier, both reach a stack of depth two before the final instruction, and both finish with one value.
+The only relevant difference is the meaning of that final operation.
+
+Figure~\ref{fig:tiny-fault-diagnosis} places the two conclusions side by side.
+A structural acceptance is correct: there is no malformed instruction or missing operand.
+A semantic acceptance would be wrong: zero and one are distinct results in $V$.
+Adding more checks of the same stack-depth property cannot discover that difference.
+The evidence must cross the source-to-target semantic boundary.
+
+\begin{figure}
+  \centering
+  \begin{tikzpicture}[node distance=13mm and 17mm]
+    \node[basic block] (source) {$0\times1$};
+    \node[basic block,below left=of source] (good) {PUSH 0; PUSH 1\\MUL8};
+    \node[basic block,below right=of source] (bad) {PUSH 0; PUSH 1\\ADD8};
+    \node[basic block,below=of good] (zero) {valid; result 0};
+    \node[basic block,below=of bad] (one) {valid; result 1};
+    \draw[cfg edge] (source) -- node[above left,font=\small] {correct} (good);
+    \draw[cfg edge] (source) -- node[above right,font=\small] {faulty} (bad);
+    \draw[cfg edge] (good) -- (zero);
+    \draw[cfg edge] (bad) -- (one);
+  \end{tikzpicture}
+  \caption{The verifier accepts both programs; only one preserves the source value.}
+  \label{fig:tiny-fault-diagnosis}
+\end{figure}
+
+\subsection{Say exactly how small the result is}
+\label{sec:tiny-reducer-minimality}
+
+For this particular mutant, a literal or an input node cannot fail.
+Its compiled code contains no multiplication instruction for the wrapper to change.
+A source tree with an internal binary node has at least three nodes.
+The reduced counterexample has exactly three nodes.
+It is therefore smallest by node count for this mutant within our source grammar.
+
+That conclusion uses a separate argument about the fault.
+The greedy algorithm itself did not establish it simply by stopping.
+For another fault, a different local replacement or a coordinated change at two sites could reveal a smaller failing program.
+Local irreducibility means that the allowed single-step candidates do not improve the current case.
+Global minimality means that no smaller failing case exists in the entire stated search space.
+The words describe different claims and require different evidence.
+
+Even a smallest node count need not give a unique explanation.
+Several three-node multiplications expose this mutation.
+Our tie-breaking rule prefers small literal weights, and the fixed candidate order leads to $0\times1$.
+A reducer that tries literal $2$ first could stop at a different representative if its rules did not later reduce that literal.
+The exact output belongs to the specified search procedure, not to an unspecified notion of the one true minimal test.
+
+\section{Repair the contract boundary, then keep the test}
+\label{sec:tiny-fault-regression}
+
+The reduced program points directly to the broken local step.
+The compiler's preservation proof requires a source multiplication to end in a target multiplication.
+Replacing it with addition changes the value equation used in that induction case.
+The stack-prefix shape remains correct, but its appended value is no longer the promised value.
+The failure is in the arithmetic correspondence, not in the proof's storage reasoning.
+
+In the working compiler there is nothing to repair: the injected fault is confined to the laboratory wrapper.
+The program checks that the correct compiler runs the reduced case successfully and agrees with source evaluation for all inputs.
+It also checks that the mutant disagrees for all inputs.
+Both assertions matter to the demonstration.
+Without the first, the laboratory could merely compare two defective paths.
+Without the second, the specimen might stop demonstrating the intended fault after an unrelated edit.
+
+A \term{regression test} preserves a previously exposed failure as an executable check against its return.
+The small expression is a good candidate because its expected answer can be justified without the original larger tree.
+It should complement, not replace, the earlier literal-pair tests.
+Those tests already cover multiplication of zero by one and many nearby operand pairs.
+The laboratory explains why that coverage detects a semantic error which the verifier correctly accepts as structurally safe.
+
+Keep the pipeline configuration with the test.
+The faulty wrapper changes emitted code, and the laboratory deliberately compiles the original source tree without invoking the folder.
+If we first folded $0\times1$ into literal zero, no \code{MUL8} would be emitted.
+The faulty wrapper would have nothing to change, and the disagreement would disappear.
+That disappearance would not show that the faulty translation was repaired.
+It would show that the selected execution path no longer reaches the broken operation.
+
+This is why a useful failure record includes the source, input, enabled passes, target configuration, expected observation, and actual observation.
+It also includes whether compilation and structural verification succeeded.
+For this case all arithmetic and configuration choices fit in a small standalone C program.
+In a larger compiler, the same discipline prevents a minimized file from losing the flags or pass ordering needed to reproduce its original failure.
+
+\subsection{Know what reduction costs}
+\label{sec:tiny-reduction-cost}
+
+A predicate evaluation recompiles and executes a candidate and also evaluates its source tree.
+With $N$ source nodes and enough capacity, each of those steps takes $O(N)$ time here.
+Computing a candidate's size measure is another tree traversal.
+The number of candidate attempts depends on the tree, the accepted steps, and the search order.
+It would be misleading to call the whole reducer linear merely because one predicate call is linear.
+
+If there are $R$ complete search sweeps over trees of at most $N$ nodes, each sweep considers at most a constant number of replacements at each node.
+Using the simple full-tree predicate, this gives an $O(RN^2)$ upper bound for those sweeps, with fixed-width arithmetic and constant-capacity append treated as constant-time operations.
+The bound does not state that every candidate takes the worst-case time.
+It states which repeated work the straightforward implementation can perform.
+The decreasing measure proves termination, but does not promise a small value of $R$ for an arbitrary starting tree.
+
+For our nine-node example, the exact accepted path is more informative than an asymptotic slogan.
+There are five accepted replacements and a final unsuccessful sweep.
+We print only accepted states so that the demonstration stays readable.
+A debugging tool could additionally log rejected candidates and their reason for rejection.
+Those records should distinguish a nondecreasing measure, a lost mismatch, and a failure to compile or execute.
+They are different explanations for why a proposed reduction was not retained.
+
+The completed experiment gives us a useful division of labor.
+The verifier guards target structure.
+The source evaluator and target executor expose a semantic disagreement.
+The reducer makes that disagreement small enough to inspect.
+The proof identifies the local correspondence that was broken.
+The regression test keeps the discovered case available after the investigation ends.
+No one of these components supplies all the evidence that the others provide.

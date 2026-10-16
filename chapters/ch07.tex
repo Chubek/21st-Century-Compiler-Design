@@ -1,0 +1,182 @@
+\chapter{Control-Flow Graphs}
+\label{ch:control-flow-graphs}
+
+A flat instruction list shows every operation but hides where execution can go next.
+Most instructions fall through to their successor, yet branches and jumps redirect control to distant labels.
+This chapter groups instructions into \term{basic blocks} and connects the blocks with edges into a \term{control-flow graph}.
+Almost every analysis in the rest of the book runs on this graph rather than on raw lists.
+Getting its construction right pays off in every chapter that follows.
+
+\section{Straight runs and jumps}
+\label{sec:ch07-straight-runs}
+
+Consider the lowered fragment below, where \code{t1} holds a test value.
+\begin{irlisting}
+label L1;
+t1 = x > 0;
+br t1, L2, L3;
+label L2;
+y = 1;
+jmp L4;
+label L3;
+y = 2;
+label L4;
+print y
+\end{irlisting}
+Execution cannot wander arbitrarily through these $10$ instructions.
+It enters at \code{L1}, evaluates the test, and jumps to exactly one of \code{L2} or \code{L3}.
+Each arm assigns \code{y} once and rejoins at \code{L4}, which prints.
+The straight runs are the maximal instruction sequences with a single entry and a single exit.
+Here they are the run from \code{L1} through the branch, the run \code{y = 1} plus its jump, the run \code{y = 2}, and the run \code{print y}.
+Each run becomes one basic block: a sequence that always executes from its first instruction to its last.
+A block ends with a branch, a jump, or the instruction before a label, and a block begins after a branch, after a jump, or at a label.
+Table~\ref{tab:ch07-blocks} lists the four blocks of the fragment with their contents and successors.
+\begin{table}
+\caption{Basic blocks of the branching fragment with their instructions and successor blocks.}
+\label{tab:ch07-blocks}
+\centering
+\begin{tabular}{lll}
+\toprule
+Block & Instructions & Successors \\
+\midrule
+B1 & test and conditional branch & B2, B3 \\
+B2 & assign \code{y = 1} and jump & B4 \\
+B3 & assign \code{y = 2}, falls through & B4 \\
+B4 & print \code{y} & none, exit \\
+\bottomrule
+\end{tabular}
+\end{table}
+The table makes the join explicit: both arms list \code{B4} as a successor.
+Falling through counts as an edge too, so \code{B3} reaches \code{B4} without any jump instruction.
+The graph therefore has $4$ nodes and $4$ edges for $10$ instructions.
+Every execution corresponds to one path from the entry block to the exit, and every graph path that respects branch conditions corresponds to an execution.
+\section{Predecessors and successors}
+\label{sec:ch07-pred-succ}
+
+Each block records two sets: its \term{successors}, where control may go next, and its \term{predecessors}, where control may come from.
+We write them with the shared notation $\Succ(B)$ and $\Pred(B)$.
+For the fragment above, $\Succ(B1) = \{B2, B3\}$ and $\Pred(B4) = \{B2, B3\}$.
+Successors come directly from terminators: a conditional branch contributes two, a jump contributes one, and a fall-through contributes the next block.
+Predecessors are the inverse relation, computed by walking every successor edge once and recording it backward.
+Both directions are needed because analyses propagate facts along opposite directions.
+A forward analysis follows successors from the entry, while a backward analysis follows predecessors from the exit.
+Every graph in this book has a single entry block with no predecessors and a single exit block with no successors.
+Lowering guarantees the single entry by starting each function body in its own fresh block.
+It guarantees the single exit by routing every return and fall-off-the-end path through one final block.
+These conventions simplify every algorithm that follows: iteration can start from a known point and stop at a known point.
+A program with an infinite loop still has an exit block in the graph even when no execution ever reaches it.
+The exit block then has predecessors from the loop but contributes no dynamic executions, which is exactly the shape a liveness analysis expects.
+Keeping unreachable exits in the graph also preserves positions for warnings about missing returns.
+An analysis that needs reachable-only views computes reachability itself rather than asking the builder to delete blocks.
+Figure~\ref{fig:ch07-diamond-loop} shows the diamond of the fragment extended with a loop back to the test.
+\begin{figure}
+\centering
+\begin{tikzpicture}[node distance=1.7cm]
+\node[basic block] (b1) {B1: test};
+\node[basic block, below left of=b1, xshift=-1.2cm] (b2) {B2: y = 1};
+\node[basic block, below right of=b1, xshift=1.2cm] (b3) {B3: y = 2};
+\node[basic block, below of=b2, xshift=1.2cm] (b4) {B4: print};
+\draw[cfg edge] (b1) -- (b2);
+\draw[cfg edge] (b1) -- (b3);
+\draw[cfg edge] (b2) -- (b4);
+\draw[cfg edge] (b3) -- (b4);
+\draw[back edge] (b4) -- (b1);
+\end{tikzpicture}
+\caption{The diamond test with both arms joining at the print block and a dashed edge looping back to the test.}
+\label{fig:ch07-diamond-loop}
+\end{figure}
+The four solid edges are the diamond from Table~\ref{tab:ch07-blocks}.
+The dashed edge returns from the print block to the test, turning the fragment into a loop that retests after each print.
+Edges that return to an earlier block are called \term{back edges} and are drawn dashed throughout this book.
+The next chapter uses them to identify loops precisely.
+
+\section{Building the graph}
+\label{sec:ch07-building-graph}
+
+Algorithm~\ref{alg:ch07-cfg} constructs the graph from a flat instruction list using the leader method.
+\begin{algorithm}
+\caption{Leader-based construction of the control-flow graph.}
+\label{alg:ch07-cfg}
+\begin{pseudocode}
+\Require flat instruction list $C$ with labels, branches, and jumps
+\Ensure block list with $\Pred$ and $\Succ$ sets for every block
+\Function{BuildCFG}{$C$}
+\State mark the first instruction and every labeled instruction as a leader
+\State mark every instruction after a terminator, including a return, as a leader
+\State cut the list into blocks starting at each leader
+\State link each block to its successors from its terminator or fall-through
+\State invert the successor links to obtain all predecessor sets
+\EndFunction
+\end{pseudocode}
+\end{algorithm}
+The algorithm assumes every branch and jump targets a label that exists and that the list is nonempty.
+It guarantees one block per maximal straight run and exactly one edge per possible transfer of control.
+The leader marks are the whole insight: the first instruction starts a block, every label starts a block, and every instruction after a transfer starts a block.
+Cutting at leaders therefore produces the longest runs with single entries and single exits.
+Linking reads only block terminators, so each block is processed once and each edge is created once.
+Inversion then visits every edge once more to fill in predecessors.
+Handle an empty program separately by creating its designated empty entry/exit representation.
+Unreachable blocks can have predecessors, including an entire unreachable cycle; reachability requires traversal from entry, not an in-degree test.
+Unreachable blocks are kept rather than deleted at this stage, because a later pass may warn about them with exact positions.
+
+\section{Worked example}
+\label{sec:ch07-worked-example}
+
+We now build the graph for a small loop program by hand.
+\begin{irlisting}
+i = 1;
+label head;
+t1 = i < 5;
+br t1, body, done;
+label body;
+i = i + 1;
+jmp head;
+label done;
+print i
+\end{irlisting}
+The list has $9$ instructions.
+Leaders are instruction $1$ (the first), instruction $2$ (a label target), instruction $5$ (a label target), instruction $7$ (the instruction after the jump on line $6$ counts, but line $7$ is also a label target), and instruction $8$ is part of the same block as line $7$.
+Cutting gives $4$ blocks: $B1$ holds line $1$, $B2$ holds lines $2$ through $4$, $B3$ holds lines $5$ and $6$, and $B4$ holds lines $7$ through $9$ after splitting at the label, which is $2$ lines.
+More carefully, $B4$ holds \code{label done} and \code{print i}, which is $2$ instructions.
+Successors are $\Succ(B1) = \{B2\}$ by fall-through, $\Succ(B2) = \{B3, B4\}$ by branch, $\Succ(B3) = \{B2\}$ by jump, and $\Succ(B4) = \emptyset$ at exit.
+Inverting gives $\Pred(B1) = \emptyset$, $\Pred(B2) = \{B1, B3\}$, $\Pred(B3) = \{B2\}$, and $\Pred(B4) = \{B2\}$.
+The edge count is $4$: one fall-through, two branch arms, and one jump.
+Running the program confirms the shape: \code{i} takes values $1$ through $5$, the body runs $4$ times, and the back edge $B3$ to $B2$ is taken $4$ times while the exit edge $B2$ to $B4$ is taken once.
+The hand computation matches Figure~\ref{fig:ch07-diamond-loop} in structure: a test block with two successors, a body block with a back edge, and an exit block.
+
+\section{Implementation notes}
+\label{sec:ch07-implementation}
+
+Blocks are usually objects holding an instruction list plus adjacency sets for successors and predecessors.
+Instructions stay in arrays inside blocks for compact sweeping, while edges are stored as pointer or index pairs between blocks.
+Keeping both $\Pred$ and $\Succ$ doubles the edge memory but makes forward and backward passes equally cheap.
+The running time is $O(N + E)$, where $N$ is the number of instructions and $E$ is the number of control edges.
+Leader marking scans all $N$ instructions once, cutting walks the marks once, and linking plus inversion each visit every edge once.
+Memory use is $O(N + E)$ for the blocks, instructions, and both adjacency relations.
+A subtle case is the \term{critical edge}: an edge from a block with several successors to a block with several predecessors.
+Splitting such edges by inserting an empty block simplifies many later transformations, and production builders offer it as an option.
+Another subtlety is abnormal control such as errors and early exits, which Mini omits.
+Real languages add edges for exceptions, short-circuit operators, and indirect jumps, and each needs a documented policy in the builder.
+Unreachable-block elimination and jump threading are tempting at construction time but belong in later passes.
+The builder should preserve the program shape faithfully so that warnings and listings map back to source positions.
+\begin{ccnote}[Fall-through is an edge]
+A block that ends without a jump still transfers control to the next block.
+Forgetting that edge silently drops half of every diamond and makes the join block look unreachable.
+\end{ccnote}
+
+\section{Exercises}
+\label{sec:ch07-exercises}
+
+\begin{enumerate}
+\item \label{ex:ch07-build-diamond} Build the graph for the fragment of Section~\ref{sec:ch07-straight-runs} using Algorithm~\ref{alg:ch07-cfg}. List the leaders, the blocks, and the $\Pred$ and $\Succ$ sets. Confirm $4$ blocks and $4$ edges and check your sets against Table~\ref{tab:ch07-blocks}.
+\item \label{ex:ch07-count-paths} Add the back edge of Figure~\ref{fig:ch07-diamond-loop} to the diamond and count the distinct paths from entry to the print block that use the back edge $0$, $1$, and $2$ times. State the general formula for $K$ uses and explain why the count grows.
+\item \label{ex:ch07-critical} Give a three-block Mini program whose graph contains a critical edge. Identify the block with several successors and the block with several predecessors. Show where the inserted empty block goes and how the $\Pred$ and $\Succ$ sets change.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch07-further-reading}
+
+Appel constructs control-flow graphs as the foundation for dataflow analysis and register allocation, which is the same role they play in the coming chapters, see~\cite{appel-1998-modern}.
+Morgan treats graph construction as production infrastructure that must handle every control form the language allows, see~\cite{morgan-1998-optimizing}.
+Safonov shows how a trustworthy compiler validates its own intermediate structures rather than assuming each pass built them correctly, see~\cite{safonov-2010-trustworthy}.
+The C language definition specifies the control constructs whose lowering produces the branches, jumps, and labels of this chapter, see~\cite{wg14-2011-c11}.
