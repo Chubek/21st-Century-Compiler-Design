@@ -1,0 +1,1441 @@
+Bridging the gulf: a common intermediate language for ML and Haskell
+Simon Peyton Jones
+University of Glasgow and Oregon Graduate Institute
+Mark Shields
+University of Glasgow and Oregon Graduate Institute
+
+Abstract
+Compilers for ML and Haskell use intermediate languages
+that incorporate deeply-embedded assumptions about order
+of evaluation and side e ects. We propose an intermediate
+language into which one can compile both ML and Haskell,
+thereby facilitating the sharing of ideas and infrastructure,
+and supporting language developments that move each language in the direction of the other. Achieving this goal without compromising the ability to compile as good code as a
+more direct route turned out to be much more subtle than
+we expected. We address this challenge using monads and
+unpointed types, identify two alternative language designs,
+and explore the choices they embody.
+
+1 Introduction
+Functional programmers are typically split into two camps:
+the strict (or call-by-value) camp, and the lazy (or call-byneed) camp. As the discipline has matured, though, each
+camp has come more and more to recognise the merits of the
+other, and to recognise the huge areas of common interest.
+It is hard, these days, to nd anyone who believes that laziness is never useful, or that strictness is always bad. While
+there are still pervasive stylistic di erences between strict
+and lazy programming, it is now often possible to adopt lazy
+evaluation at particular places in a strict language (Okasaki
+[1996]), or strict evaluation at particular points in a lazy one
+(for example, Haskell's strictness annotations (Peterson et
+al. [1997])).
+This rapprochement has not yet, however, propagated to
+our implementations. The insides of an ML compiler look
+pervasively di erent to those of a Haskell compiler. Notably,
+sequencing and support for side e ects and exceptions are
+usually implicit in an ML compiler's intermediate language
+(IL), but explicit (where they occur) in a Haskell compiler
+(Launchbury & Peyton Jones [1995]). On the other hand,
+thunk formation and forcing are implicit in a Haskell compiler's intermediate language, but explicit in an ML compiler. These pervasive di erences make it impossible to
+share code, and hard to share results and analyses, between
+the two styles.
+To say that \support for side e ects are implicit in an ML
+compiler's IL" (for example) is not to say that an ML compiler will take no notice of side e ects; on the contrary, an
+To appear in the ACM Symposium on Principles of
+Programming Languages (POPL'98)
+
+John Launchbury
+Oregon Graduate Institute
+Andrew Tolmach
+Portland State University
+
+ML compiler might well perform a global analysis that identi es pure sub-expressions (though in practice few do). However, one might wonder whether the analysis would discover
+all the pure sub-expressions in a Haskell program translated
+into the IL. In the same way, if an ML program were translated into a Haskell compiler's IL, the latter might not discover all the occasions in which a function argument was
+guaranteed to be already evaluated. This thought motivates
+the following question: could we design a common compiler
+intermediate language (IL) that would serve equally well for
+both strict and lazy languages? The purpose of this paper is
+to explore the design space for just such a language.
+We restrict our attention to higher order, polymorphically
+typed intermediate languages. There is considerable interest
+at the moment in type-directed compilation for polymorphic
+languages, in which type information is maintained accurately right through compilation and even on to run time
+(Harper & Morrisett [1995]; Shao & Appel [1995]; Tarditi et
+al. [1996]). Hence we focus on higher order, statically typed
+source languages, represented in this paper by ML (Milner
+& Tofte [1990]) and Haskell (Peterson et al. [1997]).
+At rst we expected the design to be relatively straightforward, but we discovered that it was not. In particular,
+making sure that the IL has good operational properties for
+both strict and lazy languages turns out to be rather subtle.
+Identifying these subtleties is the main contribution of the
+paper:
+
+ We employ monads to express and delimit state, in-
+
+put/output, and exceptions (Section 3). Using monads in this way is now well known to theorists (Moggi
+[1991]) and to language designers (Launchbury & Peyton Jones [1995]; Peyton Jones & Wadler [1993];
+Wadler [1992a]), but, with one exception1 , no compiler
+that we know has monads built into its intermediate
+language.
+ We employ unpointed types to express the idea that
+an expression cannot diverge (Section 3.1). We show
+that the straightforward use of unpointed types does
+not lead to a good implementation (Section 3.6). This
+leads us to explore two distinct language designs. The
+rst, L1 , is mathematically simple, but cannot be compiled well (Section 3). An alternative design, L2 , adds
+operational signi cance to unpointed types, by guaranteeing that a variable of unpointed type is evaluated
+(Section 4); this means L2 can be compiled well, but
+weakens its theory.
+ We identify an interaction between unpointed types,
+polymorphism, and recursion in L1 (Section 3.5). Interestingly, the problem turns out to be more easily
+solved in L2 than L1 (Section 4.2).
+
+1
+
+Personal communication, Nick Benton, Persimmon IT Ltd, 1997.
+
+None of these ingredients are new. Our contribution is to explore the interactions of mixing them together. We emerge
+with the core of a practical IL that has something to o er
+both the strict and lazy community in isolation, as well as
+o ering them a common framework. Our long-term goal is
+to establish an intermediate language that will enable the
+two communities to share both ideas (analyses, transformations) and systems (optimisers, code generators, run-time
+systems, pro lers, etc) more e ectively than hitherto.
+
+a less ecient basic evaluation model (especially when
+starting from ML). Indeed, our hope is that we may
+ultimately be able to generate better code through this
+new route.
+
+3 L1, a totally explicit language
+It is clear that the IL must be explicit about things that are
+implicit in \traditional" compiler ILs. Where are these implicit aspects of a \traditional" IL currently made explicit?
+Answer: in the denotational semantics of the IL. For example, the denotational semantics2 of a call-by-value lambda
+calculus looks something like this
+E [ e1 e2 ]  = (E [ e1 ] ) b; if a = b
+?;
+if a = ?
+where a = E [ e2 ] 
+Here, the two cases in the right-hand side deal with the possible non-termination of the argument. What is implicit in
+the IL { the evaluation of the argument, in this case { becomes explicit in the semantics. An obvious suggestion is
+therefore to make the IL re ect the denotational semantics
+of the source language directly, so that everything is explicit
+in the IL, and nothing remains to be explicated by the semantics. This is our rst design, L1 .
+Figure 1 gives the syntax and type rules for L1 . We note
+the following features:
+
+2 The ground rules
+We seek an intermediate language (IL) with the following
+properties:
+
+?
+
+ It must be possible to translate both (core) ML and
+
+Haskell into the IL. Extensions that add laziness to
+ML, or strictness to Haskell, should be readily incorporated. We make no attempt to treat ML's module
+system, though that would be a desirable extension.
+ In order to accommodate ML and Haskell the IL's
+type system must support polymorphism. This ground
+rule turns out to have very signi cant, and rather
+unfortunate, impact upon our language designs (Section 3.5), but it seems quite essential. Nearly all existing compilers generate polymorphic target code, and
+although researchers have experimented with compiling away polymorphism by type specialisation (Jones
+[1994]; Tolmach & Oliva [1997]), problems with separate compilation and potential code explosion remain
+unresolved.
+ The IL should be explicitly typed (Harper & Mitchell
+[1993]). We have in mind a variant of System F (Girard [1990]), with its explicit type abstractions and
+applications. The expressiveness of System F really
+is required. For example, there are several reasons
+for wanting polymorphic arguments to functions: the
+translation of Haskell type classes creates \dictionaries" with polymorphic components; we would like to be
+able to simulate modules using records (Jones [1996]);
+rank-2 polymorphism is required to express encapsulated state (Launchbury & Peyton Jones [1995]);
+and data-structure fusion (Gill, Launchbury & Peyton Jones [1993]).
+IL programs can readily be type-checked, but there
+is no requirement that one could infer types from a
+type-erased IL program.
+ The IL should have a single well-de ned semantics. On
+the face of it, compilers for both strict and lazy languages already use a common language, namely the
+lambda calculus. But this similarity is only at the
+level of syntax; the semantics of the two calculi di er
+considerably. In particular, the code generator from
+a strict-language compiler would be completely unusable in a lazy-language compiler, and vice versa. Our
+goal is to have a single, neutral, semantics, and hence
+a single optimiser and code generator.
+ ML (or Haskell) programs thus compiled should be
+as ecient as those compiled by a good ML (resp.
+Haskell) compiler. In other words, compiling through
+the common IL should not impose any unavoidable eciency penalty, either by way of loss of transformations
+(especially when starting from Haskell) or by way of
+
+ As a compromise in the interest of brevity all our
+
+formal material describes only a simply-typed calculus, although supporting polymorphism is one of our
+ground rules. The extensions to add polymorphism,
+complete with explicit type abstractions and applications in the term language, are fairly standard (Harper
+& Mitchell [1993]; Peyton Jones [1996]; Tarditi et al.
+[1996]). However, polymorphism adds some extra complications (Section 3.5, 3.6).
+ We omit recursive data types, constructors, and case
+expressions for the sake of simplicity, being content
+with pairs and selectors.
+ let is simply very convenient syntactic sugar. It is not
+there to introduce polymorphism, even in the polymorphic extension of the language; explicit typing removes
+this motivation for let.
+ letrec introduces recursion. Though we only give it
+one binding here, our intention is that it should accommodate multiple bindings. We use it rather than
+a constant fix because the latter requires heavy encoding for mutual recursion that is not re ected in
+an implementation. We discuss recursion in detail in
+Section 3.5, including the unspeci ed side condition
+mentioned in the rule.
+ Following Moggi [1991], we express \computational effects" | such as non-termination, assignment, exceptions, and input/output | in monadic form. The type
+M  is the type of M -computations returning a value
+of type  , where M is drawn from a xed family of
+monads. The syntactic forms letM and retM are
+2 We use the following standard notation. If T is a complete partial
+order (CPO), then the CPO T? , pronounced \T lifted", is de ned
+thus: T? = fa? j a 2 T g [ f?g, with the obvious ordering.
+
+2
+
+Types ;  ::= Int j 1 ->2 j () j (1 ,2 )
+j Ref  j M 
+Terms e ::= x j k j e1 e2 j \x: .e j (e1 ,e2 )
+j let x: = e1 in e2
+j letrec x: = e1 in e2
+j letM x: <- e1 in e2 j retM e
+Constants k ::= fst j snd j new j rd j wr j liftToST
+j 0 j 1 j 2 j ::: j + j - j :::
+Monads M ::= Lift j ST
+
+T : Type ! CPO
+T [ Int] = Z
+T [ 1 ->2 ] = T [ 1 ] ! T [ 2 ]
+T [ (1 ,2 )] = T [ 1 ]  T [ 2 ]
+T [ ()] = 1
+T [ Lift  ] = T [  ]
+T [ ST  ] = State ! (T [  ]  State)
+T [ Ref  ] = N S
+State = N ,!  T [  ]
+E : Term ! Env ! T [  ]
+E [ x]  = (x)
+E [ k]  = k
+E [ e1 e2 ]  = (E [ e1 ] ) (E [ e2 ] )
+E [ \x.e]  = y:E [ e] [x := y]
+E [ (e1 ,e2 )]  = (E [ e1 ] ; E [ e2 ] )
+E [ let x: = e1 in e2 ]  = E [ e2 ] [x := E [ e1 ] ]
+E [ letrec x: = e1 in e2 ]  = E [ e2 ] (rec[ x; e1 ] )
+E [ letM x: <- e1 in e2 ]  = bindM (E [ e1 ] )
+(y:E [ e2 ] [x := y])
+E [ retM e]  = unitM (E [ e] )
+rec[ x; e1 ]  = fix( :[x := E [ e1 ]  ])
+?
+
+?
+
+x: 2?
+?`x:
+(PAIR) ??``e(1e:1 ,1e2 )?: (`e1 ,2 :2)2
+? ` e1 :  -> ? ` e2 : 
+(APP )
+? ` e1 e2 : 
+?; x: ` e : 
+(LAM )
+? ` x::e :  ->
+? ` e1 :  ?; x: ` e2 : 
+(LET )
+? ` let x: = e1 in e2 : 
+?; x :  ` e1 :  ?; x :  ` e2 : 
+...plus a side condition...
+(REC )
+? ` letrec x: = e1 in e2 : 
+1 : M 1 ?; x : 1 ` e2 : M 2
+(LETM ) ??``elet
+M x:1 <- e1 in e2 : M 2
+?`e:
+(RET )
+? ` retM e : M 
+(FST ) ? ` fst : (1 ,2 ) -> 1
+(SND) ? ` snd : (1 ,2 ) -> 2
+(PLUS ) ? ` + : Int -> Int -> Int
+(NEW ) ? ` new :  -> ST (Ref  )
+(RD)
+? ` rd : Ref  -> ST 
+(WR)
+? ` wr : Ref  ->  -> ST ()
+(LIFT ) ? ` liftToST : Lift  -> ST 
+(V AR)
+
+0
+
+0
+
+fst (a; b) = a
+snd (a; b) = b
+bindLif t m k = ?;
+
+if m = ?
+k a;
+if m = a
+unitLif t x = x
+bindST m k s = ?;
+if m s = ?
+krs;
+if m s = (r; s )
+unitST m s = (m; s)
+new v s = (r; s[r 7! v])
+where r 62 dom(s)
+rd r s = (s r; s) ;
+if r 2 dom(s)
+?;
+otherwise
+wr r v s = ((); s[r 7! v]) ; if r 2 dom(s)
+?;
+otherwise
+liftToST m s = (r; s) ;
+if m = r
+?;
+otherwise
+?
+
+?
+
+0
+
+0
+
+?
+
+?
+
+?
+
+?
+
+?
+
+?
+
+?
+
+Figure 2: Semantics of L1
+un-lifted) product, and integers are interpreted by the integers. (If L1 were expanded to have sum types, they would
+be interpreted by (categorical, separated) sums.) Lastly,
+each monad is speci ed by an interpretation. The monad
+of lifting is interpreted by lifting, while a state transformer
+is interpreted by a function from the current \state" to a
+result and the new state. The \state" is a nite mapping
+from location identi ers (modeled by the natural numbers,
+N ) to their contents.
+The semantic function E gives the meaning of expressions.
+Again, many of its equations are rather dull: application
+is interpreted by application in the underlying category,
+lambda abstraction by functional abstraction, and so on.
+The semantics of the two monads is given by their bind and
+unit functions. From the semantics one can prove that both
+and  are valid with respect to the semantics, and that
+monadic expressions admit a number of standard transformations, given in Figure 3.
+
+Figure 1: Syntax and type rules for L1
+the bind and unit combinators of the monad M . The
+only two monads we consider for now are the lifting
+monad, Lift, and the combination of lifting with the
+state transformer monad, ST. It is a straightforward
+extension to include the monads of exceptions and input/output as well.
+This use of monads appears to contradict our goal that
+L1 should have a trivial semantics. We discuss the
+reasons for this decision in Section 3.4.
+Figure 2 gives the semantics of L1 . The semantic function
+T gives the meaning of types. If it looks somewhat boring,
+that is the point! The function arrow in L1 is interpreted by
+function arrow in the underlying category of complete partial orders (CPO), product is interpreted by (categorical, i.e.
+3
+
+(M 1)
+letM x <- retM e in b = let x: = e in b
+(M 2) letM x <- (letM y <- e1 in e2 ) in b = letM y <- e1 in (letM x <- e2 in b) y 62 fv(b)
+(M 3)
+letM x <- (let y = e1 in e2 ) in b = let y = e1 in (letM x <- e2 in b)
+y 62 fv(b)
+(M 4) letM x <- (letrec y = e1 in e2 ) in b = letrec y = e1 in (letM x <- e2 in b) y 62 fv(b)
+(M 5)
+letM x <- e in retM x = e
+(M 6)
+let x = e in retM b = retM (let x = e in b)
+Figure 3: Monad transformations
+
+3.1 Termination and non-termination
+
+Types S; T ::= Int j () j S  T j S ! T j Ref S
+Haskell only
+j ST S
+
+As we have mentioned, the interpretation of a type in L1
+is a complete partial order (CPO). However, the interpretation of a type is not necessarily a pointed CPO; that is, the
+CPO does not necessarily contain a bottom element. For
+example, the data type of integers, Int, is interpreted by
+the unpointed CPO of integers, Z . That is, if an expression
+has type Int, then it denotes an integer, and cannot denote
+a non-terminating computation. How, then, do we express
+the type of possibly-diverging integer-valued computations?
+As we have seen, L1 has an explicit type constructor for
+each monadic (i.e. computation) type, of which lifting is
+one. To express the type of a possibly-diverging integer we
+use the lifting monad. A possibly-diverging integer-valued
+expression therefore has type Lift Int.
+So L1 's type system can distinguish surely-terminating expressions from possibly-diverging ones. The main reason
+for making this distinction in the type system is so that we
+can express the idea that a function takes an evaluated argument. The L1 lambda abstraction \x:Int.e expresses that
+x cannot possibly be ?, and so is a suitable translation of a
+lambda abstraction from a call-by-value language. On the
+other hand \x:Lift Int.e expresses that x might perhaps
+be ?, which ts a call-by-name or call-by-need language.
+A second motivation for distinguishing pointed types from
+unpointed ones is that some useful program transformations that are not valid in general, hold unconditionally
+when one has more control over pointedness. Several researchers have explored languages that employ a distinction between pointed and unpointed types (Howard [1996];
+Launchbury & Paterson [1996]), and others have explored
+pure languages without pointed types altogether (Cockett
+& Fukushima [1992]; Hagino [1987]; Turner [1995]). The
+presence of unpointed types has consequences for recursion,
+as we discuss in Section 3.5.
+
+community has been using monads very e ectively to isolate
+and encapsulate stateful computations and input/output
+within pure, lazy programs (Launchbury & Peyton Jones
+[1995]; Peyton Jones, Gordon & Finne [1996]; Peyton Jones
+& Wadler [1993]; Wadler [1992b]). Nevertheless, there are
+surprisingly subtle design choices to make, as we discuss in
+Section 3.4.
+
+3.2 Stateful computations
+
+3.3 Translating ML and Haskell into L1
+
+Terms M; N ::= x j i j M N j x : T:M j M + N
+j letrec x : T = M in N
+j let x : T = M in N
+j pair M N j fst M j snd M
+j new M j rd M j wr M N
+Haskell only
+j letST x : T M in N j retST M
+Integers
+
+i ::= 0 j 1 j 2 j : : :
+\ML" constants
+
+new : 8 : ! Ref
+rd : 8 :Ref !
+wr : 8 :Ref ! ! ()
+\Haskell" constants
+
+new : 8 : ! ST (Ref )
+rd : 8 :Ref ! ST
+wr : 8 :Ref ! ! ST ()
+Figure 4: Syntax of S
+
+Before discussing its design any further, we rst emphasise
+L1 's role as a target for both strict, stateful, and pure, lazy
+languages by giving translations from both into L1 . Figure 4
+gives the syntax of a tiny generic source language, S . We
+regard S as a prototype for either ML or Haskell, by giving
+it a strict or lazy interpretation respectively. In either case,
+S is assumed to have been explicitly annotated with type
+information by a type inference pass.
+The constants pair; fst; snd have the same (obvious) S
+types in both interpretations. The constants new; rd; wr
+create, read, and write a mutable variable. Unlike pair,
+their types di er in the two interpretations, as Figure 4
+shows. In the lazy interpretation their types explicitly involve the source-language ST monad, and S also includes
+
+In a similar way, we use the ST monad to express in the type
+system the distinction between pure and stateful computations. For example, an expression of type Lift Int denotes
+a pure (side-e ect free), albeit possibly-divergent, computation; on the other hand, and expression of type ST Int denotes a computation that might diverge3 , or might perform
+some side e ects on a global state and deliver an integer.
+Further monads can readily be added to model exceptions,
+or continuations, or input/output.
+This use of monads is well known. Moggi pioneered the
+idea of using monads to encapsulate computations (Moggi
+[1991]; Wadler [1992a]). The lazy functional programming
+3 ST combines lifting with state. It would be possible to separate
+the two, as we discuss in Section 7.
+
+4
+
+lated by M is a computation in the ST monad, and
+functions also return computations in ST. That is, if
+the ML type system considers that ? ` e :  , then
+M[ ?] ` M[ e] : ST M[  ] .
+The rule for application uses letST to evaluate both
+the function and its argument, and to sequence any
+state changes they contain, before applying the function to the argument. In expressions produced by
+the M translation, each variable is bound to a nonmonadic type; that is, any e ects (state or nontermination) are performed before binding the variable. When a variable, lambda, or pair is translated
+we simply return the value using retST . Lastly, a recursive ML declaration can only bind a function; hence
+the rule for letrec.
+ The \Haskell" translation, H, gives the source language (minus the state-changing operations) a pure,
+non-strict semantics. A key di erence from the ML
+translation is that the Haskell translation of data
+types, such as integers, pairs, and lists, are lifted, because Haskell allows values of these types to be recursively de ned. Unlike the ML translation, the translation of Haskell's function type does not need to have
+an explicit Lift on the codomain. Nor does the translation H necessarily return a Lift computation: if the
+Haskell type system concludes that ? ` e :  then
+H[ ?] ` H[ e] : H[  ] .
+H translates Haskell's ST-monad computations di-5
+rectly into L1 's ST monad, just as you would hope .
+The only tiresome point is that the rst argument of
+wr has source-language type Ref  , and hence has
+L1 type Lift (Ref H[  ] ). It must therefore be lifted
+into the ST monad using liftToST so that it can be
+evaluated in the ST monad.
+
+M[ Int] = Int
+M[ S  T ] = (M[ S ] ,M[ T ] )
+M[ ()] = ()
+M[ S ! T ] = M[ S ] -> ST M[ T ]
+M[ Ref S ] = Ref (M[ S ] )
+M[ x] = retST x
+M[ i] = retST i
+M[ M N ] = letST f <- M[ M ] in
+letST a <- M[ N ] in
+fa
+M[ x : T:M ] = retST (\x:M[ T ] .M[ M ] )
+M[ let x : T = M in N ]
+= letST x:M[ T ] <- M[ M ] in M[ N ]
+M[ letrec f : S ! T = x : S:M in N ]
+= letrec f :M[ S ! T ] = \x:M[ S ] :M[ M ] in M[ N ]
+M[ pair M N ] = letST a <- M[ M ] in
+letST b <- M[ N ] in
+retST (a,b)
+
+. . . and similarly wr; +
+
+M[ fst M ] = letST a <- M[ M ] in
+retST fst a
+
+. . . and similarly snd; new; rd
+
+H[ Int] = Lift Int
+H[ S  T ] = Lift (H[ S ] ,H[ T ] )
+H[ ()] = Lift ()
+H[ S ! T ] = H[ S ] -> H[ T ]
+H[ ST T ] = ST (H[ T ] )
+H[ Ref S ] = Lift (Ref (H[ S ] ))
+H[ x] = x
+H[ i] = retLift i
+H[ M N ] = H[ M ] H[ N ]
+H[ x : T:M ] = \x:H[ T ] .H[ M ]
+H[ let x : T = M in N ] = let x:H[ T ] = H[ M ] in H[ N ]
+H[ letrec x : T = M in N ]
+= letrec x:H[ T ] = H[ M ] in H[ N ]
+H[ pair M N ] = retLift (H[ M ] ,H[ N ] )
+H[ M + N ] = letLift a <- H[ M ] in
+letLift b <- H[ N ] in
+retLift (+ a b)
+H[ fst M ] = letLift a <- H[ M ] in fst a
+. . . similarly snd
+H[ wr M N ] = letST a <- liftToST H[ M ] in
+wr a H[ N ]
+. . . similarly new; rd
+H[ letST x : T M in N ]
+= letST x:H[ T ] <- H[ M ] in H[ N ]
+H[ retST M ] = retST H[ M ]
+
+It is interesting to compare the two type translations. M
+uses exactly the call-by-value translation of Wadler [1992a],
+with the computational e ect at the end of the function
+arrow. On the other hand H does not use Wadler's call-byname translation, as one might otherwise expect. Indeed,
+there is no monadic e ect in the translation of function types
+at all; instead the Lift monad shows up in the translation
+of data types.
+This translation of Haskell function types assumes that
+\x.bot and bot, where bot has value ?, denote the same
+value in Haskell. Recent changes to Haskell are likely to allow these values to be distinguished, forcing a lifting of function types, and hence a more gruesome encoding of function
+application.
+
+3.4 Why not encode the monads?
+We have said that L1 is meant to make everything explicit,
+so that there is nothing to be said when giving its semantics.
+In apparent contradiction, we made the semantics of the
+monads implicit | that is, explained only by the semantics
+of L1 . Why, for example, did we not make the ST monad
+explicit by representing a value of type ST  as a statetransforming function in L1 , and representing letST and
+
+Figure 5: Translations of \ML" and \Haskell" into L1
+
+letST and retST , the unit and bind operations for ST. Mod-
+
+ulo syntax, this is precisely how Haskell expresses stateful
+computation (Launchbury & Peyton Jones [1995]).
+Then Figure 5 gives two translations of S into L1 :
+
+redexes"; a slightly more complex translation can avoid them (Sabry
+& Wadler [1996]).
+5 We do not treat the runST encapsulator of Launchbury & Peyton Jones [1995] here, but it is easy to do so.
+
+ The \ML" translation, M , gives the source language
+4
+
+a stateful, strict, semantics. The result of a term trans-
+
+4
+
+The translation given here introduces quite a few \administrative
+
+5
+
+retST using the other L1 forms? For example, instead of
+the L1 term
+letST x <- e in b
+we could write the L1 term
+bindST e (\x:b)
+where bindST is de ned (directly in L1 ) as follows
+bindST = \m k s:let p = m s in k (fst p) (snd p)
+Here, the state passing is made explicit, but the state itself
+is still abstract, supporting the new, read and write operations. This is the approach advocated by Launchbury &
+Peyton Jones [1995, Section 9]. It has the notable advantage
+that we can simplify L1 by getting rid of letM and retM
+entirely.
+We do not adopt that approach here, for three reasons:
+
+` (Lift  ) pointed
+` (ST  ) pointed
+` 1 pointed
+
+` (2 -> 1 ) pointed
+` 1 pointed ` 2 pointed
+` (1 ,2 ) pointed
+Figure 6: Rules for pointed types
+letrec can be constructed at any type. But that is not so.
+
+Consider
+
+letrec x:Int = : : : x : : : in : : :
+Such a recursive de nition is plainly nonsense, because Int
+is an unpointed type and has no bottom element, so there
+might be no solution, or many solutions, to the recursive
+de nition. We can only do recursion over pointed CPOs!6
+How, then, can we make sense of recursion? One solution
+is to link recursion to the Lift monad, since Lift adds a
+bottom to its argument domain:
+e1 : Lift  ?; x : Lift  ` e2 : 
+(RECa) ?; x : Lift?``letrec
+x: = e1 in e2 : 
+This solution is not very satisfactory. For a start, it cannot
+type:
+letrec f = \x. : : : in : : :
+because the type of a lambda abstraction has the form
+ ! , not Lift  , and lifting all functions raises the spectre of having to force the de nition on each recursive call.
+Nor can it type recursive de nitions of ST computations.
+Furthermore, this loss of expressiveness is completely unnecessary, since a function type whose result type is pointed
+is itself pointed; and any ST computation is pointed. The
+right solution is to x (REC) by adding a side condition that
+ must be pointed:
+?; x :  ` e1 : 
+?; x :  ` e2 : 
+(RECb)
+`  pointed
+? ` letrec x: = e1 in e2 : 
+Figure 6 gives rules for determining when a type is pointed.
+Unfortunately, the extension to a polymorphic type system
+is problematic: is the type pointed or not? There are three
+possible choices:
+
+ Encoding the monad in purely functional terms is a
+
+reasonable way of giving its semantics, but it may not
+be a reasonable way of giving its implementation. Consider, for example, the monad of exceptions in a strict
+language. The functional encoding would perform a
+conditional test whenever a possibly-exceptional value
+was bound; but the expected implementation is stackbased with no tests. Instead, a whole chunk of stack
+is popped when an exception is raised. Keeping the
+monad explicit in L1 allows the code generator to generate ecient code.
+ Even where an ecient code-generation strategy does
+exist, its correctness may be fragile. For example, Launchbury & Peyton Jones [1995] describes an
+update-in-place implementation of the primitive operations (read and write) in the state monad. However, that implementation is only correct if the state
+is single-threaded. That is certainly the case in the
+terms produced by M, but it might not remain the
+case after performing L1 transformations. For example, a -expansion might duplicate the state.
+It may be possible to preserve the single-threadedness
+of the state by limiting the transformations performed
+on the L1 program. (For example, we believe that
+using only transformations that are correct in a call by
+need calculus is sucient (Sabry [1997]).) Even where
+this is true, it creates a complicated proof obligation.
+ There may be useful transformations available that are
+speci c to a particular monad (for example, swapping
+the order of non-interfering assignments), but which
+become inaccessible, or hard to spot, when expressed
+in a purely-functional encoding of the monad.
+
+We nd these reasons compelling. On the other hand, we
+were concerned that by not translating the monadic code
+into a core of L1 we might lose valuable transformations. So
+far, however, we have found no transformation that cannot
+be expressed in the monadic version of L1 , providing the
+standard monad laws are implemented (Figure 3).
+
+ We could decide that type variables can only range
+
+over pointed types. This is precisely the restriction
+proposed by Peyton Jones & Launchbury [1991], but
+it is unacceptable in our IL because we expect (the
+translations of) most ML data types to be unpointed.
+For example, an ordinary, non-recursive polymorphic
+function such as the identity function could not be
+applied to both 3 and retLift 3, because one has a
+lifted type and one does not.
+
+3.5 Recursion in L1
+One consequence of our decision to allow a type to be modeled by an unpointed CPO is that we have to take care
+with recursion. The rule (REC) in Figure 1 suggests that a
+
+6 There is a substantial literature on the categorical treatment of
+recursion (for example, Pitts [1996]), but the discussion of this section
+focuses on the speci c setting of CPO.
+
+6
+
+ We could allow type variables to range over all types,
+
+We regard these complications as a very serious (and far
+from obvious) objection to using L1 for operational purposes.
+
+but prohibit recursion at a type variable. This would
+irritatingly reject recursive functions whose result type
+is a type variable, such as the function nth that selects
+the n'th element from a list.
+nth : 8 :Int -> (List ) ->
+
+3.7 Summary
+We expected it to be a routine matter to translate both
+Haskell and ML into a common language built directly on
+top of the standard mathematics for programming-language
+semantics. To our surprise it was not, as Sections 3.5-3.6
+describe.
+L1 may still be quite useful as a kernel language for reasoning about programs. However, as Section 3.6 has shown,
+it is unsuitable as a compiler intermediate language. Thus
+motivated, we now turn our attention to a second design
+that is more suitable as an IL.
+
+ Alternatively, we could employ quali ed universal
+quanti cation, where type variables at which xpoints
+are taken are explicitly quali ed:
+nth : 8 2 Pointed :Int -> (List ) ->
+Launchbury & Paterson [1996] elaborate on this idea.
+
+Since the rst two choices are untenable, we conclude that
+adding polymorphism to a language with both recursion and
+unpointed types, requires the use of quali ed universal quanti cation.
+
+4 L2, a language of partial functions
+
+3.6 Controlling evaluation in L1
+
+Our second design starts from the problem we described in
+Section 3.6. Operationally, it is essential to be able to control exactly when evaluation takes place, so that the recipient of a value knows for sure whether or not it is evaluated.
+Since we want to control what evaluation is done when, the
+obvious thing to do is to make let (and, of course, function
+application) eager. That is, to evaluate let x: = e in b
+one evaluates e, binds it to x, and then evaluates b. (We
+use the operational term \eager", rather than the semantic
+term \strict" because the latter does not mean anything if
+the type of e has no bottom element.) How, then, are we to
+translate the lets and function applications of a lazy language? There is a standard way to do so, namely by making
+the construction and forcing of thunks explicit (Friedman &
+Wise [1976]). This is what we do in L2 .
+Figure 7 gives the syntax and extra type rules for L2 . There
+is now only one monad, ST; the Lift monad is now implicit
+in the semantics of L2 so that let and function application
+can be eager. There is a new syntactic form, <e>, that suspends the evaluation of e, and a new constant, force, that
+forces the suspension returned by its argument. There is
+one new type, <>, which is the type of <e> if e has type .
+The two new type rules, (DELAY ) and (FORCE ) are just
+as you would expect.
+Another new feature is that types are divided into value
+types,  , and computation types, . Intuitively, an expression
+has a computation type, while a variable is always bound to
+a value type. Another way to say this is that the typing
+judgement now has the form
+fx1 : 1 ; : : : ; xn : n g ` e : 
+The type rules of Figure 1 apply unchanged, because we
+carefully used  and  in the right places, although they were
+synonymous in L1 . Function arguments and the right-hand
+sides of let(rec) expressions all have value types, and are
+evaluated eagerly. This separation of value types from computation types neatly nesses the awkward question of what
+it means to \evaluate" an argument computation without
+also \performing" it, which caused us some heart-searching
+in earlier un-strati ed versions of L2 . For example, the expression (f (read r)) is ill-typed, and hence we do not
+have to evaluate (read r) without also performing its state
+changes. Indeed, expressions of type ST  can only occur as
+
+While L1 seems to be quite suitable from a theoretical point
+of view, it su ers from a serious practical drawback: L1 is
+vague about the timing and degree of evaluation. Consider
+the L1 expression:
+let x :  = e in f x
+What code should the code generator produce for such an
+expression?
+
+ An ML compiler writer would probably expect the
+
+code to evaluate the right-hand side of the let, and
+then call f passing the value thus computed. But this
+eager strategy is incorrect in general if e diverges, and
+f does not evaluate its argument, as a quick glance at
+Figure 2 will con rm.
+ A safe strategy is to build a thunk (suspension) for
+the right-hand side, bind x to this thunk, and call f
+passing the thunk to it. That is precisely what the
+code generator for a lazy language would do.
+Now suppose that we are compiling code for f, and that
+f has type Int -> Int. The major motivation for distinguishing Int from Lift Int was to allow the compiler to
+treat values of type Int as certainly-evaluated, just as a
+
+strict-language compiler would assume (Section 3.1). It is
+unacceptable for f to test whether its argument is evaluated;
+such a choice would guarantee that no ML compiler would
+use this intermediate language! Alas, the safe strategy for
+preparing the f's argument does indeed pass an unevaluated
+thunk, so f must be prepared for this eventuality.
+Can we instead use a hybrid strategy?
+
+ A hybrid strategy for compiling let expressions might
+use the type of the bound variable to decide what to
+do: for types whose values are sure to converge (such
+as Int) it can evaluate the right-hand side eagerly, otherwise it can build a thunk. This strategy works for
+a simply-typed language but fails (again!) when we
+introduce polymorphism. What is the code generator
+to do with a let that binds a value of type ? Either
+the instantiating type must be passed as an argument,
+or we must have two versions of the code, one for terminating types and one for possibly-diverging ones.
+
+7
+
+is that L2 's function type arrow is now interpreted as the
+CPO of partial functions, denoted \*", and the semantic
+evaluation function E takes an expression to a partial function from environments to values. Many of the equations
+are de ned conditionally. For example, the equation for
+E [ e1 e2 ]  says that if both E [ e1 ]  and E [ e2 ]  are de ned
+then the result is just the application of those two values;
+otherwise there is no equation that applies for E [ e1 e2 ] , so
+it too is unde ned.
+The <_> type constructor is modeled using lifting; the semantics of force and <_> move to and fro between lifted
+CPOs and partial functions. It may seem odd that we use
+two di erent notations | Lift  in L1 and < > in L2 | with
+the same underlying semantic model, namely lifting. The
+reason is that in L1 we use lifting as a monad (with a bind
+operation, for example), whereas in L2 we use it to model
+thunks (with a force operation but no bind).
+The entire semantics of L2 could instead be presented in the
+CPO of total functions, using the isomorphism:
+S*T 
+=S!T
+Which to choose is just a matter of taste. What we like
+about our presentation is that each L2 type constructor corresponds directly to a single categorical type constructor,
+whereas in the alternative presentation the L2 function type
+gets a more \encoded" translation. Launchbury & Baraki
+[1996] use partial functions in essentially the same way.
+The translation of \ML" into L2 is exactly the same as the
+translation of L1 . The translation of \Haskell" is di erent, however, because we now have to be explicit about the
+introduction of thunks (Figure 9). Concerning types, notice the use of the type constructor <_> on the arguments
+of functions and data constructors. Concerning terms, the
+thunk-former <_> is used for function arguments and the
+right-hand side of all let and letrec de nitions. Thunks
+are evaluated explicitly, using force, when returning a variable or the result of fst or snd.
+
+Computation types  ::= M  j 
+Value types  ::= Int j  -> j () j (1 ,2 )
+
+j <> j Ref 
+Terms e ::= x j k j e1 e2 j \x:e j (e1 ,e2 ) j <e>
+j let x: = e1 in e2
+j letrec x: = pv in e
+j letM x: <- e1 in e2 j retM e
+
+Constants k ::= : : : j force
+Monads M ::= ST
+V alues v ::= x j k j \x: .e j <e> j (v1 ,v2 )
+PV alues pv ::= \x: .e j <e>
+The type rules from Figure 1, plus. . .
+(DELAY )
+
+?`e:
+? ` <e> : <>
+
+(FORCE )
+
+? ` force : <> -> 
+
+?
+
+Figure 7: Extra syntax and type rules for L2
+The translation M from ML to L2
+is textually the same as in Figure 5
+
+H[ Int] = Int
+H[ S  T ] = (<H[ S ] >,<H[ T ] >)
+H[ ()] = ()
+H[ S ! T ] = <H[ S ] > -> H[ T ]
+H[ ST T ] = ST <H[ T ] >
+H[ Ref S ] = Ref <H[ S ] >
+H[ x] = force x
+H[ i] = i
+H[ M N ] = H[ M ] <H[ N ] >
+H[ x : T:M ] = \x:<H[ T ] >.H[ M ]
+H[ let x : T = M in N ] = let x:<H[ T ] > = <H[ M ] > in
+H[ N ]
+H[ letrec x : T = M in N ] = letrec x:<H[ T ] > = <H[ M ] >
+in H[ N ]
+H[ fst M ] = force (fst H[ M ] )
+H[ pair M N ] = (<H[ M ] >,<H[ N ] >)
+H[ M + N ] = + H[ M ] H[ N ]
+H[ wr M N ] = wr H[ M ] H[ N ]
+. . . similarly new; rd
+H[ letST x : T M in N ] = letST x:<H[ T ] > <- H[ M ]
+in H[ N ]
+H[ retST M ] = retST H[ M ]
+
+4.1 Controlling evaluation in L2
+The main bene t of using L2 is that its semantics permit
+an eager interpretation of vanilla let; namely, \evaluate the
+right-hand side, bind the value to the variable, and then
+evaluate the body". A consequence is that any variable of
+type other than < >, or a type variable (which might be instantiated to < >), is sure to be fully evaluated, just as in
+any ML implementation.
+
+4.2 Recursion in L2
+Another advantage of L2 is that we can solve our earlier
+diculties with recursion (Section 3.5) without requiring
+bounded quanti cation.
+Firstly, we more or less have to restrict letrecs to bind
+only syntactic values, because we cannot eagerly evaluate
+the right-hand side. (Why not? Because we cannot construct the environment in which to evaluate it.) That in
+turn means that the meaning of the right-hand side is always de ned, which is why there is no side condition in the
+semantics of letrec.
+But Figure 7 further restricts the right-hand side of a letrec
+to be a particular sort of syntactic value, a pointed value, or
+
+Figure 9: Translations of \ML" and \Haskell" into L2
+the right hand side of a letST , the body of a function, or
+as the value of the whole program. Finally, when polymorphism is introduced, type variables range over value types
+only.
+Figure 8 gives the semantics of L2 in full. The crucial point
+8
+
+T : Type ! CPO
+T [ Int] = Z
+T [ 1 ->2 ] = T [ 1 ] * T [ 2 ]
+T [ (1 ,2 )] = T [ 1 ]  T [ 2 ]
+T [ < >] = 
+T [ ST  ] = State * (T [  ]  State)
+T [ Ref  ] = N
+E : Term ! Env * T [  ]
+E [ x]  = (x)
+E [ k]  = k
+E [ e1 e2 ]  = (E [ e1 ] ) (E [ e2 ] );
+if E [ e1 ]  and E [ e2 ]  are de ned
+E [ \x.e]  = y:E [ e] [x := y]
+E [ (e1 ,e2 )]  = (E [ e1 ] ; E [ e2 ] );
+if E [ e1 ]  and E [ e2 ]  are de ned
+E [ let x: =e1 in e2 ]  = E [ e2 ] [x := E [ e1 ] ];
+if E [ e1 ]  is de ned
+E [ letrec x: = pv in e]  = E [ e] (fix( :[x := E [ pv]  ]))
+E [ letM x: <- e1 in e2 ]  = bindM (E [ e1 ] ) (y:E [ e2 ] [x := y]); if E [ e1 ]  is de ned
+E [ retM e]  = unitM (E [ e] );
+if E [ e]  is de ned
+E [ <e>]  = (E [ e] ) ;
+if E [ e]  is de ned
+?;
+otherwise
+?
+
+0
+
+0
+
+?
+
+fst (a; b) = a
+snd (a; b) = b
+force a = a
+bindST m k s = k r s ;
+unitST m s = (m; s)
+new v s = (r; s[r 7! v])
+rd r s = (s r; s);
+wr r v s = ((); s[r 7! v]);
+?
+
+if m s = (r; s )
+
+0
+
+0
+
+?
+
+where r 62 dom(s)
+if r 2 dom(s)
+if r 2 dom(s)
+
+Figure 8: Semantics of L2
+
+PV alue. The syntactic category of PV alues is chosen so
+that it can only denote a value from a pointed domain, and
+hence a letrec de nition always has a least xpoint. To see
+this, consider the forms that a PV alue can take:
+
+computations in ST must be maintained, whereas let bindings can be re-ordered freely. Changing the order of evaluation is fundamental to several useful transformations, including common sub-expression, loop invariant computations, all kinds of code motion (Peyton Jones, Partain &
+Santos [1996]), inlining, and strictness analysis (remember
+we may be compiling a lazy language into L1 ). To take a
+simple example, the following transformation is not in general valid for letST , but is valid for vanilla let (assuming
+there are no name clashes):
+let x1 = e1 in let x2 = e2 in b
+=
+let x2 = e2 in let x1 = e1 in b
+Of course, one could do an e ects analysis to determine
+which sub-expressions were pure, as good ML compilers do,
+. . . but that is e ectively just what the monadic type system
+records!
+
+ A lambda abstraction denotes a partial function, and
+the CPO of partial functions is always pointed; its least
+element is the everywhere unde ned function.
+ A thunk <e>, where e :  , is drawn from the pointed
+CPO T [  ] .
+?
+
+Fortunately, the syntactic restriction of letrec does not lose
+any useful expressiveness. ML insists that letrecs bind only
+functions (which are PV alues), while Haskell binds thunks
+(which are also PV alues). So there is no diculty with
+translating the recursion arising in both ML and Haskell
+into L2 .
+
+4.3 Why not have just one monad?
+
+5 Assessment
+
+Now that we have eliminated the Lift monad, and made
+vanilla let eager, there is another question we should ask:
+why not give vanilla let the semantics of letST , and eliminate the latter altogether? To put it another way, we have
+made eager evaluation implicit in the semantics of let; why
+not add implicit side e ects as well? After all, the code generated for letST x <- e in b will be something like \the code
+for e followed by the code for b", and that is just the same
+as the code we now expect to generate for let x = e in b.
+However, if we have just one form of let we lose valuable
+optimising transformations. In particular, the sequence of
+
+5.1 L1 vs L2
+What have we lost in the transition from L1 to L2 , apart
+from a somewhat more complicated semantics? One loss is
+L1 's ability to describe types whose values are sure to terminate. If a L1 function has type Int->Int then a call to the
+function cannot diverge; but the same is not true of L2 . This
+does not have much impact on a compiler, but it make programmer reasoning about L2 programs more complicated.
+9
+
+Another important di erence is that L2 has a weaker rule.
+L1 has full -conversion. That is, for any expressions e and
+
+b:
+
+pression to simplify to:
+f = retST (x: let a1 = x in
+let a2 = fst a1 in
+retST (fst a2))
+
+let x = e in b = b[e=x]
+
+(A similar rule holds for application, of course.) In L2 , however, does not hold in general. A particular case of this is
+that if x is not mentioned in b then in L1 the binding can
+be discarded; in L2 the binding can only be discarded if the
+right-hand side is a value.
+However V | a restricted version form of that allows
+only values to be substituted | is valid in L2 . Values are
+de ned in Figure 7, and include variables, constants, and
+lambda abstractions, as usual. However, values also include
+thunks. Hence any Haskell reduction has a corresponding
+V reduction in its L2 translation. Thus, the restriction to
+V will not prevent a Haskell compiler from doing anything
+it can do in an implicitly lazy language with a full rule.
+Thus far we have assumed a call-by-name semantics, in
+which we are content to duplicate arbitrary amounts of work
+provided we do not change the overall result. In practice no
+compiler would be so liberal; we desire a call-by-need semantics in which work is not duplicated. As Ariola et al.
+[1995] describes, we can give a call-by-need semantics to
+L1 by weakening to V and adding a garbage-collection
+rule that allows an unused let binding to be discarded. An
+analogous result holds in L2 : we can obtain call-by-need semantics by replacing <e> by <v> in the de nition of values
+in Figure 7.
+
+Now the retST can be oated outwards, to give:
+f = retST (x:retST (fst (fst x)))
+In this form, the inner retST makes it apparent that f has
+no side e ects. We have, in e ect, performed a sort of incremental e ects analysis. The same idea can be taken further.
+If f is inlined at its call sites, then the retST may cancel
+with letST there, and so on. Even if f's body is big, we
+can use the \worker-wrapper" technique of Peyton Jones &
+Launchbury [1991] to split f into a small, inlinable wrapper
+and a large, non-inlinable worker, fw, thus:
+f =retST (x:retST (fw x))
+fw =x:(: : : body of f : : :)
+Blume & Appel [1997] describe a similar technique that they
+call \lambda-splitting".
+The point of all this is that there is a real payo for an
+ML compiler from making the ST monad explicit. Easy, incremental transformations perform a local e ects analysis;
+at each stage the state of the analysis is recorded in the
+program itself, rather than in some ad hoc auxiliary data
+structures; and all other program transformations will automatically preserve (or exploit) the analysis.
+
+5.2 L2 vs Haskell and ML ILs
+
+5.3 Parametricity
+
+Our main theme is the search for an IL that can serve for
+both ML- and Haskell-like languages. However, we believe
+that a language like L2 is attractive in its own right to either
+community in isolation, because one might get better code
+from an L2 -based compiler.
+For the Haskell compiler writer L2 o ers the ability to express in its type that a value is certainly evaluated. This
+gives a nice way to express the results of strictness analysis:
+a function argument of unpointed type must be passed by
+value. Flat arrays and strict data structures also become
+expressible.
+For the ML compiler writer L2 o ers the ability to express
+the fact that a computation is free from side e ects, which
+is a precondition for a raft of useful transformations (Section 4.3). While this information can be gleaned from an
+e ects analysis, maintaining this information for every subexpression, across substantial program transformations is
+not easy. In L2 , however, local transformations can perform, and record the results of, a simple incremental e ects
+analysis. For example, consider the following ML function:
+
+Polymorphic functions have certain parametricity properties
+that may be derived purely from their types (Mitchell &
+Meyer [1985]; Reynolds [1983]; Wadler [1989]). For example,
+in the pure polymorphic lambda calculus, a function f with
+type 8 : ! ! satis es the theorem:
+8A; B : 8h : A ! B : 8x; y : A : h (f x y) = f (h x) (h y)
+In fact, f satis es something even stronger in which the
+function h can be an arbitrary relation between A and B .
+When we add \polymorphic" constants to the pure calculus,
+the e ect is that the choice of functions h becomes restricted.
+For example, adding a x point operator x : 8 :( ! ) !
+forces the restriction that the h functions be strict (map ?
+to ?) and inductive (i.e. continuous). This is the situation
+in Haskell, for example.
+Adding polymorphic sequencing, say through an operator
+seq : 8 ; : ! ! or by building it into the semantics of function application, forces the restriction that the
+h functions be bottom-re ecting (i.e. de ned on all de ned
+arguments). This is the basic situation in pure ML.
+Adding polymorphic equality forces the h functions to be
+at least one-to-one; and adding polymorphic state operations like !r seems to remove any last shreds of interesting
+parametricity.
+What, then, are the parametricity properties of L1 and L2 ?
+If parametricity properties are weakened by claiming various
+primitives to be more polymorphic than they really are, then
+by being more cautious in the types we assign them, we may
+hope to restrengthen parametricity.
+
+fun f x = fst (fst x)
+
+If we translate this into L2 we obtain:
+f = retST (x: letST a2 <- letST a1 <- retST x in
+retST (fst a1)
+in
+retST (fst a2))
+
+Simple application of the rules of Figure 3 allows this ex-
+
+10
+
+5.5 ML thunks
+
+In L2 , for example, recursion is only done either at a function type, or at a suspension type. Recursion is never permitted as a fully polymorphic type (unlike in Haskell). This
+has the e ect of allowing the strictness side condition to
+be dropped, though inductiveness (or continuity) is still required. The same is achieved in L1 through the use of the
+pointed restriction (see Launchbury & Paterson [1996] for a
+comparable situation). Furthermore, since all state operations are explicitly typed within the state monad, they also
+do not interfere with parametricity in a negative way.
+The main di erence between L1 and L2 is to do with forcing
+evaluation. L1 has no polymorphic forcing operation, so has
+no consequent weakening of its parametricity property. L2
+does, however | it is built into its eager function application. Thus for L2 the parametricity theorem demands the
+h functions to be everywhere de ned.
+To see an example of this, consider the function K :
+8 ; : ! ! which selects its rst argument, discarding
+its second. The parametricity theorem is
+8A; A ; B; B : 8h1 : A ! A ; h2 : B ! B : 8x : A; y : B :
+h1 (K x y) = K (h1 x) (h2 y)
+0
+
+0
+
+0
+
+One of the advantages of a language that supports both
+strict and lazy evaluation is that it can accommodate source
+languages that have such a mixture. Indeed, it is quite
+straightforward to map Haskell's strictness annotations (Peterson et al. [1997]) onto L2 . Coming from the other direction, it has long been known that thunks can be encoded
+explicitly in a strict, imperative language. For the sake of
+concreteness we use the notation proposed for ML in Okasaki
+[1996]. In this proposal delayed ML expressions are pre xed
+by a \$", thus:
+let val x = $(f y) in b end
+
+Here, assuming (f y) has type int, x is bound to a thunk
+of type int susp that, when forced, evaluates (f y) and
+overwrites the thunk with its value.
+We expected that these \ML thunks" would map directly
+onto L2 's thunks, but that turned out not to be the case.
+The semantics of ML thunks is considerably more complicated than that of L2 's thunks, because of the interaction
+with state. Consider the following ML expression:
+
+0
+
+let val rec x = $(let val y = !r - 1 in
+r:=y;
+if y=0 then 0
+else force x + force x
+end)
+in ... end
+
+Clearly this holds only if h2 is total (de ned everywhere),
+otherwise the right hand side may not be de ned when the
+left hand side is.
+There is a practical implication to this. A class of techniques
+for removing intermediate lists called foldr-build relies on
+parametricity for its correctness (Gill, Launchbury & Peyton Jones [1993]). While a strictness side condition is not
+damaging, a totality condition is too restrictive. The technique can no longer rely on the types to provide sucient
+guidance for correctness. This is disappointing, although
+unsurprising. The compiler can still recover the short-cut
+deforestation technique by re ning L2 's type system to use
+quali ed types along the lines of Launchbury & Paterson
+[1996].
+
+(This de nes x recursively, which is not possible in ML, but
+essentially the same thing can be done using another reference to \tie the knot". We use the recursive form to reduce
+clutter.) When x is evaluated it decrements the contents of
+the reference cell r; but then, if the new value is non-zero,
+x evaluates itself! In e ect, there can be multiple simultaneous activations of x, rather like the multiple activations
+of a recursive function. (Indeed, a non-memoising implementation of ML thunks can be obtained by representing $e
+by ():e.) Furthermore, these multiple activations can each
+have a di erent value, because they each read the state.
+L2 's thunks have a much simpler semantics. A thunk has
+only one value,
+and there can be at most one activation
+of the thunk7. The key insight is that evaluation of a L2
+thunk has no side e ects, unlike the ML thunk above. But
+what if the contents of the thunk performs side e ects? For
+example:
+let x = <letST v : Int <- rd r in wr (v+1)> in e
+Here, if r : Ref Int, then x has type <ST ()>, not <()>.
+Forcing the thunk (with force) causes no side e ects (apart
+from updating the thunk itself), and yields a computation
+that, when subsequently performed (by a letST ), will increment the location r. The computation x may be performed
+many times; for example, e might be
+letST a1 : () <- force x in letST a2 : () <- force x in : : :
+What this means, though, is that the more complicated semantics of ML thunks have to be expressed explicitly in L2 ,
+presumably by coding them up using explicit references.
+
+5.4 Side e ects and polymorphism
+It is well known that the ability to create polymorphic references can lead to unsoundness in the type system (Tofte
+[1990]). For example, if we are able to create a reference
+r with type 8 :Ref then we would be able to write the
+following erroneous code:
+letST _:() <- wr (r Int) 2 in
+letST f:(Int->Int) <- rd (r (Int->Int)) in
+retST (f 3)
+
+However in both L1 and L2 any expression of type 8 :Ref
+is unde ned in any environment! The only way to construct
+a value of Ref type is with new, which returns a value of type
+ST (Ref  ). The only way to strip o the ST constructor is
+with letST . Looking at the typing rule for letST , we can
+see that bound variable must have type Ref  .
+SML's so-called \value restriction" conservatively restricts
+generalisation in let bindings precisely to avoid the construction of such polymorphic references. We conjecture
+(though we have not proved) that L1 and L2 are both sound
+without any such side conditions.
+
+7 More precisely, if there is more than one then the thunk's value
+depends on its own value, so its value is unde ned. This property
+justi es the well-known technique of \black-holing" a thunk, both
+to avoid space leaks and to report certain non-termination (Jones
+[1992]).
+
+11
+
+6 Related work
+
+paper. We gratefully acknowledge the support of the Oregon Graduate Institute, funded by a contract with US Air
+Force Material Command (F19628-93-C-0069).
+
+The FLINT language has rather similar objectives to the
+work described here, in that it aims to serve as a common
+infrastructure for a variety of higher-order typed source languages (Shao [1997b]). However, FLINT has not (so far)
+concentrated much on the issue of strictness and laziness,
+which is the main focus of this paper. The ideas described
+here could readily be incorporated in FLINT.
+Both the Glasgow Haskell Compiler and the TIL ML compiler use a polymorphic strongly-typed internal language,
+though the latter is considerably more sophisticated and
+complex (Peyton Jones [1996]; Tarditi et al. [1996]). Neither, however seriously attempt to compile the other's main
+evaluation-order paradigm.
+
+References
+Z Ariola, M Felleisen, J Maraist, M Odersky & P Wadler
+[1995], \A call by need lambda calculus," in 22nd
+ACM Symposium on Principles of Programming
+Languages, San Francisco, ACM, Jan 1995, 233{
+246.
+N Benton & PL Wadler [1996], \Linear logic, monads and
+the lambda calculus," in Proceedings of the 11th
+IEEE Symposium on Logic in Computer Science,
+Brunswick, New Jersey, IEEE Press, July 1996.
+M Blume & AW Appel [1997], \Lambda-splitting: a higherorder approach to cross-module optimization," in
+Proc International Conference on Functional Programming, Amsterdam, ACM, June 1997, 112{124.
+R Cockett & T Fukushima [1992], \About Charity," TR
+92/480/18, Department of Computer Science, University of Calgary, June 1992.
+DP Friedman & DS Wise [1976], \CONS should not evaluate its arguments," Automata, Languages, and
+Programming, July 1976, 257{281.
+A Gill, J Launchbury & SL Peyton Jones [1993], \A short cut
+to deforestation," in Proc Functional Programming
+Languages and Computer Architecture, Copenhagen, ACM, June 1993, 223{232.
+J-Y Girard [1990], \The System F of variable types: fteen
+years later," in Logical Foundations of Functional
+Programming, G Huet, ed., Addison-Wesley, 1990.
+T Hagino [1987], \A Categorical Programming Language,"
+PhD thesis, Department of Computer Science, University of Edinburgh, 1987.
+R Harper & JC Mitchell [1993], \On the type structure of
+Standard ML," ACM Transactions on Programming Languages and Systems 15(2), April 1993,
+211{252.
+R Harper & G Morrisett [1995], \Compiling polymorphism
+using intensional type analysis," in 22nd ACM
+Symposium on Principles of Programming Languages, San Francisco, ACM, Jan 1995, 130{141.
+R Harper & C Stone [1997], \A type-theoretic semantics for
+Standard ML 1996," Department of Computer Science, Carnegie Mellon University, 1997.
+BT Howard [1996], \Inductive, co-inductive, and pointed
+types," in Proc International Conference on Functional Programming, Philadelphia, ACM, May
+1996.
+MP Jones [1994], \Dictionary-free overloading by partial
+evaluation," in ACM SIGPLAN Workshop on Partial Evaluation and Semantics-Based Program Manipulation (PEPM), Orlando, Florida, ACM, June
+1994.
+
+7 Further work
+In this paper we have concentrated on a core calculus. Some
+work remains to extend it to a practical IL:
+
+ Recursive data types and case expressions must be
+
+added | we anticipate no diculty here.
+ A proof of type soundness is needed. As we note in
+Section 5.4 its soundness is not obvious.
+ We have a simple operational semantics for L2 ; we are
+con dent that it is sound and adequate, but have yet
+to do the proofs.
+ We are studying whether is is possible to combine L1 's
+ability to describe certainly-terminating computations
+with L2 's operational model.
+Accommodating the ML module system is likely to involve
+a signi cant extension of the type system (Harper & Stone
+[1997]); we have not yet studied such extensions.
+In a separate paper we discuss how to use the framework of
+Pure Type Systems to allow the language of terms, types,
+and kinds to be merged into a single language and compiler
+data type (Peyton Jones & Meijer [1997]). We hope to merge
+the results of that paper and this one into a single IL.
+We have made no attempt to address the tricky problem
+of how to combine monads. For example, ML includes the
+monad of state and exceptions. Is it advantageous to separate them into the composition of two monads, or is it better
+to have a single, combined monad? In the former case, what
+transformations hold?
+An important operational question is that of the representation of values, especially numbers. Quite a few papers
+have discussed how to use unboxed representations for data
+values, and it would be interesting to translate their work
+into the framework of L2 (Leroy [1992]; Peyton Jones &
+Launchbury [1991]; Shao [1997a]).
+
+Acknowledgements
+We would like to thank the POPL referees, Nick Benton,
+Bob Harper, Andrew Kennedy, Je Lewis, Erik Meijer,
+Chris Okasaki, Ross Paterson, Amr Sabry, and Tim Sheard
+for helpful feedback on earlier discussion and drafts of this
+12
+
+SL Peyton Jones, WD Partain & A Santos [1996], \Letoating: moving bindings to give faster programs,"
+in Proc International Conference on Functional
+Programming, Philadelphia, ACM, May 1996.
+SL Peyton Jones & PL Wadler [1993], \Imperative functional programming," in 20th ACM Symposium on
+Principles of Programming Languages (POPL'93),
+Charleston, ACM, Jan 1993, 71{84.
+AM Pitts [1996], \Relational properties of domains," Information and Computation 127, 1996, 66{90.
+JC Reynolds [1983], \Types, abstraction and parametric polymorphism," in Information Processing 83,
+REA Mason, ed., North-Holland, 1983, 513{523.
+A Sabry [1997], \What is a purely functional language,"
+Journal of Functional Programming (to appear),
+1997.
+A Sabry & PL Wadler [1996], \A re ection on call-by-value,"
+in Proc International Conference on Functional
+Programming, Philadelphia, ACM, May 1996, 13{
+24.
+Z Shao [1997a], \Flexible representation analysis," in Proc
+International Conference on Functional Programming, Amsterdam, ACM, June 1997.
+Z Shao [1997b], \An Overview of the FLINT/ML compiler,"
+in ACM Workshop on Types in Compilation, Amsterdam, R Harper & R Muller, eds., June 1997.
+Z Shao & AW Appel [1995], \A type-based compiler for
+Standard ML," in SIGPLAN Symposium on Programming Language Design and Implementation
+(PLDI'95), La Jolla, ACM, June 1995, 116{129.
+D Tarditi, G Morrisett, P Cheng, C Stone, R Harper &
+P Lee [1996], \TIL: A Type-Directed Optimizing
+Compiler for ML," in SIGPLAN Symposium on
+Programming Language Design and Implementation (PLDI'96), Philadelphia, ACM, May 1996.
+M Tofte [1990], \Type inference for polymorphic references,"
+Information and Computation 89(1), Nov 1990.
+A Tolmach & D Oliva [1997], \From ML to Ada(!?!)," Department of Computer Science and Engineering,
+Oregon Graduate Institute (and submitted to Journal of Functional Programming), 1997.
+DA Turner [1995], \Elementary strong functional programming," in Functional Programming Languages in
+Education, Nigmegen, Springer Verlag LNCS 1022,
+Dec 1995.
+PL Wadler [1989], \Theorems for free!," in Fourth International Conference on Functional Programming and
+Computer Architecture, London, MacQueen, ed.,
+Addison Wesley, 1989.
+PL Wadler [1992a], \Comprehending monads," Mathematical Structures in Computer Science 2, 1992, 461{
+493.
+PL Wadler [1992b], \The essence of functional programming," in 19th ACM Symposium on Principles of
+Programming Languages, Albuquerque, ACM, Jan
+1992, 1{14.
+
+MP Jones [1996], \Using parameterized signatures to express
+modular structure," in 23rd ACM Symposium on
+Principles of Programming Languages, St Petersburg Beach, Florida, ACM, Jan 1996, 68{78.
+R Jones [1992], \Tail recursion without space leaks," Journal
+of Functional Programming 2(1), Jan 1992, 73{80.
+J Launchbury & G Baraki [1996], \Representing Demand
+by Partial Projections," Journal of Functional Programming 6(4), 1996.
+J Launchbury & R Paterson [1996], \Parametricity and unboxing with unpointed types," in European Symposium on Programming (ESOP'96), Linkoping, Sweden, Springer Verlag LNCS 1058, Jan 1996.
+J Launchbury & SL Peyton Jones [1995], \State in Haskell,"
+Lisp and Symbolic Computation 8(4), Dec 1995,
+293{342.
+X Leroy [1992], \Unboxed objects and polymorphic typing,"
+in 19th ACM Symposium on Principles of Programming Languages, Albuquerque, ACM, Jan 1992.
+R Milner & M Tofte [1990], The de nition of Standard ML,
+MIT Press, 1990.
+JC Mitchell & AR Meyer [1985], \Second-order logical relations," in Logics of Programs, R Parikh, ed.,
+Springer Verlag LNCS 193, 1985.
+E Moggi [1991], \Notions of computation and monads," Information and Computation 93, 1991, 55{92.
+C Okasaki [1996], \Purely functional data structures," PhD
+thesis, CMU-CS-96-177, Department of Computer
+Science, Carnegie Mellon University, Sept 1996.
+J Peterson, K Hammond, L Augustsson, B Boutel, W Burton, J Fasel, AD Gordon, RJM Hughes, P Hudak, T
+Johnsson, MP Jones, E Meijer, SL Peyton Jones, A
+Reid & PL Wadler [1997], \Haskell 1.4: a non-strict,
+purely functional language," Available at http://haskell.org , April 1997.
+SL Peyton Jones [1996], \Compilation by transformation: a
+report from the trenches," in European Symposium
+on Programming (ESOP'96), Linkoping, Sweden,
+Springer Verlag LNCS 1058, Jan 1996, 18{44.
+SL Peyton Jones, AJ Gordon & SO Finne [1996], \Concurrent Haskell," in 23rd ACM Symposium on Principles of Programming Languages, St Petersburg
+Beach, Florida, ACM, Jan 1996, 295{308.
+SL Peyton Jones & J Launchbury[1991], \Unboxed values as rst class citizens," in Functional Programming Languages and Computer Architecture (FPCA'91), Boston, Hughes, ed., LNCS 523,
+Springer Verlag, Sept 1991, 636{666.
+SL Peyton Jones & E Meijer [1997], \Henk: a typed intermediate language," in ACM Workshop on Types in
+Compilation, Amsterdam, R Harper & R Muller,
+eds., June 1997.
+
+13
+
+

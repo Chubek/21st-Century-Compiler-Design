@@ -1,0 +1,33 @@
+# Five accepted replacements retain the wrong-code failure at input 9.
+
+- Source file: `chapters/ch01/fault-lab.tex`
+- Original label: `tab:tiny-reduction-steps`
+- Original caption (verbatim):
+
+> Five accepted replacements retain the wrong-code failure at input 9.
+
+| Source expression | Nodes | Correct | Faulty |
+| --- | --- | --- | --- |
+| ((x+7)×(3+5))+11 | 9 | 139 | 35 |
+| (x+7)×(3+5) | 7 | 128 | 24 |
+| x×(3+5) | 5 | 72 | 17 |
+| 0×(3+5) | 5 | 0 | 8 |
+| 0×3 | 3 | 0 | 3 |
+| 0×1 | 3 | 0 | 1 |
+
+<!-- Original LaTeX -->
+
+```latex
+\begin{tabular}{lrrr}
+    \toprule
+    Source expression & Nodes & Correct & Faulty \\
+    \midrule
+    $((x+7)\times(3+5))+11$ & 9 & 139 & 35 \\
+    $(x+7)\times(3+5)$ & 7 & 128 & 24 \\
+    $x\times(3+5)$ & 5 & 72 & 17 \\
+    $0\times(3+5)$ & 5 & 0 & 8 \\
+    $0\times3$ & 3 & 0 & 3 \\
+    $0\times1$ & 3 & 0 & 1 \\
+    \bottomrule
+  \end{tabular}
+```

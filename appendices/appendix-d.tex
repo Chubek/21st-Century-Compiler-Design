@@ -1,0 +1,110 @@
+\chapter{Lambda Calculus, Category Theory and Type Theory as it Pertains to Compilers}
+\label{ch:app-d-foundations}
+
+This appendix collects the small core of lambda calculus, category theory, and type theory that compiler work actually uses, in one place and in the notation of this book.
+It introduces no new language feature and proves no new theorem about the book's passes.
+A reader who can read a beta step, a typing rule, and a commuting square can follow every reference the chapters make to these ideas; a reader who wants the full theories should treat this appendix as a map, not a substitute.
+% TODO(cite): need primary references for untyped lambda calculus, simply typed lambda calculus, and the categorical reading of types.
+
+\section{Functions with nothing else}
+\label{sec:app-d-lambda}
+
+The \term{lambda calculus} is a language of functions with no numbers, no loops, and no machine.
+Its terms have three shapes:
+\begin{equation}
+  e ::= x \mid \operatorname{lam}(x, e) \mid \operatorname{app}(e, e).
+  \label{eq:app-d-syntax}
+\end{equation}
+The binder $\operatorname{lam}(x, e)$ names its parameter $x$ inside body $e$; free variables are those not bound by any enclosing binder.
+Computation is \term{beta reduction}: applying an abstraction substitutes the argument for the bound parameter in the body.
+Substitution must avoid capture: a free variable of the argument must not fall under a binder of the same spelling inside the body, so bound names are renamed first.
+Algorithm~\ref{alg:app-d-subst} states the capture-avoiding step consumed below.
+\begin{algorithm}
+\caption{Capture-avoiding substitution of $N$ for $x$ in $M$.}
+\label{alg:app-d-subst}
+\begin{pseudocode}
+\Require terms $M$ and $N$, variable $x$; bound names in $M$ distinct from free names of $N$ after renaming
+\Ensure term $M[x := N]$ with no captured free variable of $N$
+\Function{Subst}{$M, x, N$}
+\If{$M$ is a variable $y$}
+\If{$y = x$} \Return $N$ \Else \Return $y$ \EndIf
+\ElsIf{$M$ is $\operatorname{app}(P, Q)$}
+\State \Return $\operatorname{app}(\Call{Subst}{P, x, N}, \Call{Subst}{Q, x, N})$
+\ElsIf{$M$ is $\operatorname{lam}(y, P)$ with $y = x$} \Return $M$
+\Else \Comment{rename $y$ when $y$ occurs free in $N$}
+\State pick fresh $z$ and \Return $\operatorname{lam}(z, \Call{Subst}{P[y := z], x, N})$
+\EndIf
+\EndFunction
+\end{pseudocode}
+\end{algorithm}
+The freshness side condition is the whole content: without it, substitution confuses distinct variables that happen to share a spelling.
+
+Numbers can be encoded as iteration counts: $\operatorname{zero}$ takes a step function and a base value and returns the base, while $\operatorname{succ}$ applies one more step.
+Addition then composes iteration counts, and the worked step below evaluates with the book's own arithmetic rather than asserting it.
+Consider $\operatorname{app}(\operatorname{lam}(x, x), \operatorname{lam}(y, y))$.
+The argument is already a value, the binder $x$ occurs once, and no renaming is needed, so one beta step yields $\operatorname{lam}(y, y)$.
+Figure~\ref{fig:app-d-beta} draws this step as an edge between two term nodes with the redex marked.
+\begin{figure}
+\centering
+\begin{tikzpicture}[node distance=2.4cm]
+\node[basic block] (redex) {app(lam(x, x), lam(y, y))};
+\node[basic block, right of=redex, xshift=2.2cm] (value) {lam(y, y)};
+\draw[cfg edge] (redex) -- node[above, font=\sffamily\scriptsize] {beta} (value);
+\end{tikzpicture}
+\caption{One beta step contracts the marked application and returns the argument unchanged; no capture is possible because the bound names differ.}
+\label{fig:app-d-beta}
+\end{figure}
+A compiler rarely executes such encodings directly.
+It uses them as a laboratory: evaluation order, scope extrusion, and capture discipline all appear here before they appear in closure conversion.
+
+\section{Arrows keep application honest}
+\label{sec:app-d-arrows}
+
+The \term{simply typed lambda calculus} adds the arrow discipline of Chapter~\ref{ch:type-theory-compilers} to the calculus above.
+Every abstraction carries its domain annotation, every application is checked against it, and Table~\ref{tab:ch39-rules} is the complete checker for the pure fragment.
+A closed, well-typed term of ground kind evaluates to a value of that kind without confusing functions with base values; this is the kind-safety claim the chapter states for Mini-Fun, restricted here to the loop-free fragment.
+Adding a fixed-point combinator or general recursion restores nontermination and must be recorded as an explicit extension with its own guard, not smuggled in as an example.
+Type checking for this fragment is decidable and syntax-directed: Algorithm~\ref{alg:ch39-check} visits each node once under its context.
+Polymorphism, existentials, and dependency extend the same pattern with instantiation, hiding, and term-indexed kinds, as surveyed in Section~\ref{sec:ch39-richer}; each needs its own solver and is therefore named but not developed here.
+
+\section{Categories as an organizing analogy}
+\label{sec:app-d-categories}
+
+A \term{category} has objects, arrows between objects, an identity arrow on each object, and associative composition with identity laws.
+The compiler-relevant reading is deliberately thin: take types as objects and well-typed programs as arrows, so composition is sequencing and identity is the do-nothing program.
+A \term{product} then packages two values with projections that recover each side, which is the categorical shape of a pair; dually, a \term{coproduct} offers two injections with a case analysis that consumes either side, which is the shape of a tagged variant.
+A \term{functor} maps one such structure into another while preserving identity and composition, and a \term{monad} packages an effect discipline (such as partiality, state, or exceptions) with a return and a sequencing operation obeying three laws.
+This book uses only the first half of that sentence: products explain pairs, coproducts explain branching, and monads name an interface boundary where an optimization must not reorder effects.
+No pass in this book proves an optimization by a universal property, and no chapter assumes that every well-typed program denotes a categorical arrow in a single category.
+Readers who want that development should consult a dedicated text; here the vocabulary exists so that a phrase like \enquote{the product rule} or \enquote{the monadic sequencing point} points at one precise shape.
+
+Table~\ref{tab:app-d-correspondence} records the three-way correspondence at the level the book actually uses.
+\begin{table}
+\centering
+\caption{The working correspondence used by the book: each row names one shape in three vocabularies, without claiming the full theories coincide.}
+\label{tab:app-d-correspondence}
+\begin{tabular}{lll}
+\toprule
+Shape & Types reading & Categorical reading \\
+\midrule
+Function & $T_1 \to T_2$ with Lam, App & exponential with apply, curry \\
+Pair & constructor, two projections & product with pairing, projections \\
+Choice & one of two kinds, case analysis & coproduct with injections, cotupling \\
+Effect boundary & sequencing point for effects & monadic bind respecting order \\
+\bottomrule
+\end{tabular}
+\end{table}
+The table is an analogy with exact edges, not an identification of the theories.
+A new type feature earns a row only with its introduction rule, its elimination rule, and the equation that relates them; a new categorical claim earns its place only with the universal property written out.
+% TODO(cite): need primary references for the Curry-Howard correspondence and the categorical semantics of simple types.
+
+\section{What compilers take from these theories}
+\label{sec:app-d-compiler-use}
+
+Three borrowings recur across the book.
+First, intermediate forms such as A-normal form and continuation-passing style make evaluation order and control joins explicit; they are lambda-calculus ideas restricted to a compiler's needs, developed in Chapter~\ref{ch:intermediate-representations} without importing the whole theory.
+Second, closure conversion turns a nested function into a code pointer plus an environment holding exactly the free variables that substitution would have carried; the correctness question is which variables are free and where capture would occur, which is Section~\ref{sec:app-d-lambda} applied to Chapter~\ref{ch:inlining-specialization}.
+Third, typed intermediate languages carry the judgments of Chapter~\ref{ch:type-theory-compilers} through lowering so that each pass checks its own output; the survey in Section~\ref{sec:ch06-ir-families} records where that discipline pays and where it costs.
+In each case the theory supplies the shape of the invariant and the compiler supplies the data structures, the complexity bound, and the tests.
+Confusion runs one way: importing vocabulary without the invariant produces passes that name a property they do not maintain.
+The chapters therefore cite a rule or a map only where the pass enforces it, and mark every stronger claim with a TODO rather than asserting it.

@@ -19,12 +19,12 @@ local config = {
   main      = "index.ltx",
   jobname   = "index",
   engine    = os.getenv("ENGINE") or "xelatex",
-  chapters  = 38,
+  chapters  = 39,
   chapdir   = "chapters",
-  chapfmt   = "ch%02d",          -- ch01 ... ch38
+  chapfmt   = "ch%02d",          -- ch01 ... ch39
   extra     = { "frontmatter/preface.tex", "references.bib",
                 "appendices/appendix-a.tex", "appendices/appendix-b.tex",
-                "appendices/appendix-c.tex" },
+                "appendices/appendix-c.tex", "appendices/appendix-d.tex" },
   fonts     = { "Source Serif 4", "Source Sans 3", "JetBrains Mono" },
   aux_exts  = { "aux", "toc", "lof", "lot", "out", "log", "bbl", "bcf", "blg",
                 "run.xml", "idx", "ilg", "ind", "fls", "fdb_latexmk",

@@ -1,0 +1,1214 @@
+An Intermediate Language for Compilation to Scripting Languages∗
+Paola Giannini and Albert Shaqiri
+Computer Science Institute, DiSIT, Università del Piemonte Orientale
+Via Teresa Michel 11, 15121 Alessandria, Italy
+
+Keywords:
+
+Scripting Languages, Functional Languages, Intermediate Language, Translation.
+
+Abstract:
+
+In this paper we introduce an intermediate language for translation of F#, a functional language polymorphically typed relying on the .Net platform, to different scripting languages, such as Python and JavaScript. This
+intermediate language (IL for short) is an imperative language, with constructs that make possible to move a
+code fragment outside its definition environment, during the translation. Definition of names (variables and
+functions) are done in blocks, like in Python (and JavaScript) and do not have to statically precede their use.
+We present a translation of a core F# (including mutable variables) into IL.
+
+1
+
+INTRODUCTION
+
+Implementing an application in JavaScript (or any
+other dynamically typed language) can cause problems due to the absence of type checking. Such problems can lead to unexpected application behaviour
+followed by onerous debugging. Although dynamic
+type checking and automatic type casting shorten the
+programming time, they introduce serious difficulties
+in the maintenance of medium to large applications.
+This is the reason why dynamically typed languages
+are used mostly for prototyping and quick scripting.
+We propose to deal with these problems using dynamically typed languages as “assembly languages”
+to which we translate the source code from F# which
+is statically typed. In this way, we take advantage of
+the F# type checker and type inference system, as well
+as other F# constructs and paradigms such as pattern
+matching, classes, discriminated unions, namespaces,
+etc., and we may use the safe imperative features introduced via F# mutable variables. There are also the
+advantages of using an IDE such as Microsoft Visual Studio (code organization, debugging tools, IntelliSense, etc.).
+To provide translation to different target languages
+we introduce an intermediate language, IL for short.
+This is useful, for instance, for translating to Python
+that does not have complete support for functions as
+first class concept, or for translating to JavaScript, us∗ This work has been partially supported by MIUR
+CINA-Compositionality, Interaction, Negotiation, Autonomicity for the future ICT society.
+
+92
+
+ing or not libraries such as jQuery.
+Our aim is to prove the correctness of the compilers produced. To do that we formalize IL, and the
+translation from the source language to IL. The language IL is imperative, and has some of the characteristics of the scripting languages that makes them flexible, but difficult to check, such as blocks in which
+definition and use of variables may be interleaved,
+and in which use of a variable may precede its definition. (IL is partly inspired by IntegerPython, see
+(Ranson et al., 2008).) Therefore, the proof of correctness of the translation from the source language
+F# to IL already covers most of the gap from F# to the
+target scripting languages. In IL we also have some
+construct that may be used to manipulate safely fragments of open code.
+The paper is organized as follows. In Section 2,
+we introduce the challenges of the translation from F#
+to Python and JavaScript via some examples, that led
+us to introduce our intermediate language. We also
+outline the translation from IL to both JavaScript and
+Python. In Section 3 we define the fragment of F#
+used as source language, and in Section 4 we formalize IL. The formal translation from F# to IL is defined in Section 5, where it is stated to preserve the
+dynamic semantics of F#. In Section 6 we compare
+our work with the work of others, and finally in Section 7 we summarize our work, discussing briefly the
+implementation issues and highlighting our plans for
+future work.
+
+Giannini P. and Shaqiri A..
+An Intermediate Language for Compilation to Scripting Languages.
+DOI: 10.5220/0004588600920103
+In Proceedings of the 8th International Joint Conference on Software Technologies (ICSOFT-EA-2013), pages 92-103
+ISBN: 978-989-8565-68-6
+Copyright c 2013 SCITEPRESS (Science and Technology Publications, Lda.)
+
+AnIntermediateLanguageforCompilationtoScriptingLanguages
+
+2
+
+TRANSLATION BY
+EXAMPLES: DESIGN CHOICES
+
+In the fragment of F# we consider as source of our
+translation we have the typical functional language
+constructs: function definition and application, integers, booleans, addition and the conditional expression, and an imperative fragment including mutable
+variables, assignment, and sequences of expressions.
+On the left-hand-side of an assignment there must be
+a variable that was introduced with the mutable modifier.
+
+2.1
+
+Sequences of Expressions
+
+Many F# constructs can be directly mapped to
+JavaScript (or Python), but when this is not the case
+we obtain a semantically equivalent behaviour by using the primitives offered by the target language. E.g.,
+in F# a sequence of expressions is itself an expression,
+while in JavaScript and Python it is a statement. Suppose we want to translate a piece of code that calculates a fibonacci number, binds the result to a name
+and also stores the information if the result is even or
+odd. In Fig. 1 we have one possible F# implementation.
+let z=7
+let mutable even = false
+let x =
+let rec fib x =
+if x < 3 then 1
+else fib(x - 1) + fib(x - 2)
+let temp = fib z
+even <- (temp % 2 = 0)
+temp
+x
+Figure 1: F# program containing sequence of expressions.
+
+As we can see, on the right-hand-side of “let x=”
+we have a sequence of expressions: the definition of
+the function fib followed by the definition of temp,
+etc. This sequence is, in F#, an expression. If we
+directly map this code into JavaScript we obtain the
+syntactically incorrect code of Fig. 2. This program
+is syntactially wrong, since on the right-hand-side of
+an assignment we must have an expression, while a
+sequence of expressions is, in JavaScript, a statement.
+To transform a sequence of statements in an expression, in JavaScript, we wrap the sequence into a function, and to execute it we call the function, i.e., we use
+a JavaScript closure and application. Also, the whole
+program is wrapped into an entry point function. In
+this way, the code of Fig. 3 is correct. Unfortunately,
+the same cannot be done in Python as its support for
+
+var z = 7;
+var even = false;
+var x =
+var fib = function (x) {
+if (x < 3) return 1;
+else return fib(x-1)+fib(x-2)};
+var temp = fib(z);
+even = (temp % 2) == 0;
+temp;
+return x;
+Figure 2: Naive translation into JavaScript of sequence of
+expressions.
+(function() {
+var z = 7;
+var even = false;
+var x = (function () {
+var fib = function (x) {
+if (x < 3) return 1;
+else return fib(x-1)+fib(x-2)};
+var temp = fib(z);
+even = (temp % 2) == 0;
+return temp })();
+return x })();
+Figure 3: Correct JavaScript translation.
+
+closures is partial. So we have to define a temporary
+function, say temp1, in the global scope and to execute it we have to call temp1 in the place where the
+original sequence should be. However, variables such
+as even will be out of the scope of their definition,
+and this would make the translation wrong. To obtain a behaviour semantically equivalent, we have to
+pass to temp1 the variable even, by reference, since it
+may be modified in the body of temp. Note that, this
+problem is not present in JavaScript where the closure
+is defined and called in the scope of even. Another
+problem in Python is related to lambdas, whose body
+must be an expression (not a sequence). So we define the function temp2 whose body contains the statements that should be placed where an expression is
+expected. In Fig. 4 we can see the translation of the
+F# code into Python. The class ByRef is used to wrap
+the mutable variable even to obtain a parameter called
+by reference. The Python code generator inserts the
+needed wrapping and unwrapping before and after the
+call of temp1, and in the body of temp1.
+The problem we illustrated above occurs whenever in the target language we get a statement where
+an expression is expected. Since the target languages
+handle the situation differently, we abstract from this
+specific problem, and consider the more general problem of moving “open code” from its context, replacing it with an expression having the same behaviour.
+Taking inspiration from work on dynamic binding,
+
+93
+
+ICSOFT2013-8thInternationalJointConferenceonSoftwareTechnologies
+
+def temp1(w, z):
+def temp2(w, fib, x):
+if (x < 3): return 1
+else: return fib(x-1)+fib(x-2)
+fib = lambda x: temp2(w, fib, x)
+temp = fib(z)
+w.value = ((temp % 2) == 0)
+return temp
+def __main__():
+z = 7
+even = False
+wrapper1 = ByRef(even)
+x = temp1(wrapper1, z)
+even = wrapper1.value
+return x
+__main__();
+Figure 4: Correct Python translation.
+
+see (Nanevski, 2003) and recent work by the authors,
+see (Ancona et al., 2013), we define a pair of boxing/unboxing contructs, that we call: stm2exp, and
+exc. The construct stm2exp wraps “open code” (in
+this case a sequence of expressions) providing the information on the environment needed for its execution, that is the mutable and immutable variables occurring in it. This construct defines a value, similar
+to a function closure. The construct exc is used to
+execute the code contained in stm2exp. To do this it
+must provide values for the immutable variables, in
+our example the variable z, and bindings for the mutable variables to variables in the current environment,
+since when executing the code we have to modify the
+variable even.
+With these constructs, the F# code of Fig. 1 would
+be translated into the IL code in Fig. 5. All the let
+constructs are translated to variable definitions. The
+sequence of statements on the right-hand-side of “let
+x=” is packed into a stm2exp expression. Its first
+component is the translation of the sequence of statements, the second w->EV says that in the execution endef y = stm2exp(
+def fib =
+fun x ->
+if x < 3 then 1
+else (fib (x-1) + fib (x-2));
+def temp = fib u;
+w <- temp % 2 = 0;
+temp,
+w->EV, u);
+def z = 7;
+def even = false;
+def x = exc(y, EV->even, z);
+x
+Figure 5: Translation of F# sequence of expressions in the
+intermediate language.
+
+94
+
+vironment there should be a rebinding of the global
+name EV to a variable. Such variable may (in this case
+will) be modified by the execution of the code through
+assignment to the local variable w. The third component says that a value for u must be provided. The
+variable u is not modified by the execution of the code.
+We choose to use global names to unbind/rebind mutable variables, w in our example, so that the local variables can be consistently renamed without affecting
+the semantics of the construct as formal parameters
+of functions. Instead names such as EV are global to
+the whole program.
+To obtain the result that we would have by evaluating the sequence of statements in the current environment, to the variable x it is assigned the exc expression applied to y, which is bound to stm2exp(· · · ). The
+name EV is bound to the (mutable) variable even and
+the variable u will be assigned the value of the variable z. Regarding the different treatment of mutable
+and immutable variables, notice that, even though our
+intermediate language is imperative, we know, since
+we are translating F# code that some variables are immutable, so we have to provide just an initial value.
+The constructs stm2exp and exc have a different
+translation into the target languages JavaScript and
+Python, in particular for JavaScript we can take advantage from the fact that the closure wrapping the
+code can be inlined in the position where we have exc,
+so we can substitute both the mutable and immutable
+variables, instead the translation to Python treats the
+two kind of variables differently.
+
+2.2 Dynamic Type Checking
+JavaScript, and many dynamically typed languages,
+lack a rigorous type system. On the contrary, in F# if
+we write a function that adds two integers, say:
+let add x y = x + y
+
+we get
+val add : int -> int -> int
+
+because, even though we do not specify type information, the interpreter infers the type shown after the
+function definition. Therefore, there is no way of calling add with arguments that are not of type integer.
+However, if our translation in the intermediate code
+would produce a function whose body was simply
+x+y, which in turn could be translated in the corresponding expression in both JavaScript and Python,
+the target JavaScript function could be called, e.g.,
+add("foo")(1) and obtain the string "foo1" which is
+not what we wanted. In Python the situation would
+be better, in the sense that we cannot call add on a
+string and an integer, however, due to overloading we
+
+AnIntermediateLanguageforCompilationtoScriptingLanguages
+
+can call it on two floating points obtaining a floating
+point. To prevent this, the translation in the intermediate language, which follows, insert dynamic checks
+on parameters of functions.
+def add = fun x ->
+def x1 = check(int, x);
+fun y ->
+def y1= check(int, y);
+x1 + y1;
+
+These checks are translated into dynamic type checking in JavaScript and Python. In JavaScript we use
+the function checkInt (that we defined) that returns
+its argument if it is an integer, and fails, raising an
+exception, if the parameter is not an integer:
+var add = function (x) {
+var x1 = checkInt(x);
+return function(y) {
+var y1 = checkInt(y);
+return x1 + y1 } }
+
+Similarly for Python:
+def temp__1(y, x):
+y1 = checkInt(y)
+return (x + y1)
+def temp__2(x):
+x1 = checkInt(x)
+return lambda y: temp__1(y, x1)
+add = lambda x: temp__2(x)
+
+3
+
+CORE F#
+
+In the grammar for expressions, in Fig.6, the
+square brackets “[. . .]” delimit an optional part of the
+syntax, we use x, y, z for variable names, and the overbar sequence notation is used according to (Igarashi
+et al., 2001). For instance: “x:T=v” stands for
+“x1 :T1 =v1 · · · xn :Tn =vn ”. The empty sequence is denoted by “ /0”. For an F# expressions e the free variables of e, FV(e) are defined in the standard way. An
+expression e is closed if FV(e) = /0.
+The let rec construct introduces mutually recursive variables. Variable names, in this constructs are
+meant to be bound to functions (as seen for fib in
+the example of Fig. 1). The let construct (followed by an optional mutable modifier) binds the
+variable x to the value resulting from the evaluation
+of the expression on the right-hand-side of = in the
+evaluation of the body of the construct. As usual
+the notation let f x=e1 in e2 is a short hand for
+let f =fun x:T->e1 in e2 where T is the type of e1 .
+Similarly for let rec. In the (concrete syntax) of the
+examples, as in F#, “,” and in are substituted by a return without indentation.
+When the let construct is followed by mutable the
+variable introduced is mutable. Only mutable variables may be used on the left-hand-side of an assignment. This restriction is enforced by the type system
+of the language. The type system enforces also the
+restriction that the body of a function cannot contain
+free mutable variables, even though it may contain
+bound mutable variables. So, the function f in Fig.
+7 is not correct, whereas the definition of g that follows is correct. A type environment Γ is defined by:
+let mutable z = 0
+
+The syntax for the core F# language is presented in
+Fig.6. We sacrificed minimality to clarity, including constructs, such as let, let mutable, and let
+rec that are used in the practice of programming and
+that raise challenges in the translation to dynamic languages. We also did not introduce imperative features
+through reference types, but through mutable variables, since this is closer to the imperative style of
+programming. Moreover, we present a typed version
+of F# without type inference, since this is performed
+by the F# compiler. In the type system we omit type
+variables, as they do not add complexity to the translation.
+e
+
+:: =
+
+T
+v
+
+:: =
+:: =
+
+x | n | tr | fls | e+e | if e then e else e
+| fun x:T->e | let [mutable] x=e in e
+| e e | let rec x:T=v in e | x<-e | e, e
+int | bool | T → T
+n | tr | fls | fun x:T->e
+Figure 6: Syntax of F#.
+
+let f x =
+if (x > 0) then z <- x
+else z <- -x
+z
+let g x =
+let mutable w = 0
+if (x > 0) then w <- x
+else w <- -x
+w
+z
+Figure 7: Typing functions in F#.
+
+Γ ::= x:T, Γ | x:T!, Γ | /0
+that is Γ associates variables with types, possibly followed by ! . If the type is followed by ! this means that
+the variable was introduced with the mutable modifier. Let † denote either ! or the empty string, and
+let dom(Γ) = {x | x:T † ∈ Γ}. We assume that for any
+
+95
+
+ICSOFT2013-8thInternationalJointConferenceonSoftwareTechnologies
+
+variable x, in Γ there is at most an associated type. We
+say that the expression e has type T in the environment
+Γ if the judgement
+Γ⊢e:T
+is derivable from the rules of Fig. 8. In the rules of
+Fig. 8, with Γ[Γ′ ] we denote the type environment
+such that dom(Γ[Γ′ ]) = dom(Γ) ∪ dom(Γ′ ) and:
+• if x:T † ∈ Γ′ then x:T † ∈ Γ[Γ′ ], and
+• if x:T † ∈ Γ and x 6∈ dom(Γ′ ), then x:T † ∈ Γ[Γ′ ].
+In the following we describe the most interesting
+rules.
+Consider rule (T YA BS ): to type the body of a function
+we need assumptions on its free variables and formal parameter. From the definition of Γ[Γ′ ] we have
+that the assumptions on its free variables must coincide with the one present in the environment of the
+definition of the function. Moreover, none of them
+may have been declared as mutable. However, in the
+environment in which the function is defined, Γ[Γ′ ],
+there can be mutable variables, as long as they are not
+needed to type the body of the function. In the example of Fig. 7, if the definition of the function f
+were typable, it should have been typed from the environment Γ[Γ′ ] = z:int!, therefore, to type its body
+we would have used the environment z:int!, x:int,
+i.e., Γ′ = z:int!. However, this is not possible. Instead, the definition of g, which is again typed in
+Γ[Γ′ ] = z:int!, not having z free in its body, can be
+typed from x:int, by defining Γ′ = /0.
+The rules (T Y L ET ) and (T Y L ET M UT ) bind a variable, x, to
+the expression e1 in the expression e2 . So the expression e2 is typed in a type environment in which x is
+associated with the type of e1 .
+In the rule (T Y L ET MUT ) the type is followed by ! so that
+inside e2 the variable x may be used on the left-handside of an assignment, see rule (T YA SSIGN ).
+Our core F# language has imperative features, so
+for the definition of the operational semantics we use
+a store. The runtime configurations are pairs “expression, store”, e | ρ, where a store ρ is a mapping between locations and values:
+l1 7→ v1 , . . . ln 7→ vn
+In Fig. 9 we define:
+• runtime expressions, which are expressions including locations (generated by the evaluation of
+mutable variables definitions);
+• evaluation contexts defining, in conjunction with
+rule (C TX -F), the reduction strategy of the language, which is call-by-value, with evaluation
+left-to-right, and
+• the rules for the evaluation relation, −→.
+
+96
+
+In the rules, with e[x := e′ ] we denote the result of
+substituting x with e′ in e with renaming if needed.
+Moreover, ρ[x 7→ v] is defined by: ρ[x 7→ v](x) = v,
+and ρ[x 7→ v](y) = ρ(y), when x 6= y.
+The evaluation of the sum expression assumes that
+the operand be integers, and returns n, which is the
+numeral corresponding to the sum of the values of n1
+and n2 . For the conditional statements we have two
+rules corresponding to the (boolean) value of the condition. Both the evaluations of the application, rule
+(A PP -F), and let, rule (L ET-F), substitute x with its the
+value in the body of the construct. This is in accord
+with the fact that x is immutable. Instead, for a variable defined mutable, rule (L ET M UT-F) , a new location
+l is generated, added to the store with the initial value
+v, and the variable x is substituted with l. Therefore,
+during evaluation, expressions may contain locations.
+Indeed, since variables on the left-hand-side of assignments where always introduced by let mutable,
+when an assignment is evaluated, rule (A SSIGN -F), we
+have a configuration: l<-v | ρ which is evaluated by
+changing the value of the location l to be v. The evaluation of let rec, rule (L ET-F), produces the body e in
+which each variable xi is substituted with a let rec
+expression with body vi , so that if xi is evaluated all
+the variables x will be substituted with their definitions v. Evaluation of a location, rule (L OC -F), produces the value associated in the store. Finally in rule
+(C TX -F) the context E selects the first sub-expression
+to be evaluated. We can show that evaluation is deterministic.
+The typing rules in Fig.8 are for the (source) expression language, so they do not include a rule for
+locations. To type run-time expressions we need a
+store environment Σ assigning types to locations. The
+type judgement should therefore be:
+Γ|Σ⊢e:T
+and the typing rule for locations
+Γ | Σ ⊢ l : Σ(l) (T Y L OC F)
+All the other rules are obtained by putting Γ | Σ on the
+left-hand-side of ⊢ in the typing rules of Fig.8.
+Definition 1. A store ρ is well-typed with respect to a
+type environment Γ, and a store environment Σ, written Γ | Σ ⊢ ρ, if dom(ρ) = dom(Σ), and for all l ∈ ρ,
+we have that Γ | Σ ⊢ ρ(l) : Σ(l).
+Types are preserved by reduction, and progress
+holds, as the following two theorems state.
+Theorem 2 (Preservation). Let Γ | Σ ⊢ e : T, and ρ be
+such that Γ | Σ ⊢ ρ. If e | ρ −→ e′ | ρ′ , then Γ | Σ′ ⊢ e′ :
+T, for some Σ′ ⊇ Σ such that Γ | Σ′ ⊢ ρ′ .
+Theorem 3 (Progress). Let /0 | Σ ⊢ e : T, then either e
+is a value or for any store ρ such that /0 | Σ ⊢ ρ there
+are, e′ , and ρ′ such that e | ρ −→ e′ | ρ′ .
+
+AnIntermediateLanguageforCompilationtoScriptingLanguages
+
+Γ ⊢ n : int
+
+(T Y N UM)
+
+Γ ⊢ e1 : int
+
+Γ ⊢e e2 : int
+
+Γ ⊢ e1 +e2 : int
+Γ′ [x:T] ⊢ e : T ′
+
+Γ ⊢ tr, fls : bool
+Γ ⊢ e : bool
+(T Y SUM)
+
+Γ[Γ ] ⊢ fun x:T->e : T → T
+
+′
+
+Γ ⊢ e1 : T → T ′
+(T YA BS )
+
+Γ ⊢ e2 : T
+
+(T Y VAR )
+
+(T YA PP )
+
+Γ[x:T] ⊢ e : T ′
+
+Γ ⊢ let x=e1 in e2 : T ′
+
+(T Y L ET)
+
+Γ[x:T] ⊢ vi : Ti (1 ≤ i ≤ n)
+Γ[x:T] ⊢ e : T
+(T Y R EC )
+Γ ⊢ let rec x:T=v in e : T
+
+Γ ⊢ let mutable x=e1 in e2 : T ′
+
+Γ⊢e:T
+
+Γ ⊢ e1 : T
+
+x:T! ∈ Γ
+
+Γ ⊢ x<-e : T
+
+(T Y IF )
+
+Γ ⊢ e2 : T
+
+Γ ⊢ e1 e2 : T
+Γ ⊢ e1 : T
+
+x:T † ∈ Γ
+Γ⊢x:T
+
+Γ ⊢ e1 : T
+
+Γ ⊢ if e then e1 else e2 : T
+
+∀y, T ′′ y:T ′′ ! 6∈ Γ′
+
+′
+
+(T Y B OOL)
+
+(T YA SSIGN )
+
+Γ ⊢ e1 : T
+
+Γ[x:T!] ⊢ e : T ′
+(T Y L ETM UT )
+
+Γ ⊢ e2 : T ′
+
+Γ ⊢ e1 , e2 : T ′
+
+(T Y SEQ )
+
+Figure 8: Typing rules of core F#.
+e
+
+E
+
+:: =
+:: =
+
+··· | l
+[ ] | E +e | n+E | if E then e else e | E e | v E | let [mutable] x=E in e
+| u<-E | E , e
+n1 +n2 | ρ −→ n | ρ
+if tr then e1 else e2 | ρ −→ e1 | ρ
+if fls then e1 else e2 | ρ −→ e2 | ρ
+(fun x:T->e) v | ρ −→ e[x := v] | ρ
+let x=v in e | ρ −→ e[x := v] | ρ
+let rec x:T=v in e | ρ −→
+e[xi := (let rec x:T=v in vi ) | 1 ≤ i ≤ n] | ρ
+let mutable x=v in e | ρ −→ e[x := l] | ρ[l 7→ v]
+l<-v | ρ −→ v | ρ[l 7→ v]
+v, e | ρ −→ e | ρ
+l | ρ −→ v | ρ
+e | ρ −→ e′ | ρ′
+
+if
+
+ñ = ñ1 +int ñ2
+
+l 6∈ dom(ρ) new
+l ∈ dom(ρ)
+if ρ(l) = v
+
+runtime expression
+evaluation contexts
+
+(SUM-F)
+(IF T RUE -F)
+(IF FALSE -F)
+(A PP -F)
+(L ET-F)
+(R EC -F)
+(L ETM UT-F)
+(A SSIGN -F)
+(SEQ -F)
+(VAR -F)
+
+E 6= [ ]
+
+E [e] | ρ −→ E [e′ ] | ρ′
+
+(C TX -F)
+
+Figure 9: Operational semantics of core F#.
+
+4
+
+INTERMEDIATE LANGUAGE
+
+The intermediate language, IL, is an imperative language with three syntactic categories: expressions,
+statements and blocks. We introduce the construct
+that wraps code that need to be moved from its definition environment, and the one that executes such
+code in the runtime environment.
+The syntax of IL is presented in Fig.10.
+There are three syntactic categories: blocks, statements, and expressions. We introduce the distinction
+between expressions and statements as many target
+languages do. This facilitates the translation process
+
+and prevents some errors while building the intermediate abstract syntax tree, see (Appel, 1998) for a similar choice. Blocks are sequences of statements or
+expressions ended by an expression. In our translation we flatten the nested structure of let constructs
+so we need blocks in which definitions and expressions/statements may be intermixed. Moreover, since
+we do not have a specific let rec construct use of a
+variable may precede its definition, e.g., when defining mutually recursive (or simply recursive) functions. Statements may be either assignments or variable definitions. Our compiler handles many more
+statements, but these are enough to show the ideas
+
+97
+
+ICSOFT2013-8thInternationalJointConferenceonSoftwareTechnologies
+
+bl
+st
+e
+
+:: =
+:: =
+:: =
+
+Tp
+v
+
+:: =
+:: =
+
+st; bl | e; bl | e
+x<-e | def x=e
+x | n | tr | fls | e+e | fun x->{bl} | e e
+| if e then {bl} else {bl} | check(Tp , e)
+| stm2exp({bl}, y 7→ Y, x)
+| exc(e, Y 7→ y, e)
+int | bool
+n | tr | fls | fun x:T->{bl}
+| stm2exp({bl}, y 7→ Y, x)
+Figure 10: Syntax of IL.
+
+behind the design of IL. Our intermediate language
+is inspired (especially for the block structure) to IntegerPython, see (Ranson et al., 2008). Variables are
+statically scoped, in the sense that, if there is a definition of the variable x in a block, all the free occurrences of x in the block refer to this definition. However, we can have occurrences of x preceding its definition. E.g.,
+def f = fun y -> { x };
+def x = 5;
+f 2
+
+correctly returns 5, whereas the following code would
+produce a run-time error:
+def x =7;
+if (x > 3) then {
+def f = fun y -> { x };
+f 2
+def x = 5;
+3 }
+else { 4 }
+
+since when f is called the variable x, defined in the
+inner block, has not yet been assigned a value. Instead, if x was not defined in the inner block, like in
+the following
+def x =7;
+if (x > 3) then {
+def f = fun y -> { x };
+f 2 }
+else { 4 }
+
+the block would return 7, since x is bound in the enclosing block. This is also the behaviour in JavaScript
+and Python.
+The construct stm2exp is used to move a block,
+bl, outside its definition context. To produce a closed
+term, the mutable variables free in bl, y, are unbound
+by associating them to global names Y not subject
+to renaming. The variables x, instead, are immutable
+variables free in bl, i.e., they are not modified by the
+execution of bl. The metavariables, X, Y, Z are used
+to denote names.
+The operational semantics of IL, see Fig. 11, is
+given, by defining a reduction relation for blocks. So
+
+98
+
+our configurations will be pairs: “block, store”. In
+order to specify the order of reduction we define evaluation contexts for blocks, containing evaluation contexts for expressions. As for F# we have to add to
+the syntax of expressions locations, l, as they are generated during the evaluation of blocks. Moreover,
+we add two constructs wrapping blocks: {bl} and
+eval(bl). The first will be used to do the initial allocation of variables needed to reproduce the previously described semantics, and the second to execute
+a block in a position where an expression would be required. Note that these expressions are not in IL but
+are just introduced to describe its semantics.
+As for F#, the evaluation contexts of Fig. 11 specify a call-by-value, left-to-right reduction strategy.
+The first rule is used before the evaluation of a
+block to allocate the variables defined in a block. The
+function de f mapping a block to the set of variables
+defined in it is defined by:
+• def (e) = /0,
+• def (e; bl) = def (x<-e; bl) = def (bl), and
+• def (def x=e; bl) = {x} ∪ def (bl).
+The initial value of the locations is set to undefined, ?,
+so if an access to a variable is done before the evaluation of an assignment or a definition for this variable
+undErr is returned. Note that, this will never happen for IL programs which are translation of F# programs. After this initial allocation a block will not
+contain free variables (but locations).
+Rules (A SSIGN ) and (D EF ) continue the execution of the
+expressions/statements in a block in a store in which
+the value of location l is v. So after this the value of l is
+not undefined. Rule (E XP ) throws away the value of an
+expression and continues the execution of the block.
+The rules for +, and if are trivial. Rule (A PP ) allocates a location in the memory, assigning the value
+of the actual parameter to it, then the location is substituted for the formal parameter in the body of the
+function. Note that, being in an imperative language,
+the formal parameter could be modified in the body
+of the function, however, this change would not be
+visible in the calling environment, since the location
+is new. After this allocation the execution continues
+with the evaluation of the body {bl}, i.e., applying
+rule (A LLOC ). The rules (T YPE Y ES ), and (T YPE N O ) check
+whether a value is of the right primitive type. The
+function typeof from values to types is defined by:
+typeof (tr) = typeof (fls) = bool, typeof (n) = int,
+and undefined for the other values. The evaluation of
+the exc construct, rule (S T T O E XP ), expects the first argument to be a stm2exp, such that the names of its unbindings are a subset of the one of the rebindings provided by exc. If this is the case, it allocates new loca-
+
+AnIntermediateLanguageforCompilationtoScriptingLanguages
+
+e
+
+S
+E
+
+:: =
+:: =
+:: =
+
+· · · | l | {bl} | eval(bl)
+l<-E ; bl | def l=E ; bl | E ; bl | E
+[ ] | E +e | n+E | E e | v E | if E then {bl} else {bl} | check(Tp , E )
+| exc(E , Z 7→ l, e) | exc(v, Z 7→ l, v E e) | eval(S )
+
+{bl} | ρ −→ bl[x := l] | ρ[l 7→ ?]
+l<-v; bl | ρ −→ bl | ρ[l 7→ v]
+def l=v; bl | ρ −→ bl | ρ[l 7→ v]
+v; bl | ρ −→ bl | ρ
+n1 +n2 | ρ −→ n | ρ
+(fun x->{bl}) v | ρ −→ {bl[x := l]} | ρ[l 7→ v]
+if tr then bl1 else bl2 | ρ −→ {bl1 } | ρ
+if fls then bl1 else bl2 | ρ −→ {bl2 } | ρ
+check(Tp , v) | ρ −→ v | ρ
+check(Tp , v) | ρ −→ typeErr
+′
+exc(stm2exp({bl}, y 7→ Y, x), Z 7→ l , v) | ρ −→
+eval({(bl[x := l])[yi := l′j | Yi = Z j 1 ≤ i ≤ n]}) | ρ[l 7→ v]
+eval(v) | ρ −→ v | ρ
+l | ρ −→ v | ρ
+l | ρ −→ undErr | ρ
+e | ρ −→ e′ | ρ′
+
+e | ρ −→ err
+
+S 6= [ ]
+
+S [e] | ρ −→ S [e′ ] | ρ′
+
+(C TX )
+
+runtime expression
+block evaluation context
+expression evaluation context
+
+if x = def (bl)
+l 6∈ dom(ρ) new
+
+(A LLOC )
+(A SSIGN )
+(D EF )
+(E XP )
+
+if ñ = ñ1 +int ñ2
+l 6∈ dom(ρ) new
+if typeof (v) = Tp
+if typeof (v) 6= Tp
+if Y ⊆ Z
+l 6∈ dom(ρ) new
+
+S [e] | ρ −→ err
+
+(STTO E XP )
+(E VAL)
+(L OC D EF )
+(L OC U ND )
+
+if ρ(l) = v
+if ρ(l) =?
+
+err = typeErr ∨ undErr
+
+(SUM)
+(A PP )
+(IF T RUE )
+(IF FALSE )
+(T YPEY ES )
+(T YPEN O )
+
+S 6= [ ]
+(C TX E RROR )
+
+Figure 11: Runtime expressions, evaluation contexts and operational semantics rule for IL.
+
+tions for the immutable variables x (as in rule (A PP ) for
+the formal parameter), instead, for the unbound variables y it substitutes the associated locations (via the
+correspondence of the names in Y and Z). So through
+assignment to the (local) variables in y the execution
+environment may be modified. The resulting block is
+wrapped in the eval construct. Rule (E VAL ) returns its
+value. (Evaluation inside eval is done by the (C TX )
+rule.) Finally, access to a location may return undErr
+if the location has not been initialized with an assignment of or a definition statement. Rule (C TX ) evaluates the first sub-expression selected by the evaluation
+context. In case the evaluation produces and error rule
+(C TX E RROR ) returns the error at the top level. Note that,
+given a block bl if there is S and e such that bl = S [e],
+then S is unique. So evaluation is deterministic.
+An IL program is a closed block, bl. The initial
+configuration for a program is {bl} | [ ].
+Let us look at an example of evaluation. Consider
+the program of Fig. 5. Applying rule (A LLOC ) to the
+block enclosed in brackets we get the configuration
+bl | ρ where bl is
+def lc1 = stm2exp(...);
+def lc2 = 7;
+def lc3 = fls;
+def lc4 = exc(lc1, EV->lc3, lc2);
+lc4
+
+and ρ = [lc1 7→?, lc2 7→?, lc3 7→?, lc4 7→?].
+
+Applying (D EF ) three times we get bl1 | ρ1 where
+bl1 = def lc4 = exc(lc1, EV → lc3, lc2); lc4 and
+ρ1 = [lc1 7→ stm2exp(...), lc2 7→ 7, lc3 7→ fls, lc4 7→?].
+From rule (C TX ) where S is def lc4 = E ; lc4
+and E is exc([ ], EV → lc3, lc2); lc4,
+applying rule (L OC D EF ) we get bl2 | ρ1 where bl2 is
+def lc4 = exc(stm2exp(...), EV → lc3, lc2); lc4.
+From rule (C TX ) where S1 is def lc4 = E1 ; lc4
+and E1 is exc(stm2exp(...), EV → lc3, [ ]); lc4, applying rule (L OC D EF ) we get bl3 | ρ1 where bl3 is
+def lc4 = exc(stm2exp(...), EV → lc3, 7); lc4.
+Again by rule (C TX ) where S2 is def lc4 = E2 ; lc4
+and E2 = [ ], and applying rule (S T T O E XP ), we get
+def lc4 = eval({bl4 }); lc4 | ρ1 , where bl4 is
+def fib =
+fun x ->
+if x < 3 then 1
+else (fib (x-1) + fib (x-2));
+def temp = fib 7;
+lc3 <- temp % 2 = 0;
+temp
+
+The evaluation proceeds inside the eval construct,
+with rule (C TX ) where S3 is def lc4 = E3 ; lc4 and
+E3 is eval([ ]) , applying rule (A LLOC ), and producing the configuration bl5 | ρ2 where ρ2 = [lc1 7→
+stm2exp(...), lc2 7→ 7, lc3 7→ fls, lc4 7→?, lc5 7→
+?, lc6 7→?], and bl5 is def lc4 = eval({bl6 }); lc4
+
+where bl6 is
+
+99
+
+ICSOFT2013-8thInternationalJointConferenceonSoftwareTechnologies
+
+def lc5 =
+fun x ->
+if x < 3 then 1
+else (lc5 (x-1) + lc5 (x-2));
+def lc6 = lc5 7;
+lc3 <- lc6 % 2 = 0;
+lc6
+
+We can see how recursion is handled and how the assignment to lc3 when evaluated modifies the location
+of the initial variable even.
+
+translations for function definitions, sequence of expressions, and the let construct, which exemplify the
+technique used.
+In the formal definition of the translation δ is
+a metavariable denoting a declaration of a variable
+“def x=e” and δ a sequence of declarations separated
+by “;” (semicolon).
+The translations of F# function definitions to IL
+blocks or expressions:
+[[fun x:T->e]]blI,M
+
+[[fun x:T->e]]exI,M
+
+are both equal to:
+
+5
+
+TRANSLATION OF CORE F#
+INTO IL
+
+In our translation we flatten the let constructs transforming them into definitions of the corresponding
+variables followed by the translation of the expression
+in their body. Therefore, we have to take into account
+the fact that in an IL block we may have forward binding. E.g., if
+let y = 3 in
+if ( y = 3) then (
+let f = (fun x -> y)
+let y = 5
+(f 0) )
+else 4
+
+is translated into
+def y = 3;
+if ( y = 3) then (
+def f = (fun x -> { y });
+def y = 5;
+(f 0) )
+else 4
+
+The translation is incorrect, since in the IL code the
+occurrence of y in the body of f is bound to the definition of y that follows. Therefore the F# expression
+evaluates to 3 whereas its translation in IL evaluates
+to 5. In the translation we use renaming to resolve this
+problem.
+As explained in the Section 2 sequences of expressions will be mapped to sequences of statements,
+and we use the stm2exp and exc constructs to simulate the behaviour of the sequence of statements with
+an expression. So we define two translations of F#
+expressions. The first to IL expressions, [[·]]I,M
+ex , and
+I,M
+the second to IL blocks, [[·]]bl . The translations are
+parametrized by the sets of the immutable variables, I,
+and mutable variables, M, of the context of the F# expression that is translated. The translations produce,
+in addition to an IL expression/block also a sequence
+of top level variable definition of variables bound to
+stm2exp expressions. In the following we present the
+
+100
+
+( fun x->{def y=check(T, x); bl[x := y]}, δ )
+
+where [[e]]I∪{x},M
+= ( bl, δ ). So the translation of a
+bl
+function produces a function whose body is the translation of the body (to a block) of the original function. In the translation of the body of the function the
+variable x is added to the set of free immutable variables I. The formal parameter is replaced with a new
+variable resulting from the type checking of the original parameter. See the discussion about dynamic type
+checking in Section 2.
+In the following, we introduce the definition of the
+wrapping needed to extrude a block from its definition
+environment and how the construct exc rebinds it in
+the run-time environment.
+Definition 4. Given an IL block, and the disjoint sets of variables I = {x} and M = {y}, let
+blockToExp(bl, I, M) be
+(exc(z, Y 7→ y, x), δ)
+
+where:
+• δ is def z:T ′′ =stm2exp(bl, y 7→ Y, x)
+• z is a new variable and Y are new names.
+Let blockToExp(bl, I, M) = (e, δ), we can prove that:
+for all stores ρ we have: {δ; e} | ρ −→⋆ v | ρ′ if and only
+if {bl} | ρ −→⋆ v | ρ′′ . So the evaluation of the definition δ followed by the generated expression produces
+the same result as the evaluation of the original block.
+The difference in the content of the final stores is due
+to the fact that the evaluation of the definition δ allocates a location and assigns it the stm2exp expression,
+to subsequently substitute this value for the location
+in the exc expression. However, since the variable z
+is new it does not interfere with the evaluation of the
+original block/expression.
+To give the translation of both sequences of expressions and of the let constructs, we introduce the
+formal definition of the top level variable definition of
+F# expressions, then we define the renaming needed
+to avoid the capture of forward definitions described
+at the beginning of this section.
+Definition 5. 1. Let e be an F# expression, the function de f # (e) returning the set of variables defined
+at the top level of e is defined as follows:
+
+AnIntermediateLanguageforCompilationtoScriptingLanguages
+
+• def # (let [mutable] x=e1 in e2 ) = {x} ∪ def # (e2 ),
+• def # (let rec x:T=v in e) = {x} ∪ def # (e),
+• def # (e1 , e2 ) = def # (e1 ) ∪ def # (e2 ), and
+• def # (e) = /0 for all other expresssions e.
+2. Let e be an F# expression, and x a set of variables, rn(e, x), renames the top level definitions of
+the variables x in e as follows:
+• if e is let [mutable] x=e1 in e2 , then rn(e, x) is
+let [mutable] x=e1 in rn(e2 , x) if x 6∈ x
+let [mutable] z=e1 in rn(e2 {x 7→ z}, x) if x ∈ x
+and z is new
+• if e is let rec y:T=v in e, then rn(e, x) is
+let rec y:T=v in rn(e, x) if y ∩ x = /0
+let rec z:T=(v{y 7→ z}) in rn(e{y 7→ z}, x) if y ∩
+x = /0 and z are new
+• if e is e1 , e2 then rn(e, x) is rn(e1 , x), rn(e2 , x)
+• rn(e, x) is e for all other expresssions e.
+The translations of an F# sequence of expressions
+to a IL block is:
+I,M
+
+[[e1 , e2 ]]bl
+
+′
+
+= ( bl1 ; bl2 , δ; δ )
+
+where:
+• [[e1 ]]Γbl = ( bl1 , δ )
+′
+
+• [[rn(e2 , z)]]Γbl = ( bl2 , δ ) and z = def # (e2 ) ∩ FV(e1 ).
+The translation of the sequence is the sequence of
+blocks which are the translations of the two expressions to blocks. However, before translating the second expression, e2 , we rename all the variables defined in it that are free in e1 , since in e1 these variables are bound to their definitions in the enclosing
+environment. In this way we preserve the semantics
+of the source language F#.
+The translations of an F# sequence of expressions
+to an IL expression is:
+[[e1 , e2 ]]exI,M = ( e, δ; δ )
+
+where:
+
+′
+
+= ( bl, δ ) with z = def # (e2 ) ∩
+• [[rn(e2 , z)]]I∪{x},M
+bl
+FV(e1 ).
+
+That is we translate e1 into an IL expression and the
+body of the let e2 into a block. For the translation of
+e2 the variable x is added to the immutable variables
+of the context. Before translating e2 we rename all
+the variables defined in e2 that are free in e1 (as for
+the translation of sequences of expressions).
+The translation of let mutable differs only in the fact
+that in translattion of e2 , the variable x, being mutable,
+is added to M.
+Note that, this translation produces a block, the definition of x followed by a block. Moreover, the translation of the expression on the right-hand-side of the
+definition of x, that is e1 , must be an IL expression.
+Looking at the F# code of Fig. 1 this means that the
+following F# expression:
+let rec fib x =
+if x < 3 then 1
+else fib(x - 1) + fib(x - 2)
+let temp = fib z
+even <- (temp % 2 = 0)
+temp
+
+which is a sequence of expressions, must be translated
+to an IL expression.
+The translation of a let expression to an IL
+expression, is defined as the translation of a sequence of expressions to an IL expression in which
+[[let x=e1 in e2 ]]blI,M substitutes [[e1 , e2 ]]blI,M .
+Properties of the Translation. The translation preserves the dynamic semantics of the F# expressions,
+/ /
+that is let e be an F# program, and [[e]]bl0,0 = ( bl, δ ).
+⋆
+Then e | [ ] −→ v | ρ if and only if {δ; bl} | [ ] −→⋆ v |
+ρ′ for some ρ′ . From this result and the fact that F#
+programs do not get stuck, we can derive that the IL
+translation of an F# program does not evaluate to an
+error or gets stuck.
+
+• [[e1 , e2 ]]blI,M = ( bl, δ ) and
+• blockToExp(bl, I, M) = ( e, δ ).
+
+6
+
+That is we first translate the sequence to a block, and
+then return an exc expression, and the definition of
+a new variable bound to an stm2exp expression, see
+Definition 4. Note that the sets of mutable and immutable variable of the environment are needed to
+generate the correct matching for the expressions exc
+and stm2exp.
+The translation of the let construct to an IL block
+′
+
+[[let x=e1 in e2 ]]blI,M = ( def x=e′1 ; bl, δ; δ )
+
+where
+• [[e1 ]]exI,M = ( e′1 , δ ) and
+
+COMPARISONS WITH OTHER
+WORK
+
+Similar projects exist and are based on similar translation techniques, although, as far as we know, we are
+the first to introduce an intermediate language allowing to translate to many target languages. Pit, see (Fahad, 2012), and FunScript, see (Bray, 2013), are open
+source F# to JavaScript compilers. They support only
+translation to JavaScript. FunScript ha support for integration with JavaScript code. Websharper, see (Intellifactory, 2012), is a professional web and mobile
+development framework. As of version 2.4 an open
+
+101
+
+ICSOFT2013-8thInternationalJointConferenceonSoftwareTechnologies
+
+source license is available. It is a very rich framework offering extensions for ExtJs, jQuery, Google
+Maps, WebGL and many more. Again it supports
+only JavaScript. F# Web Tools is an open source
+tool whose main objective is not the translation to
+JavaScript, instead, it is trying to solve the difficulties
+of web programming: “the heterogeneous nature of
+execution, the discontinuity between client and server
+parts of execution and the lack of type-checked execution on the client side”, see (Petřı́ček and Syme,
+2012). It does so by using meta-programming and
+monadic syntax. One of it features is translation to
+JavaScript. Finally, a translation between Ocaml byte
+code and JavaScript is provided by Ocsigen, and described in (Vouillon and Balat, 2011).
+On the theoretical side, a framework integrating statically and dynamically typed (functional) languages is presented in (Matthews and Findler, 2009).
+Support for dynamic languages is provided with ad
+hoc constructs in Scala, see (Moors et al., 2012).
+A construct similar to stm2exp, is studied in recent
+work by one of the authors, see (Ancona et al., 2013),
+where it is shown how to use it to realize dynamic
+binding and meta-programming, an issue we are planning to address. The only work to our knowledge that
+proves the correctness of a translation between a statically typed functional language, with imperative features to a scripting language (namely JavaScript) is
+(Fournet et al., 2013).
+
+7
+
+CONCLUSIONS
+AND FUTURE WORK
+
+In this paper we introduced IL an intermediate language for the translation of a significant fragment
+of F# to scripting languages such as Python and
+JavaScript. The translation is shown to preserve
+the dynamic semantics of the original language. A
+preliminary version of this paper was presented at
+ICTCS 2012, see (Giannini et al., 2012), which has
+not published proceedings. We have a prototype implementation of the compiler that can be found at
+http://www.bluestormproject.org/. The compiler is
+implemented in F# and is based on two metaprogramming features offered by the .net platform: quotations
+and reflection. Our future work will be on the practical side to use the intermediate language to integrate
+F# code and JavaScript or Python native code. (Some
+of the features of IL, such as dynamic type checking, were originally introduced for this purpose.) A
+previous implementation of the translation supported
+other features such as namespacing, classes, pattern
+matching, discriminated unions, etc. We are in the
+
+102
+
+process of adding them at the current implementation,
+since some of this features have poor or no support at
+all in JavaScript or Python. On the theoretical side,
+we are planning to complete the proofs of correctness
+of the translations. We need to formalize our target
+languages Python and JavaScript, and then prove the
+correctness of the translation from IL to them. (We
+anticipate that these proofs will be easier than the one
+from F# to IL.) Moreover, we want to formalize the
+integration of native code, and more in general metaprogramming on the line of recent work by the authors, see(Ancona et al., 2013) . We are also considering extending the type system for the intermediate
+language with polymorphic types, which is, as shown
+in (Ahmed et al., 2011), non trivial.
+
+ACKNOWLEDGEMENTS
+We warmly thank Daniele Mantovani for his support
+and involvement in the topic of the paper. We also
+thank the anonymous referees of a previous version
+of the paper for pointing out some problems which
+lead to a substantial review of the intermediate language. Any misinterpretation of their suggestions is,
+of course, our responsibility.
+
+REFERENCES
+Ahmed, A., Findler, R. B., Siek, J. G., and Wadler, P.
+(2011). Blame for all. In Proceedings of POPL 2011,
+Austin, TX, USA, ACM, pages 201–214.
+Ancona, D., Giannini, P., and Zucca, E. (2013). Reconciling positional and nominal binding. In ITRS 2012,
+EPTCS.
+Appel, A. W. (1998). Modern Compiler Implementation in
+ML. Cambridge University Press.
+Bray, Z. (2013). Funscript. http://tomasp.net/files/funscript/
+tutorial.html.
+Fahad, M. S. (2012). Pit - F Sharp to JS compiler. http://
+pitfw.org/.
+Fournet, C., Swamy, N., Chen, J., Dagand, P.-É., Strub, P.Y., and Livshits, B. (2013). Fully abstract compilation
+to javascript. In POPL, pages 371–384. ACM.
+Giannini, P., Mantovani, D., and Shaqiri, A. (2012). Leveraging dynamic typing through static typing. ICTCS
+2012. http://ictcs.di.unimi.it/papers/paper 4.pdf.
+Igarashi, A., Pierce, B., and Wadler, P. (2001). Featherweight Java: A minimal core calculus for Java and
+GJ. ACM TOPLAS, 23(3):396–450.
+Intellifactory (2012). Websharper 2010 platform. http://
+websharper.com/.
+Matthews, J. and Findler, R. B. (2009). Operational semantics for multi-language programs. ACM Trans. Program. Lang. Syst., 31(3).
+
+AnIntermediateLanguageforCompilationtoScriptingLanguages
+
+Moors, A., Rompf, T., Haller, P., and Odersky, M. (2012).
+Scala-virtualized. In Kiselyov, O. and Thompson,
+S., editors, Proceedings of PEPM 2012, Philadelphia,
+Pennsylvania, USA, ACM, pages 117–120.
+Nanevski, A. (2003). From dynamic binding to state
+via modal possibility. In PPDP’03, pages 207–218.
+ACM.
+Petřı́ček, T. and Syme, D. (2012). AFAX: Rich client/server
+web applications in F#. http://www.scribd.com/doc/
+54421045/Web-Apps-in-F-Sharp.
+Ranson, J. F., Hamilton, H. J., and Fong, P. W. L. (2008).
+A semantics of python in isabelle/hol. Technical
+Report CS-2008-04, CS Department, University of
+Regina,Saskatchewan.
+Vouillon, J. and Balat, V. (2011).
+From bytecode
+to javascript: the js of ocaml compiler. http://
+www.pps.univ-paris-diderot.fr/∼balat/publi.php.
+
+103
+
+

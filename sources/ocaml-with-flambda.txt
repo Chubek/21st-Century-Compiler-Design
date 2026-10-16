@@ -1,0 +1,306 @@
+Efficient OCaml compilation with Flambda 2
+Flambda 2 team
+OCamlPro
+Jane Street
+
+Abstract
+Flambda 2 is an IR and optimisation pass for OCaml centred around
+inlining. We discuss the engineering constraints that shaped it and the
+overall structure that allows the compiler to be fast enough to handle
+very large industrial code bases.
+
+Flambda 2 is an intermediate representation (IR) and optimisation pass
+for OCaml centered around inlining. We conceived it as a much more generic
+and principled system than previous attempts, which tried to tackle the
+same problem with a collection of tricks, carefully aimed at some important
+common optimisation cases in typical OCaml code. However this narrow
+focus tended to present bad corner cases and limited the ability to implement
+new optimisations.
+We would like Flambda 2 to be a drop in replacement for every use case,
+irrespective of configuration options, of current OCaml. This means that it
+obviously has to generate code that is as good as the existing compiler, but
+is also not significantly slower at compile time, even for the gigantic code
+base (tens of millions of lines) that we regularly test it on.
+
+1
+
+High-level design
+
+The Flambda 2 IR is produced from Lambda , an untyped IR, which is a
+desugared version of the OCaml typed AST. There have been only a few
+optimisations on the code up to that point in the compilation pipeline.
+We tried to provide in the IR the tools to precisely represent low level
+concerns whilst still retaining the flexibility of a reasonably high-level language for optimisations.
+Flambda 2 is written in OCaml, very nearly all in a purely functional
+style, with some well bounded sections providing a pure interface with an
+1
+
+imperative implementation for performance. This proved to be a good choice
+to handle a fairly complex code base with a somewhat limited team.
+
+1.1
+
+Language structure and control flow
+
+The basic structure is represented by an unusually minimal CPS-style IR
+with double-barrelled second-class continuations [2]. There are just six ways
+of forming expressions: conventional let-bindings, continuation bindings,
+function application, continuation application, a switch on integers and a
+marker for unreachable code.
+It should be noted that the Flambda 2 IR does have a normal form of
+let-binding, used only for expressions with no control flow effects, which
+drastically reduces the number of continuations.
+Double-barrelled means that in addition to normal control flow continuations, there is a second kind of continuation to represent OCaml exception
+handlers. This second kind has slightly different semantics allowing it to be
+compiled away in the backend. At runtime, exceptions are very efficiently
+handled by a linked list stored in the program stack, in the same way as the
+existing compiler.
+This distinction between continuations allows one to do standard control
+flow optimisations even with exception continuations, without losing the
+capacity to use this efficient representation of exceptions.
+The choice of CPS rather than a more classic SSA graph-based form
+is in part guided by the style of the code itself. It is quite convenient to
+manipulate in a functional style, while copying subexpressions with almost
+no cost.
+
+1.2
+
+Explicit closures
+
+As we want to track precisely how much allocation can occur when the
+program being compiled is executed, we need to see where closure values
+might be and how large they are. To achieve this, we need to represent
+them more explicitly than just the free variables of the functions. This also
+allow us to circumvent the usual problem of needing a good cross-function
+alias analysis (which tend not to be modular) to be allowed to inline: inlining
+is always correct when we have explicit access to the closure.
+
+1.3
+
+Symbols
+
+There are really two kinds of variable bindings in Flambda 2 : normal variables, and symbols. Symbols correspond to object file symbols and are used
+2
+
+to name statically-allocated constants. They have a semantics more like
+SSA variables: their scoping extends beyond the natural lexical scope to
+all points in the subsequent dominator tree. This means they are available
+in every expression dominated by the binding, including function bodies
+without the need to represent them explicitly in the closure. This matches
+the runtime semantics. Expressing this low level distinction is useful when
+computing the cost of a closure: a variable takes some allocated space in a
+closure, a symbol does not.
+Since symbol information flows through the expression differently from
+that of variables, we need to account for this when simplifying terms. For
+this reason (and others) we have two data structures: the environment flows
+through the lexical scope; and what we call the accumulator flows through
+the control flow (with special handling for loops).
+
+2
+
+Compilation modes
+
+There are two compilation modes for Flambda 2 . An optimized mode tries
+to produce code that runs as fast as possible, but is slower to compile. The
+other is designed to compile as fast as the current “Closure” middle-end.
+The majority of the compiler code for these two modes is shared.
+Importantly, and unlike the existing Closure and Flambda compilers,
+both modes are compatible: .cmx files produced from one mode can be read
+by the other with minimal loss of information. It is possible to select the
+mode per file and retain the ability to inline across compilation units. On
+a large codebase this means that critical parts can always be compiled at
+higher optimization levels, while less-critical and possibly very verbose parts
+can be compiled at lower levels.
+
+3
+
+Compilation pipeline
+
+3.1
+
+From Lambda
+
+The program first goes through a CPS transformation pass, carefully designed to avoid producing too many administrative continuations, inspired
+by [2].
+The CPS transformation is executed simultaneously with a closure conversion algorithm that actually produces the Flambda 2 IR. We used to have
+an intermediate IR, but for performance reasons, it was dropped by merging
+the CPS and closure conversion passes by manual deforestation.
+
+3
+
+The classic mode optimisations are implemented during this pass. They
+perform basic constant propagation and inlining. These transformations are
+straightforward to do with just a few pieces of information in an environment, but to tackle all the corner cases a more principled but also more
+expensive version is required. This is where Simplify comes in.
+
+3.2
+
+Simplify
+
+This is the main phase of Flambda 2 , where most of the work happens,
+although it is skipped in classic mode. Observe that for deep inlining (inlining a call inside the body of an inlined function, something quite useful for
+functional languages) we need an a tranformation that produces the same
+IR as the source one. Yet even if we don’t cross IR boundaries, we want to
+avoid needing to run this pass multiple times. This is obviously better for
+performance reasons, but it is also sensible to do as many optimisations as
+possible during inlining itself.
+Indeed some optimisation A often helps uncover some information that is
+useful for another, B, that itself provides information to A. Without running
+both at the same time, it might take a long time to reach the fixpoint of
+both A and B, but in fact we can often achieve a suitable result in a single
+run.
+There are three main kinds of transformations that are performed:
+1. Simplification through forward information propagation (not discussed
+here but in a separate submitted abstract). This does not try to handle
+recursion.
+2. Data flow fixpoint analysis, handling recursion.
+3. Cleanup, e.g. of unnecessary let-bindings.
+The simple story is that the expression is deconstructed whilst propagation happens, following the dominator order (incomparable branches are
+explored in “parallel” and their results are joined). When the return continuation is reached, having traversed the whole expression, we can run the
+data flow analysis with the accumulated information. With the result of
+that analysis, together with some scope information, the expression can be
+rebuilt in inverse control-flow order.
+However this would be forgetting that we want to perform speculative
+inlining while doing this. This is a heuristic-driven algorithm (which also
+respects attributes to control inlining from the source code) that makes
+4
+
+decisions as to what to inline. To implement this, we can spawn some kind
+of sub-analysis on the code of the function that we might want to inline,
+slightly simplified to avoid a large part of the cost (in particular the resulting
+expression is never reconstructed, as it would usually be discarded). This
+allows us to know what benefit would come from inlining a function.
+If the cost-benefit analysis is in favour of inlining, we can continue the
+forward pass on the caller with the original function application replaced by
+the actual body of the function. From that point, there is no distinction
+between the code of the caller and the callee in that context, and we can
+properly perform all our optimisations without needing an additional pass.
+A neat thing to notice is that the forward pass is written in a CPS
+style that performs some kind of scheduling of the remaining part of the
+traversal, both downward and upward. This allows to traverse the expression
+following the forward and backward domination order without ever building
+a dominator tree.
+
+3.3
+
+To Cmm
+
+The third and final pass (second, in classic mode) of Flambda 2 transforms
+back to direct style to continue with the rest of the compilation pipeline. It
+removes the cost associated with the level of abstraction of the Flambda 2 IR,
+using an effect- and coeffect- driven algorithm to perform code motion and
+substitution, ensuring that the instruction selection pass works effectively.
+Unlike previous middle ends for the compiler, Flambda 2 does not generate the Clambda language, instead going directly to Cmm .
+As the Cmm IR can represent continuations, there is no need to duplicate
+expressions. Exception continuations disappear during this pass.
+In general, there is no need for complex optimisations here, although in
+classic mode, this also mimics the unboxing phase of the “Closure” middle
+end. It also performs some cleanup, for which information was collected
+during the upward traversal of the simplify phase. Those could have been
+applied during another Flambda 2 to Flambda 2 phase, but that would incur
+additional cost.
+
+4
+
+Data structures
+
+We will quickly present a few of the data representation decisions that provided noticeable compile-time performance impact.
+
+5
+
+4.1
+
+Names and freshening
+
+A purely functional style is very convenient to handle inlining, since it involves copying a lot of expressions. However even in that style, copying
+an expression in a compiler is not completely free. It is often useful for
+all identifiers to be unique. One way is to perform systematic freshening
+while copying, with obvious cost (potentially non-linear if an expression is
+moved many times). Another is to perform lazy freshening. All of our metalevel expressions representing binding operations come with an optional lazy
+freshening environment. This amortizes the cost.
+The handling of names is a well-known troublesome point for compilers
+and other metaprogramming systems. We use an approach based on nominal
+sets and permutations[1], combined with relevant abstraction barriers in the
+source code of the compiler, to represent binding operations. This allows
+natural code to be written without any concern as to name clashes, stale
+names or mis-renamings. The terms are in fact represented up to alpha
+equivalence.
+
+4.2
+
+Identifiers represented using integers
+
+To minimize memory use, almost all of the various identifiers (variables,
+symbols, names of continuations, etc) are represented as integers. This
+also has the benefit of allowing the building of collections with an efficient
+union via Patricia trees, which are a variety of bitwise trie. This has a
+major performance impact. For identifiers carrying more information than
+a simple integer, for instance the original name of a variable, there is a
+hidden hash table. Those identifiers are exposed via abstract types with a
+pure interface, with all the book-keeping being hidden. In the vast majority
+of the Flambda 2 code you would never know what is going on underneath.
+This system necessitates some careful handling for .cmx file generation
+and import, but with the complexity being well contained, this has been
+worthwhile. The lazy freshening maps are used to resolve any integer clashes
+upon import of .cmx files.
+
+4.3
+
+Avoiding reallocations
+
+A great deal of care has been taken in avoiding as much as possible the
+reallocating of expressions that have been left unchanged by a traversal.
+This is achieved though careful checking of physical equality.
+
+6
+
+4.4
+
+Segmented environment
+
+The information propagation system used during Simplify carries a lot of
+information and performs many joins on potentially large abstract domains.
+To be as efficient as possible, we try to avoid doing any work on the (often
+large) part of the domain not affected by a join. To do this we segment
+the domain into a stack of equations that can be quickly cut (at a fork
+point) into a common prefix and different suffixes. To allow fast queries, a
+cache of the actual current values of the domain is maintained in parallel.
+Without this, domain handling would incur quadratic cost (in the number
+of bindings).
+
+5
+
+Conclusion
+
+Flambda 2 is now stable, bug-free and fast enough for use on the large Jane
+Street code base: real production systems are now being built with it. Compilation speed is roughly equivalent to the existing Closure and Flambda
+compilers. We are still gathering benchmark data, but the speed of generated code in optimized mode should be around the same as Flambda,
+although certain patterns will run faster (a separate abstract has been submitted discussing this). We anticipate that as new optimizations become
+available, the generated code performance will be rather better than the
+existing compilers.
+Flambda 2 is significantly less aggressive when inlining than Flambda,
+contributing to smaller executable sizes seen with Flambda 2 .
+The design of Flambda 2 is quite flexible and has already been proven to
+cope with language evolution. For instance we recently had to add the support for local allocations and unboxed types, both of which can be expressed
+in a natural way in the Flambda 2 IR. The codebase has been designed to
+be maintainable with appropriate abstraction and division into logical units.
+However the upstreaming story is not yet there.
+There is nothing in the overall structure fundamentally tied to the way
+OCaml operates, although there are simplification rules for the many and
+various OCaml-specific primitive operations (which are close to those used
+by the Cmm language). The main assumptions are that the language is an
+higher order functional language with mostly pure and strict code. This
+would probably fit for any ML-like language, of course, but given that we
+don’t rely much on source-level type information (yet we can efficiently rediscover much of it) this might also work quite well for something like a
+Scheme compiler.
+7
+
+References
+[1] M. J. Gabbay and A. M. Pitts. A new approach to abstract syntax with
+variable binding. Formal Aspects of Computing, 13:341–363, 2001.
+[2] A. Kennedy. Compiling with continuations, continued. In Proceedings
+of the 12th ACM SIGPLAN international conference on Functional programming, pages 177–190, 2007.
+
+8
+
+

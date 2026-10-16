@@ -1,0 +1,1889 @@
+Typing a Multi-Language Intermediate Code
+Andrew D. Gordon
+
+Don Syme
+
+Microsoft Research
+
+Abstract
+
+1 Introduction
+
+The Microsoft .NET Framework is a new computing architecture designed to support a variety of distributed applications and web-based services. .NET software components are typically distributed in an object-oriented intermediate language, Microsoft IL, executed by the Microsoft
+Common Language Runtime. To allow convenient multilanguage working, IL supports a wide variety of high-level
+language constructs, including class-based objects, inheritance, garbage collection, and a security mechanism based
+on type safe execution.
+This paper precisely describes the type system for a substantial fragment of IL that includes several novel features:
+certain objects may be allocated either on the heap or on the
+stack; those on the stack may be boxed onto the heap, and
+those on the heap may be unboxed onto the stack; methods
+may receive arguments and return results via typed pointers, which can reference both the stack and the heap, including the interiors of objects on the heap. We present a formal semantics for the fragment. Our typing rules determine
+well-typed IL instruction sequences that can be assembled
+and executed. Of particular interest are rules to ensure no
+pointer into the stack outlives its target. Our main theorem asserts type safety, that well-typed programs in our IL
+fragment do not lead to untrapped execution errors.
+Our main theorem does not directly apply to the product. Still, the formal system of this paper is an abstraction
+of informal and executable speci cations we wrote for the
+full product during its development. Our informal speci cation became the basis of the product team's working
+speci cation of type-checking. The process of writing this
+speci cation, deploying the executable speci cation as a test
+oracle, and applying theorem proving techniques, helped us
+identify several security critical bugs during development.
+
+This paper describes typing and evaluation rules, and a type
+safety theorem, for a substantial fragment of the intermediate language (IL) executed by Microsoft's Common Language Runtime. The rules are valuable because they succinctly and precisely account for some unusual and subtle
+features of the type system.
+
+ACM COPYRIGHT NOTICE. Copyright c 2001 by the
+Association for Computing Machinery, Inc. Permission to
+make digital or hard copies of part or all of this work for
+personal or classroom use is granted without fee provided
+that copies are not made or distributed for pro t or commercial advantage and that copies bear this notice and the
+full citation on the rst page. Copyrights for components
+of this work owned by others than ACM must be honored.
+Abstracting with credit is permitted. To copy otherwise,
+to republish, to post on servers, or to redistribute to lists,
+requires prior speci c permission and/or a fee. Request
+permissions from Publications Dept, ACM Inc., fax +1
+(212) 869-0481, or permissions@acm.org.
+
+The Common Language Runtime is a new
+execution environment with a rich object-oriented class library through which software components written in diverse
+languages may interoperate. Using the Visual Studio .NET
+development environment, .NET components
+can be written in the new object-oriented language C# [HW00], as well
+as Visual Basic, Visual C++, and the scripting languages
+VBScript and JScript. Furthermore, prototype .NET compilers exist for COBOL, Component Pascal, Ei el, Haskell,
+Mercury, Oberon, Ocaml, and Standard ML.
+Type-checking of .NET components implemented in IL
+has already proved useful for nding code generation bugs.
+Moreover, the .NET security model assumes type-safe behaviour; type-checking is therefore useful for handling untrusted components. Given these and other applications,
+the IL type system is worthy of formal speci cation.
+Background: IL
+
+This paper is one
+outcome of a research project to evaluate and develop formal
+speci cation techniques for describing and analyzing typecheckers in general. Speci cally, we applied these techniques
+to the study of IL. We began by writing a detailed speci cation of type-checking method bodies. This was an informal
+document in the style of most language references. Eventually, this document was adopted by the product team as the
+basis of their detailed speci cation of type-checking. In parallel, following a methodology advocated by Syme [Sym98],
+we wrote formal speci cations for various IL subsets suitable
+for comparative testing and formal proof. The executable
+part of these speci cations is in a functional fragment of ML,
+the rest in higher order logic (HOL). We can compile and run
+the executable part as an IL type-checker. Since it is purely
+functional code, we may also interpret it as HOL and use
+it for theorem proving in DECLARE [Sym98]. In principle,
+this strategy allows the same source code to serve both as an
+oracle for testing actual implementations and as a model for
+formal validation. So far, we have built an ML type-checker
+for a largely complete subset of the IL type system, but have
+formally veri ed only a rather smaller fragment.
+Background: Executable Speci cations
+
+As is well known [Coh89], even formal proof cannot guarantee the absence of implementation defects, simply because
+one has to abstract from details of the environment when
+writing formal models. We found that developing a test suite
+that used our formal model as an oracle was an important
+way of making our model consistent with the runtime. Our
+suite included about 30,000 automatically generated tests.
+Our experience was that testing remains the only viable way
+of relating a speci cation to software of the complexity we
+were considering. One of our slogans: if you specify, you
+must test. Writing a formal speci cation without generating tests may be viable once a design has been frozen, but
+is simply not e ective during the design of a new system.
+Eventually, we handed over our suite to the test team, who
+maintain it, and who have found bugs using it.
+
+concentrate on specifying the typing conditions for each
+instruction, and to suppress the algorithmic details of
+how a type-checker would compute the types of the
+arguments to each instruction. These algorithmic details are important in any implementation, but they are
+largely irrelevant to specifying type safety.
+Finally, in the spirit of writing speci cations to support
+testing, our applicative expressions use the standard IL assembler syntax. Hence, any method body that is well-typed
+according to our typing rules can be assembled and tested
+on the running system.
+In summary, the principal technical contributions made
+by this paper are the following:
+ New typing and evaluation rules for value and pointer
+types, together with a type safety result, Theorem 1.
+ The idea that the essence of a low-level intermediate
+language can be presented in an applicative notation.
+
+The main part of the paper concerns an IL fragment based on reference, value, and
+pointer types.
+At its core, the fragment is a class-based object-oriented
+language with eld update and simple imperative control
+structures. This core is comparable to the imperative object
+calculus [AC96, GHL99] and to various fragments of Java
+[DE97, IPW99]. An item of a reference type is a pointer to
+a heap-allocated object.
+Moreover, our fragment includes value and pointer types:
+ An item of a value type is a sequence of machine words
+representing the elds of the type. Value types support
+the compilation of C-style structs, for instance. Value
+types may be stack-allocated and passed by value. A
+box instruction turns a value type into a heap-allocated
+object by copying, and an unbox instruction performs
+the inverse coercion. Hence, when convenient, value
+types may be treated as ordinary heap-allocated objects.
+ An item of pointer type is a machine address referring
+either to a heap-allocated object or to a variable in the
+call stack or to an interior eld of one of these. The
+main purpose of pointer types is to allow methods to
+receive arguments or return results by reference.
+We selected these types because they are new constructs
+not previously described by formal typing rules, and because
+their use needs to be carefully limited to avoid type loopholes. In particular, we must take care that stack pointers
+do not outlive their targets.
+For the sake of clarity, our presentation of the semantics
+di ers from the ML code in our executable speci cations in
+two signi cant ways:
+ First, we adopt the standard strategy of presenting the
+type system as logical inference rules. Such rules are
+succinct, but not directly executable; we found it better
+to write executable ML when we initially wrote our
+speci cations in order to help with testing. Still, typing
+rules are better than code for presenting a type system
+and for manual proof.
+ Second, we adopt a new, non-standard strategy of assuming that each method body has been parsed into
+a tree-structured applicative expression. Each expression consists of an IL instruction applied to the subexpressions that need to be evaluated to compute the
+instruction's arguments. This technique allows us to
+
+This Paper: An IL Fragment
+
+As we have discussed, this project is a
+successful demonstration of the value of writing executable,
+formal speci cations during product development.
+On the other hand, the main theorem of this paper does
+not apply to the full product; type safety bugs may well
+be discovered. An unful lled ambition of ours is to prove
+soundness of the typing rules for the full language through
+mechanized theorem-proving. So a future challenge is to
+further develop scalable and maintainable techniques for
+mechanized reasoning. A soundness proof for the whole of
+IL would be an impressive achievement. To apply theorem
+proving during product development, scalability and maintainability of proof scripts are important. Scripts should
+be scalable in the sense that human e ort is roughly linear
+in the size of the speci cation (with a reasonable constant
+factor), or else proof construction cannot keep up with new
+features as they are added. Scripts should be maintainable
+in the sense that they are robust in the face of minor changes
+to the speci cation, or else proof construction cannot keep
+up with the inevitable revisions of the design.
+In the meantime, another challenge is to develop systematic techniques for test case generation.
+A third challenge is to integrate executable speci cations, such as our ML type-checker, into the product itself. The .NET Framework, like other component models,
+itself contributes to this goal, in that its support for multilanguage working would easily allow a critical component to
+be written in ML, say, even if the rest of the product is not.
+The remainder of the paper proceeds as follows. Section 2 presents the typing and evaluation rules for our IL
+fragment, and states our main theorem. Section 3 explains a
+potentially useful liberalisation of the type system. Section 4
+summarizes the omissions from our IL fragment. Section 5
+discusses related work. Section 6 concludes.
+Proofs omitted from this conference paper appear in a
+technical report [GS00].
+Future Challenges:
+
+2 A Formal Analysis of BIL, a Baby IL
+
+This section makes the main technical contributions of the
+paper. We present a substantial fragment of IL that includes
+enough detail to allow a formal analysis of reference, value,
+and pointer types, but omits many features not related to
+these. We name this fragment Baby IL, or BIL for short.
+2
+
+Section 2.1 describes the type structure of BIL. In Section 2.2, we specify the instructions that may appear in
+method bodies of BIL, and explain their informal semantics. In Section 2.3, we specify a formal memory model for
+BIL, and a formal semantics for the evaluation of method
+bodies. In Section 2.4, we specify a formal type system for
+type-checking method bodies. Section 2.5 introduces conformance relations that express when intermediate states arising during evaluation are type-correct. Finally, Section 2.6
+concludes this analysis by stating our Type Safety Theorem.
+
+Finally, a pointer type A& describes a pointer to data of
+type A, which may be stored either in the heap or the stack.
+To avoid dangling pointers|pointers that outlive their
+targets|our type system restricts pointers as follows. An
+important use for pointers in IL is to allow arguments and
+results to be passed by reference. The following are suÆcient conditions to type-check this motivating usage while
+preventing dangling pointers. The following are not necessary conditions; we explain a useful and safe liberalisation
+in Section 3.
+BIL Pointer Con nement Policy:
+
+2.1 Type Structure and Class Hierarchy
+
+(1) No eld may hold a pointer.
+(2) No method may return a pointer.
+(3) No pointer may be stored indirectly via another pointer.
+
+All BIL methods run in an execution environment that contains a xed set of classes. Each class speci es types for a
+set of eld variables, and signatures for a set of methods.
+Each object belongs to a class. The memory occupied by
+each object consists of values for each eld speci ed by its
+class. Methods are shared between all objects of a class (and
+possibly other classes). Objects of all classes may be stored
+boxed in a heap, addressed by heap references. Objects of
+certain classes|known as value classes|may additionally
+be stored unboxed in the stack or as elds embedded in
+other objects.
+Formally, we assume three sets, Class , Field , and Meth ,
+the sets of class, eld, and method names, respectively, and
+a set ValueClass  Class of value class names. We assume a distinguished class name System:Object such that
+System:Object 2
+= ValueClass .
+
+Classes, Fields, Methods:
+c 2 Class
+vc 2 ValueClass  Class
+System:Object 2 Class ValueClass
+f 2 Field
+` 2 Meth
+
+(IL itself follows a slightly stricter policy that bans pointers to pointers altogether.) Each of the conditions prevents
+a way of creating a dangling pointer. If a eld could hold a
+pointer, a method could store a pointer into its stack frame
+in an object boxed on the heap. If a method could return
+a pointer, a method could simply return a pointer into its
+stack frame. If a pointer could be stored indirectly, a method
+could store a pointer into its stack frame through a pointer
+to an object boxed on the heap or to an earlier stack frame.
+In each case, the pointer would outlive its target as soon as
+the method had returned.
+The following predicate identi es types containing no
+pointers.
+Whether a Type Contains No Pointer:
+pointerFree (A) , :(A = B & for some B )
+
+class name
+value class name
+root of hierarchy
+eld name
+method name
+
+Next, a method signature B `(A1; : : : ; An ) refers to a
+method named ` that expects a vector of arguments with
+types A1 , . . . , An , and whose result has type B . No two
+methods in a given class may share the same signature,
+though they may share the same method name.
+
+Types describe objects, the elds of objects, the arguments and results of methods, and the intermediate results
+arising during evaluation of method bodies.
+Types:
+A; B
+
+2 Type ::=
+
+void
+int32
+class c
+value class vc
+
+&
+
+A
+
+Method signature:
+sig 2 Sig ::= B `(A1 ; : : : ; An )
+
+type
+no bits
+32 bit signed integer
+boxed object
+unboxed object
+pointer to A
+
+method signature
+
+We assume the execution environment organises
+classes
+into an inheritance hierarchy.
+We
+write
+c inherits c0 to mean
+that c inherits from c0 . We induce a subtype relation, A <: B ,
+from the inheritance hierarchy. Our type system supports
+subsumption : if A <: B an item of type A may be used in a
+context expecting an item of type B . The only non-trivial
+subtyping is between reference types. The subtype relation
+is the least to satisfy the following rules.
+Subtype Relation: A <: B
+(Sub Re ) (Sub Class) 0
+
+The type void describes the absence of data, no bits;
+void is only used for the results of methods or parts of
+
+method bodies that return no actual result.
+The type int32 describes a 32 bit integer; BIL uses integers to represent predicates for conditionals and while-loops
+but includes no primitive arithmetic operations. (IL features
+a rich selection of numeric types and arithmetic operations.)
+A reference type class c describes a pointer to a boxed
+object (heap-allocated, subject to garbage collection).
+A value type value class vc describes an unboxed
+object|a sequence of words representing the elds of the
+value class vc, akin to a C struct. The associated reference type, class vc describes a pointer to a boxed object|a
+heap-allocated representation of the elds.
+
+:
+
+A< A
+
+c inherits c
+
+class c <: class c0
+
+We assume that the relation c inherits c0 is transitive,
+and therefore so is the relation A <: B .
+The IL assembler recognises a fairly standard notation
+for single inheritance that allows a class to inherit methods
+and elds from a single superclass. One might de ne the
+inheritance relation by formalizing such a syntax and typechecking rules. Instead, since our focus is type-checking the
+3
+
+cannot statically determine the class of an object from its
+type, since by subsumption it may in fact be a subclass of
+the class named in its type. Therefore, each boxed object
+is tagged in our formal memory model with the name of its
+class. On the other hand, for the sake of space eÆciency,
+unboxed objects include no type information. Therefore, we
+must rely on statically determining the class of an unboxed
+object from its type. For this to be possible, axiom (Hi Val)
+prevents any other class from inheriting from a value class.
+So the actual class of any unboxed object is the same as the
+class named in its type.
+Axioms (Good elds ) and (Good methods ) implement
+points (1) and (2) of the Pointer Con nement Policy.
+We end this section by exemplifying how value and
+pointer types provide possibly more eÆcient alternatives to
+reference types for returning multiple results. Suppose there
+is a class Point 2 ValueClass such that elds (Point) = x 7!
+int32; y 7! int32, that is, a class with two integer elds.
+Here are three alternative signatures for returning a Point
+from a method named mouse:
+ As a boxed object: class Point mouse ().
+ As an unboxed object: value class Point mouse ().
+ In a pre-allocated unboxed object passed by reference:
+void mouse (value class Point&).
+
+BIL instruction set, it is easier and more concise to simply
+axiomatize the intended properties of the hierarchy. (Although the IL syntax disallows multiple inheritance, it happens that our axioms allow a class to inherit from two superclasses that are incomparable according to the inheritance
+relation.)
+Formally, we assume there is an execution environment
+consisting of three components|a function elds (c), a function methods (c), and an inheritance relation c inherits c0 |
+that satisfy the following axioms:
+Execution Environment: ( elds ; methods ; inherits )
+elds 2 Class ! (Field !n Type )
+elds of a class
+n
+methods 2 Class ! (Sig ! Body )
+methods of a class
+inherits  Class  Class
+class hierarchy
+c inherits c
+(Hi Re )
+0
+c inherits c ^
+(Hi
+Trans)
+0
+00
+00
+
+)
+^
+^ 2
+
+) =
+( )) )
+
+)
+( )) 
+) =
+
+(
+
+c inherits c
+c inherits c
+c inherits c0
+c0 inherits c
+c
+c0
+c inherits System:Object
+c inherits d f
+dom elds d
+f
+dom elds c
+elds c f
+elds d f
+c inherits d
+dom methods d
+dom methods c
+c inherits vc
+c
+vc
+
+2
+
+(
+(
+( )) ^
+( )( ) =
+( )( )
+
+(
+
+pointerFree ( elds (c)(f ))
+B `(A1 ; : : : ; An ) 2 dom (methods (c))
+) pointerFree (B )
+
+( ))
+
+(Hi Antisymm)
+(Hi Root)
+(Hi elds )
+(Hi methods )
+
+(Hi Val)
+(Good elds )
+(Good methods )
+
+2.2 Syntax of Method Bodies
+
+BIL is a deterministic, single-threaded, imperative, classbased object-oriented language. For the sake of simplicity,
+we omit constructs for error or exception handling. This section speci es the instruction set as tree-structured applicative expressions, most of which represent an application of
+an instruction to a sequence of argument expressions. Since
+each applicative expression is in a post x notation, it can
+also be read as a sequence of atomic instructions. We have
+chosen our syntax carefully so that, subject to very minor
+editing, this sequence of atomic instructions can be parsed
+by the IL assembler (as well as our own IL type-checker).
+We express the syntax of our conditional and iteration
+constructs using assembler labels, ranged over by L.
+A method reference B c::`(A1 ; : : : ; An ) refers to the
+method with signature B `(A1 ; : : : ; An ) in class c.
+Inspired by FJ [IPW99], we assume for simplicity that
+each class has exactly one constructor, whose arguments
+are the initial values assumed by the elds of the new object. The constructor reference for a class c takes the form
+void c:::ctor(A1 ; : : : ; An ). Constructors are only called to
+create a new object; :ctor 2= Meth .
+
+For any class c, elds (c) 2 Field !n Type , the set of nite
+maps from eld names to types. If elds (c) = fi 7! Ai i21::n ,
+the class c has exactly the set of elds named f1 , . . . , fn with
+types A1 , . . . , An , respectively.
+(The notation fi 7! Ai i21::n exempli es our notation
+for nite maps in general. We let dom (fi 7! Ai i21::n ) =
+ff1 ; : : : ; fn g. We assume that the fi are distinct. Let (fi 7!
+i21::n
+Ai
+)(f ) = Ai if f = fi for some i 2 1::n, and otherwise
+be unde ned.)
+For any class c, methods (c) 2 Sig !n Body , the set of nite maps from method signatures to method bodies. We dene the set Body of method bodies|instruction sequences|
+in the next section. If methods (c) = sig i 7! bi i21::n , the
+class c has exactly methods with signatures sig 1 , . . . , sig n ,
+implemented by the bodies b1 , . . . , bn , respectively.
+A binary relation on classes, inherits , formalizes the inheritance hierarchy. Axioms (Hi Re ) and (Hi Trans) guarantee it is re exive and transitive. (Hi Antisymm) asserts
+it is anti-symmetric, that is, there are no cycles in the hierarchy. According to (Hi Root), every class inherits from
+System:Object , the root of the hierarchy.
+Suppose that c is a subclass of d, that is, c inherits d.
+By subsumption, an object of the subclass c may be used in
+a context expecting an object of the superclass d. Accordingly, (Hi elds ) asserts that every eld speci ed by d is also
+present in the subclass c. The axiom (Hi methods ) asserts
+that every method signature implemented by d is also implemented by the subclass c, though not necessarily by the
+same method body.
+In order to implement a method invocation on an object,
+we need to know the class of the object. In general, we
+
+Method and Constructor References:
+L
+M
+K
+
+::= B c::`(A1 ; : : : ; An )
+::= void c:::ctor(A1 ; : : : ; An )
+
+assembler label
+method reference
+constructor reference
+
+Applicative Expressions for Method Bodies:
+i4
+32 bit signed integer
+a; b 2 Body ::=
+method body
+ldc:i4 i4
+load integer
+
+:
+
+a brtrue L1 b0 br L2 L1 b1 L2
+L1 a brfalse L2 b br L1 L2
+ab
+a ldind
+
+:
+
+4
+
+:
+
+: conditional
+while-loop
+sequencing
+load indirect
+
+store indirect
+load argument address
+store into argument
+create new object
+call on boxed object
+call on unboxed object
+load eld address
+store into eld
+copy value to heap
+fetch pointer to value
+
+a b stind
+ldarga j
+a starg j
+a1
+an newobj K
+a0 a1
+an callvirt M
+a0 a1
+an call instance M
+a ldflda A c f
+a b stfld A c f
+a box vc
+a unbox vc
+
+
+
+
+
+
+::
+::
+
+ptr ::=
+
+( )
+u; v
+
+1
+
+7! ui i21::n
+
+Memory Model:
+
+::= c[fi 7! ui i21::n ]
+::= pi 7! oi i21::n
+fr ::= :args(u0 ; : : : ; un )
+s ::= fr 1    fr n
+ ::= (h; s)
+o
+h
+
+2
+
+boxed object
+heap
+frame: vector of arguments
+stack (grows left to right)
+store
+
+The example heap h = p 7! c[f1 7! 0; f2 7! (g 7! 1)]
+consists of a single boxed object c[f1 7! 0; f2 7! (g 7! 1)]
+at heap reference p. The boxed object is of class c and
+consists of elds named f1 and f2 . The rst eld contains
+the integer 0. The second eld contains the unboxed object
+g 7! 1, which itself consists of a eld named g containing
+the integer 1.
+The example stack s = :args(p; p:f2 :g):args(p; (1; 1))
+consists of two frames. The bottom of the stack is the
+frame :args(p; p:f2 :g), consisting of two arguments, a reference to the boxed object at p, and a pointer to eld g of
+eld f2 of the same object. The top of the stack is the frame
+:args(p; (1; 1)), consisting of two arguments, a reference to
+the boxed object at p, and the pointer (1; 1), which refers to
+argument 1 of frame 1, that is, the pointer p:f2 :g.
+We rely on two auxiliary partial functions for dereferencing and updating pointers in a store:
+
+The technique of representing assembly language in an
+applicative syntax works for this paper because it can express all the operations on reference, value, and pointer
+types. We express structured control ow like conditionals or while-loops in this style by treating an assembly of IL
+branch instructions as a primitive BIL instruction. Still, the
+technique may not scale well to express control ow such as
+arbitrary branching within a method or exception handling.
+IL includes primitive instructions ldfld and ldarg to
+load the contents of an object eld or an argument. Instead
+of taking these as primitives in BIL, we can derive them as
+follows:
+Derived Instructions:
+
+a ldfld A c::f = a ldflda A c::f ldind
+
+a ldarg j = a ldarga j ldind
+
+Auxiliary Functions for Lookup and Update:
+lookup (; ptr )
+lookup ptr in store 
+update (; ptr ; v 0 )
+update store  at ptr with result v0
+
+2.3 Evaluating Method Bodies
+
+The memory model consists of a heap of objects and a stack
+of method invocation frames, each of which is a vector of
+arguments. Our semantics abstracts away from the details
+of evaluation stacks or registers.
+We assume a collection of heap references, p, q, pointing
+to boxed objects in the heap.
+A pointer takes one of three forms. A pointer p refers to
+the boxed object at p. A pointer (i; j ) refers to argument
+j of stack frame i. A pointer ptr :f refers to eld f of the
+object referred to by ptr .
+A result is either void 0, an integer i4 , a pointer ptr , or
+an unboxed object fi 7! ui i21::n , a nite map consisting of
+a sequence of results u1 , . . . , un corresponding to the elds
+f1 , . . . , fn , respectively.
+
+We explain the intended meaning of store lookup and
+update by example. Let store  = (h; s) where h and s
+are the heap and stack examples introduced above. Then
+lookup (; (1; 0)) is the reference p stored in argument 0 of
+frame 1, and lookup (; p:f2 :g) is the integer 1 stored in eld
+g of the unboxed object stored in eld f2 of the boxed object
+at p. The outcome of update (; (2; 0); 1) is to update  by
+replacing the reference p in argument 0 of frame 2 with 1.
+Similarly, the outcome of update (; p:f1 :g; 0) is to update 
+by replacing the integer 1 in eld g of eld f1 of the boxed
+object at p with the integer 0.
+A little functional programming suÆces to de ne these
+two functions; we give the full de nitions in the Appendix.
+Our operational semantics of method bodies is a formal
+judgment  ` b ; v  0 meaning that in an initial store
+
+References, Pointers, Results:
+p; q
+
+0
+i4
+ptr
+
+pointer
+pointer to boxed object p
+pointer to argument j of frame i
+pointer to eld f of object at ptr
+result
+void
+integer
+pointer
+value: unboxed object
+
+Next, we formalize our memory model. A heap is a nite map from ireferences
+to boxed objects, each taking the
+21::n ], where c is the class of the object, and
+form c[fii27!
+ui
+1::n is its unboxed form. A frame, fr , is a vector of
+fi 7! ui
+arguments writen as :args(u0 ; : : : ; un ): u0 is the self parameter; u1 ,. . . ,un are the computed arguments. A stack, s, is
+a list of frames fr 1    fr n . Finally, a store is a heap paired
+with a stack.
+
+Abbreviations for Conditionals and While-Loops:
+
+a b0 b1 cond = a brtrue L1 b0 br L2 L1 :b1 L2 :
+
+a b while = L : a brfalse L b br L L :
+2
+
+::=
+fi
+
+Conditionals and while-loops are not primitive instructions in IL, but it is worthwhile to make them primitive in
+BIL to allow a simple format for evaluation and typing rules.
+We have carefully chosen a syntax for these constructs by
+assembling suitable IL branch instructions and labels. We
+assume that the assembler labels in these expressions do not
+appear in any of their subexpressions. The result is a syntax
+that is a little cryptic but that does produce IL instruction
+sequences with the appropriate semantics. These abbreviations are more readable:
+
+1
+
+p
+i; j
+ptr :f
+
+heap reference
+5
+
+, the body b evaluates to the result v, leaving nal store
+. (A \judgment" is simply a predicate de ned by a set of
+inference rules.)
+
+The expression ldarga j returns a pointer to argument j
+in the current stack frame.
+The expression a starg i evaluates a, stores the result in
+argument i in the current stack frame, then returns void.
+
+
+0
+
+
+Evaluation Judgment:
+
+
+` b ; v  0
+
+given , body b returns v, leaving 0
+
+Evaluation Rules for Reference Types Only:
+
+(Eval newobj) (where K = void c:::ctor(A01 ; : : : ; A0m ))
+
+Our semantics takes the form of an interpreter. The rest
+of this section presents the formal rules for deriving evaluation judgments, interspersed with informal explanations.
+
+2
+
+c = ValueClass
+i21::n
+elds c
+fi
+Ai
+i
+ai
+vi i+1
+0 h; p c fi
+n+1
+h; s
+p = dom h
+h
+
+Evaluation Rules for Control Flow:
+
+(Eval ldc)
+
+
+` ldc:i4 i4 ; i4  
+
+(Eval Seq) 0
+ `a;u
+
+` ; 
+8i 2 1::n
+= 7! [ 7! vi i21::n ]
+0
+1 ` a1    an newobj K ; p  (h ; s)
+()
+
+(Eval callvirt) (where M = B c::`(A1; : : : ; An ))
+0
+i21::m
+0 ` a0 ; p0  (h1 ; s1 ) h1 (p0 ) = c [fi 7! ui
+]
+(hi ; si ) ` a0i ; vi  (hi+1 ; si+1 ) 8i 2 1::n
+methods (c )(B `(A1 ; : : : ; An )) = b
+(hn+1 ; sn+1 :args(p0 ; v1 ; : : : ; vn )) ` b ; v0  (h0 ; s0 fr 0 )
+0 0 0
+0 ` a0 a1    an callvirt M ; v  (h ; s )
+
+0 ` b ; v   00
+00
+ ` ab ; v
+
+
+(Eval Cond) (where
+j = 0 if i4 = 0, otherwise j = 1)
+0  0 ` bj ; v   00
+ ` a ; i4  
+00
+ ` a b0 b1 cond ; v  
+(Eval While 0) 0
+ `a;0
+0
+ ` a b while ; 0  
+(Eval While 1) 0(where
+i4 6= 0)
+0
+00  00 ` a b while ; u   000
+ ` a ; i4  
+ `b;v
+000
+ ` a b while ; u  
+
+The expression a1    an newobj K , where K is the constructor for a class c 2= ValueClass , allocates a boxed object
+whose elds contain the results of evaluating a1 , . . . , an ,
+and returns the new reference.
+The expression a0 a1    an callvirt M , where M refers
+to B `(A1 ; : : : ; An ) in class 0c, evaluates a0 to a reference
+to a boxed object of class c (expected to inherit from c),0
+locates the method body for B `(A1 ; : : : ; An ) in class c ,
+and returns the result of evaluating this method body in
+a new stack frame whose argument vector consists of the
+reference to the boxed object (the self pointer) together with
+the results
+of a1 , . . . , an . The result of this evaluation is the
+store (h0 ; s0 fr 0 ), where fr 0 is the nal state of the new stack
+frame. Once evaluation0 of0 the method is complete, the stack
+is popped, to leave (h ; s ) as the nal store.
+
+The expression ldc:i4 i4 evaluates to the integer i4 .
+The expression a b evaluates a, returning void (that is,
+nothing). The result of the whole expression is then the
+result of evaluating b.
+The expression a b0 b1 cond evaluates a to an integer
+i4 . The result of the whole conditional is then the result of
+evaluating b0 if i4 = 0, and evaluating b1 otherwise.
+The expression a b while evaluates a to an integer i4 . If
+i4 = 0 evaluation terminates, returning void. Otherwise,
+the body b is evaluated, returning void, and then evaluation
+of a b while repeats.
+
+Evaluation Rules for Reference and Value Types:
+
+(Eval ldflda)
+
+
+Evaluation Rules for Pointer Types:
+
+
+
+(Eval ldind)
+
+
+( ) = 7!
+=( ) 2
+
+` a ; ptr  0
+
+` a ldflda A c::f ; ptr :f  0
+
+(Eval stfld)
+
+` a ; ptr  0
+
+` a ; ptr  0 0 ` b ; v  00
+00
+ ` a b stfld A c::f ; 0  update ( ; ptr :f; v )
+
+
+0
+0
+ ` a ldind ; lookup ( ; ptr )  
+
+(Eval stind)
+0  0 ` b ; v   00
+ ` a ; ptr  
+00
+ ` a b stind ; 0  update ( ; ptr ; v )
+
+The expression a ldflda A c::f evaluates a to a pointer
+to a boxed or unboxed object, then returns a pointer to eld
+f of this object.
+The expression a b stfld A c::f evaluates a to a pointer
+to a boxed or unboxed object, updates its eld f with the
+result of evaluating b, and returns void.
+
+The expression a ldind evaluates a to a pointer, and then
+returns the outcome of dereferencing the pointer.
+The expression a b stind evaluates a to a pointer, stores
+the result of evaluating b in the (heap or stack) location
+addressed by the pointer, and returns void.
+
+Evaluation Rules for Value Types Only:
+
+(Eval newobj) (where K = void vc:::ctor(A01 ; : : : ; A0m ))
+elds (vc) = fi 7! Ai i21::n i ` ai ; vi  i+1 8i 2 1::n
+i21::n
+1 ` a1    an newobj K ; (fi 7! vi
+)  n+1
+(Eval call) (where M = B vc::`(A1; : : : ; An ))
+0 ` a0 ; ptr  (h1 ; s1 )
+(hi ; si ) ` ai ; vi  (hi+1 ; si+1 ) 8i 2 1::n
+methods (vc)(B `(A1 ; : : : ; An )) = b
+(hn+1 ; sn+1 :args(ptr ; v1 ; : : : ; vn )) ` b ; v0  (h0 ; s0 fr 0 )
+0 ` a0 a1    an call instance M ; v 0  (h0 ; s0 )
+
+Evaluation Rules for Arguments:
+
+(Eval ldarga)
+ = (h; fr 1    fr i )
+ ` ldarga j ; (i; j )  
+(Eval starg) 0 0
+0
+ `a;u
+ = (h ; fr 1    fr i )
+ ` a starg j ; 0  update ( 0 ; (i; j ); u)
+6
+
+(Eval box) (where p 2= dom (h0 ))
+0 0
+0 0
+i21::n
+ ` a ; ptr  (h ; s ) lookup ((h ; s ); ptr ) = fi 7! vi
+0
+i21::n
+ ` a box vc ; p  ((h ; p 7! vc[fi 7! vi
+]); s)
+(Eval unbox)
+0
+ ` a ; p
+0
+ ` a unbox vc ; p  
+
+Typing Rules for Control Flow:
+
+(Body ldc)
+
+Fr ` ldc:i4 i4 : int32
+
+(Body While)
+Fr ` a : int32
+
+Fr ` b : void
+Fr ` a b while : void
+
+The rule (Body Seq) uses the type void to guarantee
+that the rst part of a sequential composition returns no
+results.
+The rules (Body Cond) and (Body While) use the type
+int32 to guarantee the predicate expression a returns an
+integer.
+Typing Rules for Pointer Types:
+
+(Body stind) (where pointerFree (A))
+(Body ldind)
+Fr ` a1 : A& Fr ` a2 : A
+Fr ` a : A&
+Fr ` a ldind : A
+Fr ` a1 a2 stind : void
+The rule (Body stind) implements rule (3) of the Pointer
+Con nement Policy; without the condition pointerFree (A),
+stind could copy a pointer to the current stack frame further
+back the stack.
+
+This section describes a type system for method bodies such
+that evaluation of well-typed method bodies cannot lead to
+an execution error. What is perhaps most interesting here
+is the implementation of the Pointer Con nement Policy of
+Section 2.1.
+Let a type frame, Fr , take the form :args(A0 ; : : : ; An ), a
+description of the types of the results in the current (top)
+stack frame. Our typing judgment, Fr ` b : B , means if the
+current stack frame matches Fr , the body b evaluates to a
+result of type B .
+
+Typing Rules for Arguments:
+
+(Body ldarga)
+(
+
+(
+
+These rules check that the argument index j exists. Since
+
+starg only writes within the current frame, we can safely
+
+methods (vc)(B `(A1 ; : : : ; An )) = b )
+
+(
+
+&
+
+:args value class vc ; A1 ; : : : ; An
+
+allow Aj to be a pointer.
+
+Typing Rules for Reference Types:
+
+(Ref newobj) (where K = void c:::ctor(A1 ; : : : ; An )
+and elds (c) = fi 7! Ai i21::n )
+Fr ` ai : Ai 8i 2 1::n c 2= ValueClass
+Fr ` a1    an newobj K : class c
+(Ref callvirt) (where B `(A1 ; : : : ; An ) 2 dom (methods (c)))
+Fr ` a0 : class c Fr ` ai : Ai 8i 2 1::n
+Fr ` a0 a1    an callvirt B c::`(A1 ; : : : ; An ) : B
+(Ref ldflda) (where elds (c) = fi 7! Ai i21::n )
+Fr ` a : class c j 2 1::n
+Fr ` a ldflda Aj c::fj : Aj &
+(Ref stfld) (where elds (c) = fi 7! Ai i21::n
+and pointerFree (Aj ))
+Fr ` a : class c Fr ` b : Aj j 2 1::n
+Fr ` a b stfld Aj c::fj : void
+
+(Ref methods )
+
+)`b:B
+
+2 0::n
+) ` ldarga j : Aj &
+
+(Body starg)
+:args (A0 ; : : : ; An ) ` a : Aj j 2 0::n
+:args(A0 ; : : : ; An ) ` a starg j : void
+
+We make the additional assumption about our execution
+environment that every method body (b below) conforms to
+its signature:
+
+2 ValueClass ^
+
+j
+
+:args A0 ; : : : ; An
+
+Type Frames and Typing Judgment:
+Fr ::= :args(A0 ; : : : ; An ) frame: types of arguments
+Fr ` b : B
+given Fr , body b returns type B
+
+:args class c; A1 ; : : : ; An
+
+Fr ` a b : B
+
+Fr ` b0 : B Fr ` b1 : B
+Fr ` a b0 b1 cond : B
+
+2.4 Typing Method Bodies
+
+vc
+
+Fr ` b : B
+
+(Body Cond)
+Fr ` a : int32
+
+The expression a1    an newobj K , where K is the constructor for a value class vc, returns an unboxed object
+whose elds contain the results of evaluating a1 , . . . , an .
+The expression a0 a1    an call instance M where M
+refers to the signature B `(A1 ; : : : ; An ) in value class vc,
+evaluates a0 to a pointer to an unboxed object (expected to
+be of class vc), locates the method body for B `(A1; : : : ; An )
+in class vc, and returns the result of evaluating this method
+body in a new stack frame whose argument vector consists of
+the pointer to the unboxed object (the self pointer) together
+with the results of a1 , . . . , an .
+The expression a box c evaluates a to a pointer to an
+unboxed object, allocates it in boxed form in the heap, and
+returns the fresh heap reference.
+The expression a unbox c evaluates a to a heap reference
+to a boxed object, and returns this reference as its result.
+
+Additional Assumptions:
+c2
+= ValueClass ^
+methods (c)(B `(A1 ; : : : ; An )) = b )
+
+(Body Seq)
+Fr ` a : void
+
+(Val methods )
+
+)`b:B
+
+Next, we give typing rules to de ne Fr ` b : B .
+Typing Rule for Subsumption:
+
+(Body Subsum) 0
+Fr ` b : B B <: B
+Fr ` b : B 0
+
+This standard rule allows an expression of a subtype B
+to be used in a context expecting a supertype B 0 .
+7
+
+to match a store type through other conformance judgments,
+de ned later.
+
+These are fairly standard rules for operations on boxed
+objects. Recall that the axiom (Good elds ) guarantees every eld is pointer-free. So the pointerFree ( ) condition on
+the rule (Ref stfld) is redundant. Still, it is not redundant
+in a variation of our type system considered in Section 3,
+that allows value classes to include pointers.
+
+Conformance Judgment for Results (Including Pointers):
+
+ j= u : A
+
+in , result u has type A
+
+Conformance Rules for References and Pointers:
+
+Typing Rules for Value Types:
+
+(Res Ref)
+(Ptr Ref)
+0
+H (p) = vc
+H (p) = c c inherits c
+(H; S ) j= p : class c0
+(H; S ) j= p : value class vc&
+(Ptr Arg)
+i 2 1::m Fr i = :args (A0 ; : : : ; An ) j 2 0::n
+(H; Fr 1    Fr m ) j= (i; j ) : Aj &
+(Ptr Field) (where A = class c or A = value class c&)
+ j= ptr : A elds (c) = fi 7! Ai i21::n j 2 1::n
+ j= ptr :fj : Aj &
+
+(Val newobj) (where K = void vc:::ctor(A1 ; : : : ; An )
+and elds (vc) = fi 7! Ai i21::n )
+Fr ` ai : Ai 8i 2 1::n
+Fr ` a1    an newobj K : value class vc
+(Val call) (where B `(A1 ; : : : ; An ) 2 dom (methods (vc)))
+Fr ` a0 : value class vc& Fr ` ai : Ai 8i 2 1::n
+Fr ` a0 a1    an call instance B vc::`(A1 ; : : : ; An ) : B
+(Val ldflda) (where elds (vc) = fi 7! Ai i21::n )
+Fr ` a : value class vc& j 2 1::n
+Fr ` a ldflda Aj vc::fj : Aj &
+(Val stfld) (where elds (vc) = fi 7! Ai i21::n
+and pointerFree (Aj ))
+Fr ` a : value class vc& Fr ` b : Aj j 2 1::n
+Fr ` a b stfld Aj vc::fj : void
+(Val box) (where pointerFree (value class vc))
+Fr ` a : value class vc&
+Fr ` a box vc : class vc
+(Val unbox)
+Fr ` a : class vc
+Fr ` a unbox vc : value class vc&
+These are similar to the typing rules for operations on
+boxed objects, except we refer to the object via a pointer
+type instead of a reference type. Like (Ref stfld), the rules
+(Val stfld) and (Val box) bear pointerFree ( ) conditions
+that are redundant in the current system, but not in the
+system of Section 3.
+
+The rule (Res Ref) assigns a reference type class c0 to a
+heap reference p, so long as c0 is a superclass of the actual
+class of the object referred to by p.
+The rule (Ptr Ref) assigns a pointer type to a heap reference p that refers to a value that is boxed on the heap.
+These two rules can assign both a reference type and a
+pointer type to a heap reference to a value class. If H (p) =
+vc, then we have (H; S ) j= p : class c by (Res Ref), but also
+(H; S ) j= p : value class c& by (Ptr Ref). We need (Res
+Ref) to type references constructed by the box instruction.
+We need (Ptr Ref) to type pointers constructed by the unbox
+instruction.
+The rule (Ptr Arg) assigns a pointer type to a stack
+pointer (i; j ) that refers to argument j of frame i.
+The rule (Ptr Field) assigns a pointer type to a pointer
+referring to the eld fj of the object referred to by ptr .
+The base pointer ptr may either be of type class c or
+value class c&. The rst case is needed for a pointer to
+a eld of a heap object that is not in a value class. The
+second case is needed for a pointer to a eld of a heap or
+stack object in a value class.
+
+2.5 Typing the Memory Model
+
+Conformance Rules for Other Results:
+
+(Res Void)
+
+In this section, we present predicates, known as conformance
+judgments, that confer types on our memory model. In the
+next, we show that these predicates are invariants of computation, that is, are preserved by method evaluation.
+We begin by introducing types for the components of our
+memory model. A heap type pi 7! ci i21::n determines the
+actual class of each boxed object. A stack type Fr 1    Fr n
+determines frame types for each frame in the stack. A store
+type  = (H; S ) determines a heap type H and stack type
+S.
+Heap, Stack, and Store Types:
+
+::= pi 7! ci i21::n
+::= Fr 1    Fr n
+ ::= (H; S )
+
+H
+S
+
+(Res Int)
+
+ j= 0 : void  j= i4 : int32
+(Res Value)
+elds (vc) = fi 7! Ai i21::n  j= vi : Ai 8i 2 1::n
+ j= fi 7! vi i21::n : value class vc
+The rules (Res Void) and (Res Int) assign the void and
+int32 types to void and integer values, respectively.
+The rule (Res Value) assigns a value type value class vc
+to a value. By axiom (Hi Val), the inheritance hierarchy is
+at for value types. So (Res Value), unlike (Res Ref), does
+not allow vc to be a proper superclass of the actual class of
+the value.
+
+heap type
+stack type
+store type
+
+Our rst conformance judgment,  j= u : A, means that
+in a store matching the store type , the result u is wellformed and has type A. We de ne what it means for a store
+
+Other Conformance Judgments:
+H
+H
+
+8
+
+j= o : c
+j= h
+
+in H , object o has class c
+heap h conforms to H
+
+ j= fr : Fr
+ j= 
+
+By induction on the derivation of  ` b ; v  y.
+We omit the details. See the Appendix for the main lemmas
+about the type system needed in the proof.
+2
+As usual, such a theorem is vacuous if there is no y such
+that  ` b ; v  y holds, which happens either because the
+computation would diverge, or because it gets stuck (if there
+is no applicable evaluation rule). Stuck states correspond to
+execution errors, such as calling a non-existent method, or
+attempting to de-reference an integer or a dangling pointer.
+As discussed by Abadi and Cardelli [AC96], we conjecture it
+would be straightforward to adapt the proof of Theorem 1
+to show that no stuck state is reachable.
+
+frame fr conforms to Fr
+store  conforms to 
+
+Proof
+
+Conformance Rule for Objects:
+(Con Object) (where elds (c) = fi 7! Ai i21::n )
+
+(H; ?) j= vi : Ai 8i 2 1::n
+i21::n
+H j= c[fi 7! vi
+]:c
+
+This rule de nes when a heap object c[fi 7! vi i21::n ] is
+well-typed. The preconditions (H; ?) ` vi : Ai require that
+the elds vi be typed with an empty stack type. It follows
+that no eld vi contains a stack pointer, since the rule (Ptr
+Arg) for typing stack pointers assumes a non-empty stack
+type.
+
+3 Variation: Allowing Pointers in Fields of Value Classes
+
+To avoid dangling pointers, the IL type system prevents the
+elds of all objects, whether boxed on the heap or unboxed
+on the stack, from holding pointers. In fact, as pointed out
+by Fergus Henderson, a more liberal type system that allows
+unboxed objects to contain pointers is useful for compiling
+nested functions.
+When compiling a language with nested functions (for
+example, Pascal or Ada), each invocation of a nested function needs access to the activation records (that is, the arguments and local variables) of the lexically enclosing functions. A standard technique is to pass the function a display
+[ASU86], an array of pointers to these activation records.
+One strategy is to implement an activation record (containing those arguments and local variables referred to by nested
+functions) as a value class on the stack, and to implement
+the display by pointers to the value classes representing the
+activation records. Since arguments may be passed by reference, this scheme works only if we allow value classes to
+hold pointers. Otherwise, we need to pay the cost of boxing
+these activation records on the heap.
+If we allow elds of value classes to hold pointers, the
+following more liberal policy still avoids dangling pointers.
+
+Conformance Rule for Heaps:
+
+(Con Heap) (where H = pi 7! ci i21::n )
+H j= oi : ci 8i 2 1::n
+i21::n
+H j= pi 7! oi
+This rule de nes when
+a heap pi 7! oi i21::n conforms to
+i21::n
+the heap type pi 7! ci
+. The heap type contains the
+actual class ci of each object oi .
+Conformance Rule for Frames:
+
+(Con Frame)
+ j= ui : Ai 8i 2 0::n
+ j= :args(u0 ; : : : ; un ) : :args(A0 ; : : : ; An )
+This rule de nes when a frame conforms to a frame type.
+Conformance Rule for Stores:
+
+(Con Store)
+H j= h (H; Fr 1    Fr i ) j= fr i : Fr i 8i 2 1::n
+(H; Fr 1    Fr n ) j= (h; fr 1    fr n )
+
+A More Liberal Pointer Con nement Policy:
+
+(1) No eld of a boxed object may hold a pointer.
+(2) No method may return a result containing a pointer.
+(3) No result containing a pointer may be stored indirectly
+via another pointer.
+
+This rule de nes when a store (H; Fr 1    Fr n ) conforms
+to a store type (h; fr 1    fr n ). It asks that the heap h conform to the heap type H , and that each stack frame fr i
+conform to the corresponding frame type Fr i , but after removing from the store type any higher|shorter lived|stack
+frames. Hence, there may be pointers from a higher to a
+lower stack frame, but not the other way round.
+
+Though this policy helps compile nested functions,
+we lose the possibly useful fact that every value class
+may be boxed, and hence treated as a subtype of
+class System:Object .
+To formalize this policy, we amend BIL as follows.
+ Change the de nition of pointerFree (A) to hold if and
+only if (1) A is not itself a pointer type, and (2) if A
+is a value class then the type B of each eld satis es
+pointerFree (B ). (The only change is the insertion of
+clause (2).)
+ Change axiom (Good elds ) to read: c 2= ValueClass )
+pointerFree ( elds (c)(f )). (The only change is the insertion of the c 2= ValueClass precondition.)
+To see the e ect of these changes, recall there are four
+typing rules that mention the pointerFree ( ) predicate:
+(Ref stfld), (Body stind), (Val stfld), and (Val box).
+Previously, any value could be stored via (Body stind),
+and the pointer-free conditions on the other three rules were
+
+2.6 Evaluation Respects Typing
+
+We use standard proof techniques to show the consistency
+of the BIL evaluation semantics with its type system. The
+following is the main type safety result of the paper. If
+a program satis es the restrictions on type structure imposed in Section 2.1 and the typing rules for method bodies in Section 2.4 then its evaluation according to the rules
+in Section 2.3 can lead only to conformant intermediate
+0
+states as de ned in0 Section 2.5. Let
+H  H mean that
+dom (H )  dom (H ) and H (p) = H 0 (p) for all p 2 dom (H ).
+Theorem 1 If (H; S Fr ) j=  and Fr ` b : B and  ` b ;
+
+ y then there exists a heap type H y such that H  H y
+and (H y; S Fr ) j= v : B and (H y; S Fr ) j=  y.
+v
+
+9
+
+redundant. Now, these rules prevent the export of values
+containing pointers to the heap or further back the stack.
+Now, (Ref stfld) prevents a pointer being stored into a
+boxed value class with a pointer eld. In fact, no such boxed
+value classes can even be allocated, given the pointerFree ( )
+condition on (Val box).
+Our proof of Theorem 1, outlined in the Appendix, is
+in fact for this more liberal system. Type safety for the
+original system is a corollary of type safety for this more
+liberal system, since any method body typed by the original
+system remains typable.
+Implementation of the new scheme remains future work.
+
+use a typed intermediate language internally.
+One [MWCG99] in particular translates all the way
+from System F, a polymorphic -calculus, down to a typed
+assembly language, TAL. The idea of writing a type-checker
+for a textual assembly format (like our type-checker for IL)
+appears in connection with TAL: the TALx86 type-checker
+accepts input in a typed form of the IA32 assembly
+language that can also be processed by the standard MASM
+assembler.
+Reference types for heap-allocated data structures akin
+to the reference types of the type system of Section 2 appear
+in all of these intermediate languages. What is new about
+our type system is its inclusion of value and pointer types.
+ Value types describe the unboxed stack-allocated form
+of a class. The box and unbox instructions coerce
+between stack and heap forms of a class. Types for
+boxed and unboxed non-strict data structures [PL91]
+and automatic type-based coercions between boxed and
+unboxed forms [Ler92] have been studied previously.
+Other approaches include region analysis [TT97] and
+escape analysis [PG92]. Still, the idea and formalization of types to di erentiate between unboxed and
+boxed forms of class-based objects appears to be new.
+ Pointer types describe pointers to either stack or heap
+allocated items. A risk with a stack pointer is that it
+may dangle, if its lifetime exceeds the lifetime of its
+target. The stack-based form of TAL [MCGW98] includes a type constructor for describing pointers into
+the stack; the parameter to the type constructor is a
+stack type that ensures the target is still live when the
+pointer is dereferenced. Instead, the Pointer Con nement Policy of Section 2 avoids dangling pointers via
+various syntactic restrictions. IL's pointer types are
+easier to integrate with high-level languages like Visual
+Basic with rather simple type systems than a more sophisticated solution using stack types, as found in TAL.
+
+4 IL Features Omitted From BIL
+
+To give a avour of the full intermediate language, we brie y
+enumerate the main features omitted from BIL. The IL Assembly Programmer's Reference Manual [Mic00] contains a
+complete informal description of IL.
+We omit all discussion of IL metadata, such as how
+classes, static data and method headers are described. We
+omit any discussion of the on-disk format, the speci cation
+of linkage information, and assemblies, the unit of software
+deployment.
+Our object model omits null objects, global elds and
+methods, static elds and methods, non-virtual methods,
+single dimensional and multidimensional covariant arrays,
+and object interfaces. Our instruction set omits local variables, arithmetic instructions, arbitrary branching, jumping,
+and tail calls. Tail calls require care, because the type system must prevent pointers to the current stack frame being
+passed as arguments. The current IL policy is to prevent
+the passing of any pointers via a tail call.
+We omit delegates (that is, built-in support for anonymous method invocation), typed references (that is, a
+pointer packaged with its type, required for Visual Basic),
+attributes, native code calling conventions, interoperability with COM, remoting (object distribution) and multithreading. We also omit exception handling, a fairly elaborate model
+that permits a uni ed view of exceptions in
+C++, C# , and other high-level languages.
+
+6 Conclusions
+
+One of the innovations in Microsoft's Common Language
+Runtime is support for typed stack pointers, for passing arguments and results by reference, for example. We presented
+formal typing rules and a type safety result for a substantial
+fragment of the Common Language Runtime intermediate
+language. Our treatment of value types and pointer types
+appears to be new. These rules were devised through our
+writing informal and executable speci cations of the full intermediate language. This e ort clari ed the design and
+helped nd bugs, but further research is needed on machine
+support for formal reasoning and on test case generation.
+We exploited our formal model to validate a liberalisation
+of the IL policy that allows object elds to contain stack
+pointers.
+
+5 Related Work
+
+The principle of formalizing type-checking via logical inference rules is a long-standing topic in the study of
+progamming languages [Car97]. Formal typing rules have
+been developed for several high-level languages, including SML [MTHM97], Haskell [PW92], and for subsets
+of Java [DE97, IPW99]. Formal typing rules have also
+been developed for several low-level languages, including
+TAL [MWCG99] and for subsets of the JVM [SA98, Qia99,
+Yel99, FM00]. The properties established by proof-carrying
+code [Nec97] can be viewed as typing derivations for native code. The idea of formalizing a type system via an
+executable type-checker has recently been advocated for
+Haskell [Jon99]. Our use of an executable speci cation
+as an oracle is an instance of the standard software engineering principle of multi-version prototyping. Proofs
+of soundness of several programming language type systems have been partially mechanised in theorem provers
+[Van96, Nor98, Sym99, vN99].
+Several+ compilers, such as GHC [PHH++93],
+TIL [TMC 96], FLINT [Sha97], and MARMOT [FKR 00],
+
+This paper is one outcome of a collaborative project between Microsoft Research Cambridge and
+the .NET Common Language Runtime product team. We
+thank the Common Language Runtime team, and especially
+S. Dasan, J. Forbes, J. Miller, and V. Morrison, for their help
+during our collaboration. We thank our research interns P.
+Hankin, J. Matthews, and C. Pitcher for their work on the
+project. M. Abadi, C.A.R. Hoare, A. Je rey, and C. Skalka
+suggested improvements to a draft of this paper.
+Acknowledgements
+
+10
+
+[Mic00]
+
+Microsoft Corporation. Microsoft IL Assembly Programmer's Reference Manual, July 2000.
+Part of the .NET Framework Software Development Kit, distributed on CD at the Microsoft
+Professional Developers Conference, Orlando,
+Florida, July 11{14, 2000.
+[MTHM97] R. Milner, M. Tofte, R. Harper, and D. MacQueen. The De nition of Standard ML (Revised). MIT Press, 1997.
+[MWCG99] G. Morrisett, D. Walker, K. Crary, and
+N. Glew. From System F to typed assembly
+language. ACM Transactions on Programming
+Languages and Systems, 21(3):528{569, 1999.
+[Nec97]
+G. Necula. Proof-carrying code. In 24th ACM
+
+References
+
+[AC96]
+
+M. Abadi and L. Cardelli. A Theory of Objects.
+Springer Verlag, 1996.
+[ASU86] A.V. Aho, R. Sethi, and J.D. Ullman. Compilers: Principles, Techniques, and Tools.
+Addison-Wesley, 1986.
+[Car97]
+L. Cardelli. Type systems. In A.B. Tucker,
+editor, The Computer Science and Engineering
+Handbook, chapter 103, pages 2208{2236. CRC
+Press, 1997.
+[Coh89]
+A. Cohn. The notion of proof in hardware
+veri cation. Journal of Automated Reasoning,
+5(2):127{139, June 1989.
+[DE97]
+S. Drossopoulou and S. Eisenbach. Java is type
+safe|probably. In Proceedings ECOOP'97,
+June 1997.
+[FKR+ 00] R. Fitzgerald, T.B. Knoblock, E. Ruf,
+B. Steensgaard, and D. Tarditi. Marmot: An
+optimizing compiler for Java. Software: Practice and Experience, 30(3), 2000.
+[FM00]
+S. Freund and J.C. Mitchell. A type system
+for object initialization in the Java bytecode
+language. ACM Transactions on Programming
+Languages and Systems, 2000. To appear.
+[GHL99] A.D. Gordon, P.D. Hankin, and S.B. Lassen.
+Compilation and equivalence of imperative objects. Journal of Functional Programming,
+9(4):373{426, 1999.
+[GS00]
+A.D. Gordon and D. Syme. Typing a multilanguage intermediate code. Technical Report
+MSR{TR{2000{106, Microsoft Research, 2000.
+[HW00]
+A. Hejlsberg and S. Wiltamuth.
+C#
+Language Reference. Available at http:/
+[IPW99]
+
+[Jon99]
+[Ler92]
+
+SIGPLAN{SIGACT Symposium on Principles
+of Programming Languages, pages 106{119.
+
+[Nor98]
+[PG92]
+
+ACM Press, 1997.
+M. Norrish. C formalised in HOL. PhD thesis,
+University of Cambridge, 1998.
+Y.G. Park and B. Goldberg. Escape analysis
+on lists. In ACM SIGPLAN Conference on
+
+Programming Language Design and Implementation, pages 116{127. ACM Press, 1992.
+
+[PHH+ 93] S. Peyton Jones, C. Hall, K. Hammond,
+W. Partain, and P. Wadler. The Glasgow
+Haskell compiler: a technical overview. In Proceedings UK Joint Framework for Information
+Technology (JFIT) Technical Conference, pages
+
+[PL91]
+
+[PW92]
+
+/msdn.microsoft.com/vstudio/nextgen/
+technology/csharpintro.asp, 2000.
+
+A. Igarashi, B. Pierce, and P. Wadler. Featherweight Java: A minimal core calculus for Java
+and GJ. In Object Oriented Programming: Systems, Languages, and Applications (OOPSLA),
+October 1999.
+M.P. Jones. Typing Haskell in Haskell. In Proceedings Haskell Workshop, Paris, 1999. Available at http://www.cse.ogi.edu/mpj/thih.
+X. Leroy. Unboxed objects and polymorphic
+typing. In 19th ACM SIGPLAN{SIGACT
+
+[Qia99]
+
+[SA98]
+
+Symposium on Principles of Programming Languages, pages 177{188. ACM Press, 1992.
+
+[Sha97]
+
+[MCGW98] G. Morrisett, K. Crary, N. Glew, and
+D. Walker. Stack-based typed assembly language. In Workshop on Types in Compilation,
+volume 1473 of Lecture Notes in Computer Science, pages 28{52. Springer Verlag, 1998.
+
+[Sym98]
+
+11
+
+249{257. 1993.
+S. Peyton Jones and J. Launchbury. Unboxed
+values as rst class citizens. In Functional Programming Languages and Computer Architecture, volume 523 of Lecture Notes in Computer
+Science, pages 636{666. Springer Verlag, 1991.
+
+S. Peyton Jones and P. Wadler.
+A
+static semantics for Haskell. Unpublished
+draft, Department of Computing Science,
+University of Glasgow. Available at http://
+research.microsoft.com/users/simonpj, 1992.
+Z. Qian. A formal speci cation of JavaTM virtual machine instructions for objects, methods and subroutines. In J. Alves-Foss, editor,
+Formal Syntax and Semantics of Java, volume
+1532 of Lecture Notes in Computer Science,
+pages 271{312. Springer Verlag, 1999.
+R. Stata and M. Abadi. A type system for Java
+bytecode subroutines. In Proceedings POPL'98,
+pages 149{160. ACM Press, 1998.
+Z. Shao. An overview of the FLINT/ML compiler. In Proc. 1997 ACM SIGPLAN Workshop on Types in Compilation (TIC'97), Amsterdam, The Netherlands, June 1997.
+D. Syme. Declarative Theorem Proving for Operational Semantics. PhD thesis, University of
+Cambridge, 1998.
+
+[Sym99]
+
+D. Syme. Proving Java type soundness. In
+J. Alves-Foss, editor, Formal Syntax and Semantics of Java, volume 1532 of Lecture Notes
+in Computer Science, pages 83{119. Springer
+Verlag, 1999.
+[TMC+ 96] D. Tarditi, G. Morrisett, P. Cheng, C. Stone,
+R. Harper, and P. Lee. TIL: A type-directed
+optimizing compiler for ML. In Proc. PLDI'96,
+pages 181{192, 1996.
+[TT97]
+M. Tofte and J.-P. Talpin. Region-based memory management. Information and Computation, 132(2):109{176, 1997.
+[Van96]
+M. VanInwegen. The Machine-Assisted Proof of
+Programming Language Properties. PhD thesis,
+Department of Computer and Information Science, University of Pennsylvania, May 1996.
+[vN99]
+D. von Oheimb and T. Nipkow. Machinechecking the Java speci cation: Proving typesafety. In J. Alves-Foss, editor, Formal Syntax
+and Semantics of Java, volume 1532 of Lecture Notes in Computer Science, pages 119{
+156. Springer Verlag, 1999.
+[Yel99]
+P.M. Yelland. A compositional account of
+the JavaTM Virtual Machine. In 26th ACM
+
+The next three lemmas concern how varying the size of
+the stack a ects conformance.
+Lemma 4 states that a pointer-free result well-formed
+in a store type (H; S ) is also well-formed in the store type
+(H; ?). This justi es moving pointer-free results from the
+current frame to the heap.
+Lemma 5 states that any result well-formed in a store
+type (H; S ) is also well-formed in the store type (H; S Fr ).
+This justi es passing results from the current frame into the
+frame of a called method.
+Lemma 6 states that a pointer-free result well-formed in
+a store type (H; S Fr ) is also well-formed in the store type
+(H; S ). This justi es returning pointer-free results from a
+called frame to the previous frame.
+Lemmas 4 and 6 do not apply to pointer results because
+if the result is a pointer into the top stack frame it is not
+well-formed in a smaller stack.
+Lemma 4 If (H; S ) j= v : A and pointerFree (A) then
+(H; ?) j= v : A.
+Lemma 5 If (H; S ) j= v : A then (H; S Fr ) j= v : A.
+Lemma 6 If (H; S Fr ) j= v : A and pointerFree (A) then
+(H; S ) j= v : A.
+Next, we have two lemmas concerned with method call
+and return.
+Lemma 7 says that a frame is well-formed in the store
+(H; S Fr ) if it is well-formed in the store (H; S ). This justi es
+passing an argument frame to a called method.
+Lemma 8 says that a store (h; s) conforms to the store
+type (H; S ) if the store (h; s fr ) conforms to a store type
+(H; S Fr ). This justi es returning from a method.
+The proof of Lemma 8 depends on showing that no
+pointer in the nal store (h; s) refers to the frame fr .
+Lemma 7 If (H; S ) j= fr : Fr then (H; S Fr ) j= fr : F r.
+Lemma 8 If (H; S Fr ) j= (h; s fr ) then (H; S ) j= (h; s).
+Recall that we state Theorem 1 in terms of a relation
+H  H 0 de ned to mean that dom (H )  dom (H 0 ) and
+H (p) = H 0 (p) for all p 2 dom (H ). We may call this the
+heap extension relation. Heap extension is a partial order.
+
+SIGPLAN{SIGACT Symposium on Principles
+of Programming Languages, pages 57{69. ACM
+
+Press, 1999.
+
+A Facts Needed in the Proof of Theorem 1
+
+This appendix encompasses the main lemmas needed in
+the proof of the main type safety theorem of the paper.
+Our proofs are for the de nitions of (Good elds ) and
+pointerFree ( ) described in Section 3. The proofs can trivially be adapted for the original de nitions in Section 2.
+Appendix A.1 covers basic lemmas about the subtype and
+conformance relations. Appendix A.2 presents an alternative characterisation of the pointer conformance judgement
+ j= ptr : A&. Finally, Appendix A.3 presents the de nitions and typing properties of the store lookup and update
+functions.
+
+Lemma 9 The relation H  H 0 is re exive and transitive
+(that is, for all H , H 0 , and H 00 , H  H , and, if H  H 0
+and H 0  H 00 then H  H 00 ).
+
+A.1 Basic Lemmas
+
+The next three lemmas state that heap extension preserves the conformance relations for results, objects, and
+frames.
+Lemma 10 If (H; S ) j= v : A and H  H 0 then (H 0 ; S ) j=
+v : A.
+Lemma 11 If H j= o : c and H  H 0 then H 0 j= o : c.
+Lemma 12 If (H; S ) j= fr : Fr and H  H 0 then (H 0 ; S ) j=
+fr : Fr .
+The nal lemma of this section justi es boxing of results.
+If the heap h and the object o both conform to the heap
+type H , and p is a fresh reference, then the extended heap
+obtained by allocating o at p is well-formed.
+Lemma 13 If H j= h and p 2= dom (h) and H j= o : c then
+H; p 7! c j= h; p 7! o.
+
+We begin with two lemmas about the subtype relation. Subtyping is trivial for all types except reference types. Only
+reference types can be supertypes of other reference types.
+Lemma 1 Assume B 6= class c for all c. If A <: B or
+B <: A then A = B .
+Lemma 2 If class c <: A then there exists c0 such that A =
+0
+0
+class c and c inherits c .
+
+Although a subsumption rule is not part of the de nition
+of the result conformance relation  j= v : A, it is derivable.
+Lemma 3 If  j= v : A and A <: A0 then  j= v : A0 .
+
+12
+
+Result Lookup: lookup (v; f1    fn )
+v
+lookup (v; ) =
+ lookup (u ; f~)
+lookup (f 7! u i21::n ; f f~) =
+
+A.2 Another Formulation of Pointer Conformance
+
+In the next section we present the recursive de nitions of the
+lookup and update functions on pointers. To show properties
+of these functions, it is convenient to present in this section a
+reformulation of the pointer conformance relation  j= ptr :
+A&. Essentially, we show that every well-formed pointer
+takes the form of either (1) a pointer to an argument in a
+frame, followed by a possibly empty path of eld selections,
+or (2) a reference to a boxed object of a value class, followed
+by a possibly empty path of eld selections, or (3) a reference
+to a boxed object (not necessarily of a value class) followed
+by a non-empty path of eld selections.
+This reformulation begins with a notion of a path, a possibly empty sequence of eld names.
+
+i
+
+::= f1    fn
+
+Next, we de ne a relation A =f) B to mean that either
+the sequence f~ is empty and A = B , or that A is a value
+class, and selecting the elds in the series f~ in order yields
+the type B . This is de ned in terms of A f! B , an auxiliary
+single step relation.
+~
+
+where j 2 1::n
+
+: A and A =f) B then  j=
+~
+
+Lemma 16 If  j=  and  j= ptr
+lookup (; ptr ) : A.
+
+: A& then  j=
+
+The store update function is de ned in terms of an auxiliary function, result update update (v; f1    fn ; v0 ), that
+given the result v, returns the outcome of updating the eld
+indicated
+by the eld selections f1 , . . . , fn with the result
+0
+v . Here is the de nition, together with a typing lemma.
+Result Update: update (v; f1    fn ; v 0 )
+ v0
+update (v; ; v 0 ) =
+
+update (fi 7! ui i21::n ; fj f~; v 0 ) =
+0
+~
+(fj 7! update (uj ; f ; v ); fi 7! ui i2(1::n) fjg ) for j 2 1::n
+
+~
+! B and A =f)
+B
+
+f
+
+! B if and only if A i=21value
+class vc and
+elds (vc) = fi 7! Ai ::n and f = fj and B = Aj .
+
+A =) B if and only if A = B .
+f1 fn
+f1
+fn
+A =) B if and only if A !    ! B (where n > 0).
+
+A
+
+j
+
+Next, we present the de nition of store lookup, followed
+by a typing lemma.
+Store Lookup via Pointer: lookup (; ptr )
+ lookup (f 7! u i21::n ; f~)
+lookup ((h; s); p:f~) =
+i
+i
+where h(p) = c[fi 7! ui i21::n ]
+ lookup (v ; f~)
+lookup ((h; s); (i; j ):f~) =
+j
+where s = fr 1    fr i    fr m with i 2 1::m,
+and fr i = :args(v0 ; : : : ; vn ) with j 2 0::n
+
+sequence of elds (written  if n = 0)
+
+Actions of Fields on Types: A
+
+j
+
+Lemma 15 If  j= v
+lookup (v; f~) : B .
+
+Path Within an Object:
+f~
+
+i
+
+f
+
+Given these notations, we reformulate pointer conformance as follows.
+Lemma 14 The judgment  j= ptr : A& holds if and only if
+
+Lemma 17 If  j= u : A and A =) B and  j= v : B then
+ j= update (u; f~; v) : A.
+f~
+
+either:
+
+Given the previous auxiliary function, here is the de nition of store update.
+Store Update via Pointer: update (; ptr ; v 0 )
+
+update ((h; s); p:f~; v 0 ) =
+(((h p); p 7! c[update (fi 7! ui i21::n ; f~; v0 )]); s)
+where h(p) = c[fi 7! ui i21::n ]
+
+update ((h; s); (i; j ):f~; v 0 ) =
+(h; fr 1    :args(v0 ; : : : ; update (vj ; f~; v0 ); : : : ; vn )    fr m )
+where s = fr 1    fr i    fr m with i 2 1::m,
+and fr i = :args(v0 ; : : : ; vn ) with j 2 0::n
+
+(1) there exist (i; j ), f~, and B such that ptr = (i; j ):f~ and
+~
+ j= (i; j ) : B & and B =f) A, or
+(2) there exist p, f~, and vc such that ptr = p:f~ and  j=
+f~
+p : value class vc& and value class vc =) A, or
+(3) there exist p, fj , f~, and c such that ptr = p:fj :f~ and
+~
+ j= p : class c and Aj =f) A, where elds (c) = fi 7!
+i21::n
+Ai
+and j 2 1::n.
+We use this lemma to prove the typing properties of store
+lookup and update functions stated in the next section.
+
+Finally, we state two typing lemmas for store update.
+They are essential facts in the proof of type safety for BIL:
+the proof of Theorem 1 uses Lemma 18 and Lemma 19 to
+show that evaluations of stind and starg, respectively, are
+type safe.
+Lemma 18 If  j=  and  j= ptr : A& and  j= v : A and
+pointerFree (A) then  j= update (; ptr ; v ).
+Lemma 19 If  j=  and  j= (i; j ) : A& and  j= v : A
+and  = (h; fr 1    fr i ) then  j= update (; (i; j ); v ).
+
+A.3 Facts about Lookup and Update
+
+We omitted the de nitions of functions for store
+lookup
+lookup (; ptr ) and store update update (; ptr ; v 0 ) from the
+main body of the paper.
+The store lookup function is de ned in terms of an auxiliary function, result lookup lookup (v; f1    fn ), that given
+the result v, returns the outcome of applying each of the
+eld selections f1 , . . . , fn in turn. Here is the de nition of
+this auxiliary function, followed by a typing lemma.
+13
+
+

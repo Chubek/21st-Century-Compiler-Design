@@ -1,0 +1,1166 @@
+A Typed Intermediate Language for
+Flow-Directed Compilation⋆
+J. B. Wells⋆⋆1 , Allyn Dimock2 , Robert Muller3 , and Franklyn Turbak4
+1
+
+Boston University, Boston MA 02215, USA
+Harvard University, Cambridge MA 02138, USA
+3
+Boston College, Chestnut Hill MA 02167, USA
+4
+Wellesley College, Wellesley MA 02181, USA
+
+2
+
+Abstract. We present a typed intermediate language λCIL for optimizing compilers for function-oriented and polymorphically typed programming languages (e.g., ML). The language λCIL is a typed lambda calculus
+with product, sum, intersection, and union types as well as function types
+annotated with flow labels. A novel formulation of intersection and union
+types supports encoding flow information in the typed program representation. This flow information can direct optimization.
+
+1
+
+Introduction
+
+Recently there has been much interest in the view of compilation as a composition of well typed program transformations. In this setting, the compiler
+maintains the invariant that at each step of the compilation process the intermediate representation of the source program is well typed. This invariant can
+be observed if the input program is well typed and each compiler transformation
+changes the intermediate representation and its typing in a consistent way. This
+approach requires using one or more typed intermediate languages.
+Explicitly typed intermediate languages offer several benefits to the compiler
+writer [20, 19, 25, 21]. First, type information can guide program analyses and
+transformations. Second, some applications need accurate type information at
+run-time thereby requiring the compiler to preserve it. Finally, typed intermediate languages are useful as a debugging aid in the compiler development process.
+This paper introduces a typed intermediate language for optimizing compilers for higher-order polymorphic programming languages. Our intermediate
+language1 λCIL is an explicitly typed λ-calculus with product, sum, intersection,
+union as well as function types annotated with flow labels in the style of Heintze
+and Banerjee [13, 6].
+The flow annotations on function types are sets of term labels that can encode
+control and data flow information as it would be computed by one of several
+⋆
+
+This paper was published as [32]. For an expanded version, see [33].
+Supported by NSF grant CCR–9417382.
+1
+In λCIL , “C” is for the Church Project (http://www.cs.bu.edu/groups/church/) and
+“IL” is for “intermediate language.” The Church Project is investigating the use of
+intersection and union types in compiling ML–like languages.
+
+⋆⋆
+
+typed flow analyses in the literature [13, 6]. If a flow analysis determines that
+φ
+subterm occurrence M has type σ −
+−
+→
+ψ τ , then the λ-abstractions flowing from M
+are those with labels in φ and they flow only to application sites with labels in
+ψ. The sets φ and ψ are sets of potential flow sources and sinks.
+The formulation of λCIL allows flow information to be separated in a well
+typed manner to expose precise correspondences between sources and sinks of
+flow [9]. A λ-abstraction flowing to m application sites can be assigned an intersection type with m conjuncts. This is represented in λCIL by m virtual copies
+of the term. In a dual manner, an application to which n abstractions might flow
+can be assigned a union type with n disjuncts. This is represented in λCIL by a
+virtual case expression that dispatches to one of n clauses.
+The program representation supported by λCIL can be exploited in generating
+efficient object code. One approach to compiling polymorphism is to generate
+specialized instances of a polymorphic definition based on its uses. Specialization
+not only avoids the overhead of boxing but more importantly enables subsequent
+optimizations such as inlining and common subexpression elimination. Empirical
+evidence suggests that the optimizations enabled by specialization can actually
+lead to smaller object programs than alternative approaches [16].
+Typically the specialization approach is limited to non-escaping polymorphic
+functions where the required specializations of the definition are determined by
+its uses within the confines of a binding construct such as let [25, 8]. In λCIL ,
+the required specializations can be determined by the flow analysis. Escaping
+polymorphic functions can be specialized for their uses in textually remote parts
+of the program. It is also easier in λCIL to provide multiple representations of a
+function for different types and for particular inputs. Inlining of functions can
+be performed even when multiple functions can flow to a call site. It can also be
+performed on open functions. This is further discussed in [9].
+
+2
+
+Flow-Directed Program Transformation
+
+We informally illustrate the features of λCIL in the context of closure conversion,
+a key program transformation in optimizing compilers for function-oriented and
+object-oriented languages [30, 18, 11]. Closure conversion transforms programs
+that may contain open functions into equivalent programs that contain only
+closed functions. An important technical challenge in closure conversion is to
+generate efficient function representations without violating the invariant that
+all function representations flowing to a particular application site are consistent
+with that site’s application protocol.
+The simplest way to maintain this invariant is to give every function the
+same representation and use the same application protocol at every call site.
+In a naive strategy, closure conversion maps every source function to a closure,
+a pair of (1) the values of the function’s free variables (the environment) and
+(2) a closed form of the function (the code) that takes the environment as an
+additional argument. However, the overhead of creating and applying a closure
+can often be avoided by choosing more efficient function representations.
+
+We illustrate closure conversion with the following example: 2
+let f int→int = λxint .x ∗ 2
+g¡int→int = λy int .y + aint
+¢
+in × f @ 5, (if bbool then f else g) @ 7
+
+(1)
+
+The closed function (λxint .x∗2) flows to two call sites, the second of which is also a
+sink for the open function (λyint .y+aint ). The flow of this simple program is merely
+an example of more complex flow patterns arising in real programs.
+A typed flow analysis of the example in λCIL might yield the flow graph: 3
+λ1{3,4} xint .x ∗ 2
+
+{1}
+
+2 @3
+
+5
+
+λ2{4} y int .y + aint
+
+{1,2}
+
+(if bbool then 2 else 2) @4
+
+7
+
+Each abstraction occurrence (λlψ xτ .M) is identified by a label l and a set of labels
+ψ approximating the set of application occurrences that can consume it. Each
+application occurrence (M @φk N ) is identified by a label k and a set of abstraction
+occurrence labels φ approximating the set of abstraction occurrences that it can
+φ
+consume. Function types “int −
+−
+→
+int” are also annotated with sets of source and
+ψ
+sink labels. 4
+Consider closure converting our example. The function λ1{3,4} is already closed,
+so it is desirable to represent it as a function (not a closure) and to keep @{1}
+as
+3
+a regular function application (not a closure application). This optimization is
+called selective closure conversion [30]. However, since λ1{3,4} also flows to @{1,2}
+4
+along with the open function λ2{4} , something must be done to ensure that the
+protocols at the call sites are consistent with the function representations that
+flow to them.
+The flow-based features of λCIL are helpful in dealing with multiple representations that can be desirable in closure conversion. In λCIL , a term can be
+transformed to expose correspondences between sources and sinks via intersec2
+
+Remarks on notation: Variables are annotated with types, applications are marked
+by “@”, and tuples are marked by “×”. For readability, types on bound variable
+occurrences are omitted when the binding is present. We use base types (like int and
+bool), constants of these types, and familiar operators on these types, even though
+these are not formally defined.
+3
+To emphasize that our approach addresses complex flow patterns, we present the
+example’s flow graph diagramatically, detaching the abstractions and applications
+from their surrounding context.
+4
+For well-typedness, flow-label subtyping coercions may be needed. For readability,
+we omit these from examples.
+
+tion (∧) and union (∨) types:5
+¢
+V¡ 1 int
+λ{3} x .x ∗ 2, λ1{4} xint .x ∗ 2
+
+{1}
+
+(π1∧ 2) @3
+
+λ2{4} y int .y + aint
+
+¸
+µ
+_·
+{1}
+{2}
+int−
+−
+−
+→int,int−
+−
+−
+→int
+{4}
+{4}
+∧
+case∨ if bbool then (in∨
+(π
+2))
+1
+2
+¸ ¶
+_·
+{1}
+{2}
+int−
+−
+−
+→int,int−
+−
+−
+→int
+{4}
+{4}
+∨
+else (in2 2)
+
+5
+
+{1}
+
+{1}
+
+bind h in (int −
+−
+−
+→ int) ⇒ h @4
+{4}
+
+7,
+
+{2}
+{2}
+(int −
+−
+−
+→ int) ⇒ h @4 7
+{4}
+
+The abstraction occurrence λ1{3,4} has been transformed into a virtual tuple (term
+of intersection type) containing two abstraction occurrences λ1{3} and λ1{4} . Intuitively, a virtual tuple is a compile-time tuple containing copies of a term that
+differ only in their types. Since all of the components of a virtual tuple behave
+identically, no code will be generated to build or access its slots at run-time.
+Similarly, the application occurrence @4{1,2} has been transformed into a virtual
+case expression that dispatches on the tag of a virtual variant to one of two application occurrences @{1}
+or @{2}
+. All of the clauses of a virtual case expression
+4
+4
+will share the same code at run-time. The purpose of virtual tuples and variants
+is to make the term well typed and to provide a place to put type and flow
+annotations. However, a compiler can transform some virtual tuples (∧) to real
+tuples (×) and some virtual variants (∨) to real variants (+).
+For example, one approach to closure converting our example is to split the
+virtual tuple for the closed function into two distinct functions representations,
+one which flows to @{1}
+and one which flows @{1}
+. In this case, the virtual product
+3
+4
+becomes a real product, but the virtual variant stays virtual:
+³
+× (λ³1{3} xint .x ∗ 2),
+
+¡
+¢
+× (λ6{8} eint .λ2{4} y int .y + e), aint
+
+´´
+× (λ5{8} e×[ ] .λ1{4} xint .x ∗ 2), ×()
+∨
+
+case
+{1}
+
+(π1× 2) @3
+
+5
+
+µ
+
+¡
+¢∨[σ1 ,σ2 ]
+×
+if bbool then in∨
+1 (π2 2) ¶
+∨[σ1
+else (in∨
+2 2)
+
+,σ2 ]
+
+{1}
+
+{5}
+
+bind h in σ1 ⇒ (π1× h) @8 (π2× h) @4 7,
+{2}
+{6}
+σ2 ⇒ (π1× h) @8 (π2× h) @4 7
+·
+
+¸
+
+·
+
+{5}
+{1}
+{6}
+{2}
+where σ1 = × (×[ ]−
+−
+−
+→int−
+−
+−
+→int),×[ ] and σ2 = × (int−
+−
+−
+→int−
+−
+−
+→int),int
+{8}
+{4}
+{8}
+{4}
+
+5
+
+¸
+
+Notation: ∧(M1 , . . . , Mn ) constructs a term of intersection type ∧[τ1 , . . . , τn ] whose
+τi
+components are extracted via πi∧ . (in∨
+constructs a term of union type
+i M)
+∨
+∨[τ1 , . . . , τn ] which is analyzed by case .
+
+Another option is to use only one representation for the closed function, but
+to tag it to distinguish it from the open function representation. In this case, the
+virtual product stays virtual, but a case analysis will distinguish between the
+call protocols of the real variants at run-time:
+λ1{3,4} xint .x ∗ 2
+
+{1}
+
+2 @3
+
+5
+
+¡
+¢
+× (λ6{8} eint .λ2{4} y int .y + e), aint
+·
+¸
+µ
+{1}
+¡
+¢+ int−
+−
+−
+→int,σ2
+{4}
+2
+case+ if bbool then in+
+1
+·
+¸ ¶
+{1}
+¡ + ¢+ int−
+−
+−
+→int,σ2
+{4}
+else in2 2
+{1}
+
+{1}
+bind h in (int −
+−
+−
+→ int) ⇒ h @4
+{4}
+{6}
+
+σ2 ⇒ (π1× h) @8
+
+7,
+
+{2}
+
+(π2× h) @4
+
+7
+
+λCIL can also handle inlining, a vital compiler optimization, as another function representation choice. In our example, the code of the open function can be
+inlined at its single call site, and the open function can be represented by the
+value of its sole free variable a rather than as a closure.
+λ1{3,4} xint .x ∗ 2
+
+aint
+
+case
+{1}
+2 @3 5
+
++
+
+µ
+
+if b
+
+bool
+
+then
+else
+
+¡
+
+¡
+
+·
+
+{1}
+
+¸
+
++ int−
+−
+−
+→int,int
+{4}
+in+
+1 2 ·
+¸
+
+¢
+
+{1}
+
+¢+ int−
+−
+−
+→int,int
+{4}
+in+
+2 2
+
+¶
+
+{1}
+{1}
+bind h in (int −
+−
+−
+→ int) ⇒ h @4 7,
+{4}
+
+int ⇒ 7 + h
+
+Not only does λCIL support the inlining of open functions, but the flow annotations in λCIL expose flow-based inlining opportunities that may not be apparent
+from the program text.
+Every change from ∧ to × or ∨ to + may lead to a cascade of changes
+necesary to preserve well typedness and meaning. Our calculus aids in automatically handling these changes. Space does not permit us to specify the closure
+conversion transformations here; for details, see [9].
+
+3
+
+Design Issues
+
+This section discusses some of the goals that guided the design of our language
+λCIL and some of the technical challenges that had to be overcome.
+Finitary Types and Typings: A central theme of our work is the desire for
+types and typings containing detailed information on the uses of functions and
+data representations. Some type system designs conflict with these goals. For example, although universal and existential quantifiers are capable of representing
+
+strong behavioral guarantees, they tend to inhibit access by the compiler to information on implementation decisions. As a result, a standard implementation
+method for languages with universal quantification is boxing, i.e., accessing every
+value that can not fit in a register through a pointer. Boxing is expensive due
+to run-time overhead and compile-time inhibition of optimization. The dynamic
+dispatch problem of object-oriented languages is essentially the same as boxing.
+Implicit or deep subtyping can cause similar problems. Implicit subtyping
+fails to record decisions on the placement of coercions. A use of deep subtyping
+represents a potential coercion which modifies a value at some other location in
+the program which may not even exist yet. This interferes with optimization.
+As an alternative to the approaches mentioned above, we have deliberately
+formulated our language to increase the concrete type information available to
+the compiler and to make typing decisions explicit instead of implicit. Thus, for
+handling code polymorphism and abstractness, we use the finitary intersection
+and union types instead of the infinitary universal and existential types. Finitary
+types allow typing as many or more terms as infinitary types.
+Encoding Type Annotations: Intersection types are ordinarily implicitly
+typed using the following typing rule for introducing an intersection type:
+A ⊢ M : σ; A ⊢ M : τ
+A⊢ M :σ∧τ
+
+(∧ intro)
+
+As a result, for any subterm M in a typing, there may be multiple typing derivations. Thus, formulating explicit intersection types requires deciding (1) how to
+annotate the types of bound variables, (2) how to combine different typing annotations for the same term, and (3) how to determine if two different type
+annotations are for the same term. The new ∧-introduction rule will look something like this:
+A ⊢ M1 : σ; A ⊢ M2 : τ ;
+M1 and M2 are “the same modulo type annotations”;
+M3 is the “combination” of M1 and M2
+A ⊢ M3 : σ ∧ τ
+The approach used by Reynolds in the language Forsythe [24] annotates the
+binding of an abstraction (λx.M ) with a list of types as in (λx: σ1 | · · · |σn .M ),
+requires the body M of the abstraction to be typable with the same type τ for
+each possible type σi of the bound variable x, and then assigns the abstraction
+the type (σ1 → τ ) ∧ · · · ∧ (σn → τ ). Unfortunately, this method is not sufficient
+to represent dependencies between the types of nested variable bindings. Pierce
+gives a more general approach using a special term-level construct to bind a
+type variable to some set of types [22]. For example, using this method the term
+(λx.λy.x) could be annotated as (for α ∈ {σ, τ }.λx: α.λy: α.x) to have the type
+(σ → σ → σ) ∧ (τ → τ → τ ). However, this method is insufficient to represent
+some typings, e.g., giving the term (λx.λy.λz.(xy, xz)) the type (((α → α) ∧ (β →
+β)) → α → β → (α × β)) ∧ ((γ → γ) → γ → γ → (γ × γ)).
+
+To provide a place for multiple conflicting type annotations, we altered the
+standard typing rule to “combine” the multiple type-annotated versions of a
+term by simply keeping both versions:
+A ⊢ M1 : σ; A ⊢ M2 : τ ;
+M1 and M2 are “the same modulo type annotations”
+A ⊢ ∧(M1 , M2 ) : σ ∧ τ
+We call the term ∧(M1 , M2 ) a virtual tuple and prefix it with the “∧” symbol
+to distinguish it from an ordinary tuple, which we now prefix with “×”. The
+intended meaning is that M1 , M2 , and ∧(M1 , M2 ) are merely different typeannotated versions of the same term. Given this choice, we can then use ordinary
+type annotations on variable bindings. For example, to give the term λx.x the
+type (σ → σ) ∧ (τ → τ ), we annotate it as ∧(λxσ .xσ , λxτ .xτ ).
+One implication of our choice is that the tree structure of an explicitly typed
+term follows the tree structure of its typing proof instead of the tree structure
+of the untyped term which it represents. A difficulty this introduces is that
+reduction must essentially work on typing derivations, which is non-trivial to
+formulate. Wells [31] has developed an alternative formulation where typed and
+untyped terms have essentially the same tree structure, but the reduction rules
+are quite complex.
+Difficulties with Union Types: It is difficult to formulate an implicitly
+typed calculus with union types which has the subject-reduction property. For
+an explicitly typed calculus, this problem manifests itself as a difficulty in guaranteeing that any computation that can be performed on an untyped program
+can be duplicated on a typed version of the same program. In an implicitly typed
+calculus, the ∨-elimination rule is usually formulated as:
+A, x:σ ⊢ M : ρ; A, x:τ ⊢ M : ρ; A ⊢ N : σ ∨ τ
+A ⊢ M [x:=N ] : ρ
+
+(∨ elim)
+
+With this formulation, the subject-reduction property is lost. Barbanera and
+Dezani-Ciancaglini give as an example the term (λx.λy.λz.x((λt.t)yz)((λt.t)yz)),
+which can be given the type ((σ → σ → τ ) ∧ (ρ → ρ → τ )) → (π → (σ ∨ ρ)) → π → τ ,
+but the term (λx.λy.λz.x(yz)((λt.t)yz)) to which it reduces can not.
+Since the ∨-elimination rule given above also causes other difficulties in formulating explicitly typed terms, it seems a solution to this might be to change
+the elimination rule to:
+A, x:σ ⊢ M : ρ; A, x:τ ⊢ M : ρ; A ⊢ N : σ ∨ τ
+A ⊢ (λx.M )N : ρ
+
+(∨ elim)
+
+The same example above would still have a problem with this because one could
+just perform an extra β-reduction step. To solve the problem, it is sufficient
+to additionally require call-by-value reduction, if a variable is not considered a
+value. The base values are constants and abstractions and the set of values is
+closed under tuple and variant formation. This ensures that every reduction at
+the untyped level will have a corresponding reduction at the typed level.
+
+4
+
+Formal Language Definition
+
+4.1
+
+General Notation and Terminology
+
+A context is a term containing holes. However, in this paper, it is simpler to
+view terms as contexts without holes. The expression C[M1 , . . . , Mn ] denotes
+the result of placing M1 , . . . , Mn in the n holes of the context C from left to
+right, possibly capturing free variables. For terms, M ≡ N denotes that M and
+N are the same term after renaming bound variables. For contexts, C1 ≡ C2 is
+similar but only allows renaming bound variables whose scopes do not include a
+hole. The statement X ⊳ Y means that the syntactic entity X occurs properly
+within the syntactic entity Y ; X E Y has the same meaning except X and Y
+may be the same. The expression M [x:=N ] denotes the result of replacing all
+free occurrences of x in M by N after first renaming the bound variables of M
+to be distinct from the free variables of N . The expression FV(M ) denotes the
+set of free variables of M .
+Our presentation generalizes notions of reduction (n.o.r.). A simple n.o.r. R
+is a pair (ÃR , CR ) of a redex/contractum relation ÃR and a set of reduction
+contexts CR . For a simple n.o.r., M −→R N means M is transformed into N by
+contracting R-redexes in positions in M specified by an R-reduction context, i.e.,
+there are a context C ∈ CR with k holes and terms Mi and Ni for i ∈ {1, . . . , k}
+such that M ≡ C[M1 , . . . , Mk ] and N ≡ C[N1 , . . . , Nk ] and Mi ÃR Ni for
+i ∈ {1, . . . , k}. A composite n.o.r. R is a rule composing reduction steps of
+simple n.o.r.’s; in this case M −→R N means M and N are related by the rule.
+Writing “−։R ” denotes the transitive and reflexive closure of “−→R ”. A term
+M is in normal form with respect to R, written R-nf(M ), when there is no term
+nf
+N such that M −→R N . The statement M −
+−
+→R N means M −։R N and
+R-nf(N ).
+4.2
+
+Untyped Language λCIL
+ut
+
+Figure 1 shows the syntax and semantics of the untyped language λCIL
+ut .
+Theorem 1 (Confluence of Untyped Reduction). If M̂ −։ut N̂1 and
+M̂ −։ut N̂2 , then there exists M̂ ′ such that N̂1 −։ut M̂ ′ and N̂2 −։ut M̂ ′ .
+4.3
+
+Explicitly Typed Language λCIL
+
+Figure 2 shows the syntax of our explicitly typed language λCIL .
+Although this presentation omits recursive types, they can be added by extending the types to regular trees. This causes no difficulties with the theorems
+given in this paper. Of course, a finite representation must be chosen, e.g., the
+usual µα.τ syntax.
+The type erasure |C| of a type-annotated context C (defined in figure 2) is
+the corresponding untyped and unlabelled context. Some contexts do not have
+
+Untyped Syntax
+Ĉ ∈ UntContext ::=
+
+2 ³| c | x | rec
+´ x.Ĉ | λx.Ĉ | Ĉ1 @ Ĉ2
+| × Ĉ1 , . . . , Ĉn | πi× Ĉ
++
+| in+
+i Ĉ | case Ĉ bind x in Ĉ1 , . . . , Ĉn
+
+M̂ , N̂ ∈ UntTerm = { Ĉ | 2 5 Ĉ }
+V̂ ∈ UntValue
+
+³
+´
+::= c | λx.M̂ | × V̂1 , . . . , V̂n | in+
+i V̂
+
+Untyped Reduction
+(λx.M̂
+³ )@V̂
+´
+πi× × V̂1 , . . . , V̂n
++
+
+Ã ut M̂ [x:=V̂ ]
+Ã ut V̂i
+
+(in+
+i V̂ ) bind x in M̂1 , . . . , M̂n Ã ut M̂i [x:=V̂ ]
+
+case
+rec x.V̂
+
+if 1 ≤ i ≤ n
+if 1 ≤ i ≤ n
+
+Ã ut V̂ [x:=(rec x.V̂ )]
+
+Reduction contexts: Cut = { Ĉ | Ĉ ∈ UntContext and Ĉ has exactly one hole }
+Fig. 1. Untyped language λCIL
+ut .
+
+a type erasure, i.e., those containing virtual tuples like ∧(C1 , . . . , Cn ) or virtual
+case expressions like
+case∨ C bind x in τ1 ⇒ C1 , . . . , τ1 ⇒ C1
+where the type erasures of C1 , . . . , Cn are not identical.
+Figure 3 gives the typing rules of λCIL . A type environment is a finite mapping
+from term variables to types, i.e., a set of variable/type pairs. If A is a type
+environment, then A, x:τ denotes A extended to map x to type τ . The domain
+of definition of A is DomDef(A). A triple A ⊢ M : τ is a judgement. A derivation
+D in language X is a sequence of judgements, each obtained from the previous
+ones by the typing rules of X. We write “A ⊢X M : τ via D” to mean derivation
+D is valid in language X and D ends with A ⊢ M : τ . In this case, D is a typing
+for M in X and M is well typed in X. The statement A ⊢λCIL M : τ means there
+exists some D such that A ⊢λCIL M : τ via D.
+The (∧ intro) rule requires the equivalence of the type erasure of all components of the virtual tuple, while the (∨ elim) rule requires the equivalence of the
+type erasures of all clause bodies of a case∨ expression. These two rules formalize
+the restrictions on virtual tuples and virtual variants mentioned earlier.
+Theorem 2 (Uniqueness of Typings in λCIL ). For M ∈ Term, there is at
+most one type environment A and type τ such that DomDef(A) = FV(M ) and
+A ⊢λCIL M : τ .
+The call-by-value reduction rules for our typed language λCIL are in figure 4.
+The main notion of reduction, r-reduction, is divided into three steps: simplifying
+type annotations, performing a computation step, and then simplifying type
+
+Syntax Shared between Types and Terms
+Q ::= P | S
+
+S ::= ∨ | +
+
+l, k ∈ Label = N
+
+P ::= ∧ | ×
+
+∅ 6= φ, ψ ⊂ Label
+
+Types
+φ
+ρ, σ, τ ::= o | σ −
+−
+→
+τ | Q[τ1 , . . . , τn ]
+ψ
+
+Type-Annotated Contexts
+C ∈ Context ::=
+
+2 | c | xτ | rec xτ .C | λlψ xτ .C | C1 @φk C2
+P
+| P
+¡ (CS1 , .¢.τ. , Cn ) | Sπi C | coerce (σ, τ ) C
+| ini C
+| case C bind x in τ1 ⇒ C1 , . . . , τn ⇒ Cn
+
+Type Erasure (a partial function)
+|2|
+
+≡2
+
+τ
+
+|x |
+¯ l τ ¯
+¯λψ x .C ¯
+
+|c|
+
+≡c
+τ
+
+≡x
+
+|rec x .C|
+¯
+¯
+¯
+¯
+φ
+¯C1 @k C2 ¯
+
+≡ λx.|C|
+
+≡ rec x.|C|
+≡ |C1 | @ |C2 |
+
+|×(C1 , . . . , Cn )| ≡ ×(|C1 | , . . . , |Cn |)
+|coerce (σ, τ ) C| ≡ |C|
+¯ × ¯
+∧
+×
+¯π C ¯
+≡
+π
+|C|
+|π
+≡ |C|
+i C|
+i
+¯¡ i + ¢ τ ¯
+¯
+¯
+τ¯
++
+¯ in C ¯
+¯(in∨
+≡
+in
+|C|
+C)
+≡ |C|
+i
+i
+i
+¯
+¯
+¯case+ C bind x in τ1 ⇒ C1 , . . . , τn ⇒ Cn ¯ ≡ case+ |C| bind x in |C1 | , . . . , |Cn |
+
+(λx.|C |) @ |C| if |C | ≡ · · · ≡ |C |,
+1
+1
+n
+|case∨ C bind x in τ1 ⇒ C1 , . . . , τn ⇒ Cn | ≡
+
+undefined
+otherwise.
+
+|C |
+if |C1 | ≡ · · · ≡ |Cn |,
+1
+|∧(C1 , . . . , Cn )|
+≡
+
+undefined otherwise.
+
+Type-Annotated Terms, Values, Parallel Contexts
+M, N ∈ Term
+
+= { C | the type erasure |C| ∈ UntTerm }
+
+V ∈ Value
+
+= { C | the type erasure |C| ∈ UntValue }
+
+Cp ∈ ParallelContext = { C | the type erasure |C| has exactly one hole }
+Syntactic Sugar for Examples
+¢bool
+¡
+bool = +[×[ ], ×[ ]]
+true ≡ in+
+1 ×( )
+
+¢bool
+¡
+false ≡ in+
+2 ×( )
+
+(if M1 then M2 else M3 ) ≡ case+ M1 bind x in ×[ ] ⇒ M2 , ×[ ] ⇒ M3
+{l}
+(let xτ = N in M ) ≡ ((λl{k} xτ .M ) @k N ) (fresh l, k)
+Fig. 2. Syntax of explicitly typed language λCIL .
+
+(fresh x)
+
+(const)
+
+(→ elim)
+
+(× intro)
+
+(∧ intro)
+
+(×,∧ elim)
+
+(+,∨ intro)
+
+(+ elim)
+
+(∨ elim)
+
+(var)
+
+A⊢c:o
+φ
+A⊢ M :σ−
+−
+−
+→ τ; A ⊢ N : σ
+{k}
+
+A ⊢ M @φk N : τ
+∀n
+i=1 . A ⊢ Mi : τi
+A ⊢ ×(M1 , . . . , Mn ) : ×[τ1 , . . . , τn ]
+∀n
+i=1 . A ⊢ Mi : τi ;
+
+|M1 | ≡ · · · ≡ |Mn |
+
+A ⊢ ∧(M1 , . . . , Mn ) : ∧[τ1 , . . . , τn ]
+A ⊢ M : P [τ1 , . . . , τn ]; 1 ≤ i ≤ n
+A ⊢ πiP M : τi
+
+A, x:τ ⊢ xτ : τ
+A, x:σ ⊢ M : τ
+
+(→ intro)
+
+(coerce)
+
+(rec)
+
+{l}
+A ⊢ λlψ xσ .M : σ −
+−
+ψ→ τ
+
+A ⊢ M : σ; σ ≤ τ
+A ⊢ coerce (σ, τ ) M : τ
+A, x:τ ⊢ M : τ
+A ⊢ rec xτ .M : τ
+φ ⊆ φ′ ; ψ ′ ⊆ ψ
+
+(arrow-≤)
+
+′
+
+φ
+φ
+σ−
+−
+→
+τ ≤σ−
+−
+→τ
+ψ
+ψ′
+
+A ⊢ M : τi ; 1 ≤ i ≤ n
+´S[τ1 ,...,τn ]
+A ⊢ inS
+: S[τ1 , . . . , τn ]
+i M
+³
+
+A ⊢ M : +[τ1 , . . . , τn ]; ∀n
+i=1 . A, x:τi ⊢ Mi : τ
+A ⊢ case+ M bind x in τ1 ⇒ M1 , . . . , τn ⇒ Mn : τ
+A ⊢ M : ∨[τ1 , . . . , τn ]; ∀n
+i=1 . A, x:τi ⊢ Mi : τ ; |M1 | ≡ · · · ≡ |Mn |
+A ⊢ case∨ M bind x in τ1 ⇒ M1 , . . . , τn ⇒ Mn : τ
+Fig. 3. Typing rules of explicitly typed language λCIL .
+
+Main Notion of Reduction for Type-Annotated Terms
+M −→r N
+
+iff
+
+nf
+nf
+∃M ′ , N ′ . (M −
+−
+→t M ′ −→c N ′ −
+−
+→t N )
+
+Computation Reduction
+(λlψ xτ .M ) @φk V
+Ã c M [x:=V ]
+πi× ×(V¡1 , . . . , V¢n )
+Ã c Vi
+τ
+V
+bind
+x
+in
+τ
+⇒
+M
+,
+.
+.
+.
+,
+τ
+⇒
+M
+Ã c Mi [x:=V ]
+case+ in+
+1
+1
+n
+n
+i
+rec xτ .V
+Ã c V [x:=(rec xτ .V )]
+
+if 1 ≤ i ≤ n
+if 1 ≤ i ≤ n
+
+Reduction contexts: Cc = ParallelContext
+Type-Annotation-Simplification Reduction
+πi∧ ∧(M1 , . . . , Mn )
+Ã t Mi
+τ
+{1}
+∨
+∨
+(case (ini N ) bind x in
+Ã t (λ1{1} xτi .Mi ) @1 N
+τ1 ⇒ M1 , . . . , τn ⇒ Mn )
+{l}
+(coerce (σ, τ ) (λlψ xρ .M )) @φk N Ã t (λl{k} xρ .M ) @k N
+coerce (σ1 , τ ) coerce (ρ, σ2 ) M Ã t coerce (ρ, τ ) M
+
+if 1 ≤ i ≤ n
+if 1 ≤ i ≤ n
+
+Reduction contexts: Ct = { C | C ∈ Context and C has exactly one hole }
+Fig. 4. Reduction rules of explicitly typed language λCIL .
+
+annotations again. Type annotations that might block a computation step are
+removed by t-reduction. Since t-reduction is terminating, it is convenient to go to
+t-normal form before and after computation steps. The notion of c-reduction
+performs real computation steps. In our term formulation, parallel c-redexes
+(i.e., different type-annotated versions of the same program phrase) must be
+contracted simultaneously. This is formalized using parallel contexts (members
+of ParallelContext), which require parallel c-redexes to fill holes that map to
+the same hole in the type-erased program.
+Theorem 3 (Subject Reduction for λCIL ). If M −→r N and A ⊢λCIL M : τ ,
+then A ⊢λCIL N : τ .
+Theorem 4 (Typed/Untyped Reduction Correspondence).
+If A ⊢λCIL M : τ , then
+1. If M −→r N , then |M | −→ut |N |.
+2. If |M | −→ut N̂ , then there exists a term N where M −→r N and |N | ≡ N̂ .
+Theorem 5 (Confluence of Typed Reduction). If M −։r N1 and M −։r
+N2 , then there exist M1′ and M2′ such that |M1′ | ≡ |M2′ | and N1 −։r M1′ and
+N2 −։r M2′ .
+4.4
+
+Implicitly Typed Language λCIL
+i
+
+The implicitly typed language λCIL
+is automatically obtained from λCIL and
+i
+CIL
+CIL
+λut . The syntax and semantics of λi are the same as λCIL
+ut as given in figure 1.
+
+The typing rules of λCIL
+are the rules of figure 3 modified by replacing every
+i
+judgement A ⊢ M : τ mentioned in a rule by A ⊢ |M | : τ , using the type erasure
+rules from figure 2.
+M̂ :
+Theorem 6 (Subject Reduction for λCIL
+). If M̂ −→ut N̂ and A ⊢λCIL
+i
+i
+τ , then A ⊢λCIL N̂ : τ .
+
+5
+
+Related Work
+
+Typed intermediate languages are used in several experimental compilers. Most
+typed intermediate languages for polymorphic programming languages can be
+seen as variants of the Girard/Reynolds λ-calculus, System F [10, 23].
+Recent versions of the Standard ML of New Jersey (SML/NJ) compiler [5, 26]
+use a variant of system F as the representation in the front-end of the compiler. In
+SML/NJ, type inference annotates polymorphic functions with universally quantified types and annotates function applications with the simple types to which
+the polymorphic types are instantiated. The compiler uses the type information
+to select efficient data representations and to minimize boxing coercions [17].
+The SML/NJ compiler also uses minimal typing derivations [8] to reduce boxing coercions for let-polymorphic definitions. The compiler uses a simply typed
+representation in later stages of the compiler.
+The Glasgow Haskell Compiler (GHC) [20] also uses a variant of System F.
+In GHC, type inference annotates polymorphic functions with type abstractions
+and uses of polymorphic functions with type arguments. This allows the compiler
+to preserve the well-typedness of the intermediate representation across program
+transformations. The type information is used in the later stages of the compiler
+to improve code generation.
+System F can also be seen as the basis of the typed intermediate language
+is a predof the TIL compiler for Standard ML [19, 18]. The calculus λML
+λML
+i
+i
+icative variant of System F extended with intensional polymorphism [12]. The
+key feature is the support for dynamic type dispatch at run-time. This aids in
+efficient compilation of polymorphism without sacrificing separate compilation.
+A use of a polymorphic function can dispatch on a type argument to yield a
+monomorphic routine suitable for the type. This approach to compiling polymorphism yields excellent results [27] since many type dispatch redexes can be
+eliminated at compile-time and the compiler can then gain the resulting benefits
+of type specialization including in-lining and common subexpression elimination.
+Our intermediate language λCIL was inspired by the earlier work on rank2 intersection types of Jim [15]. As we have shown in this paper, intersection
+types naturally lead to a flow-directed approach to compilation. Our flow labels
+encode information about the operational behavior of the program that cannot be obtained from types without flow labels. At the same time, intersection
+and union types support a natural encoding of polyvariant flow information [6].
+While it is clearly possible to compute, record, and use the flow and type information separately, we believe that a single representation is more natural for
+compilation.
+
+General research into intersection types that has influenced our thinking includes the work of Van Bakel [29] and Jim [15]. Research on both intersection
+and union types that we have consulted includes the work by Pierce [22], Aiken,
+Wimmers, and Lakshman [3, 4], Barbanera and Dezani-Ciancaglini [7], and Trifonov and Smith [28]. Of the above, only Pierce considers intersection and union
+types in an explicitly typed language. Even that is somewhat distant from our
+work because Pierce includes a general subtyping relation on intersection and
+union types which we have deliberately avoided.
+
+6
+
+Conclusions and Future Work
+
+We have presented λCIL , a typed intermediate language suitable for optimizing
+compilers for higher-order polymorphic programming languages such as ML. The
+intermediate language is designed to facilitate verifiable flow-directed compiling.
+Based on λCIL , we have developed a framework for typed-directed flow-based
+representation transformations, and have illustrated this framework in a closure
+conversion application that supports multiple function representations, including the inlining of open functions [9]. This application (informally sketched in
+section 2) is an example of how λCIL supplies the compiler writer both important
+information and great flexibility in making optimization decisions.
+Below, we outline some of the work ahead.
+Labelling All Terms: In this presentation, only abstractions, applications,
+and function types were given flow labels. In order to track the flows of nonfunction values, it will be necessary to to annotate all terms and types in the
+language.
+Compiling Polymorphism by Specialization: The λCIL -calculus suggests an approach to compiling polymorphism of flow-directed specialization.
+The number of specializations required for a given definition can be minimized
+if they are determined by representation types rather than source types. We are
+currently studying the issue of representation types.
+Separate Compilation: If a program is compiled as a single unit, it is possible to express all instances of polymorphism and data abstraction in terms of
+intersection and union types. However, if a program is decomposed into separately compiled modules, universal and existential types may be necessary to
+model the module interfaces. λCIL will need to be extended in order to support separate compilation. Additionally, flow-directed specialization is difficult
+to extend to separately compiled modules. We are currently studying link-time
+specialization in which the linker determines whether new specializations of a
+definition are required.
+Flow Analysis: The typed control flow analyses alluded to in this paper
+are limited by our shallow subtyping relation. We would like to weaken this
+restriction to permit more powerful control flow analysis algorithms.
+Term Duplication: An important practical consideration in compiling with
+types is controlling the size of the intermediate representations. Our current language duplicates terms when it duplicates types. While this language is concep-
+
+tually convenient for specification, for implementation purposes a considerable
+size savings can be obtained by using a typed calculus with intersection and
+union types in the style of [31].
+
+References
+1. ACM. Conf. Rec. 21st Ann. ACM Symp. Princ. of Prog. Langs., 1994.
+2. ACM. Conf. Rec. POPL ’96: 23rd ACM Symp. Princ. of Prog. Langs., 1996.
+3. A. S. Aiken and E. L. Wimmers. Type inclusion constraints and type inference. In
+FPCA ’93, Conf. Funct. Program. Lang. Comput. Arch., pp. 31–41. ACM, 1993.
+4. A. S. Aiken, E. L. Wimmers, and T. K. Lakshman. Soft typing with conditional
+types. In POPL ’94 [1], pp. 163–173.
+5. A. W. Appel. Compiling with Continuations. Cambridge University Press, 1992.
+6. A. Banerjee. A modular, polyvariant, and type-based closure analysis. In ICFP
+’97 [14].
+7. F. Barbanera, M. Dezani-Ciancaglini, and U. de’Liguoro. Intersection and union
+types: Syntax and semantics. Inform. & Comput., 119:202–230, 1995.
+8. N. S. Bjørner. Minimal typing derivations. In ACM SIGPLAN Workshop on ML
+and its Applications, pp. 120–126, 1994.
+9. A. Dimock, R. Muller, F. Turbak, and J. B. Wells. Strongly typed flow-directed
+representation transformations. In ICFP ’97 [14], pp. 11–24.
+10. J.-Y. Girard. Interprétation Fonctionnelle et Elimination des Coupures de
+l’Arithmétique d’Ordre Supérieur. Thèse d’Etat, Université de Paris VII, 1972.
+11. J. Hannan. Type systems for closure conversion. In Workshop on Types for Program
+Analysis, pp. 48–62, 1995. The TPA ’95 proceedings are DAIMI PB-493.
+12. R. Harper and G. Morrisett. Compiling polymorphism using intensional type analysis. In Conf. Rec. 22nd Ann. ACM Symp. Princ. of Prog. Langs. ACM, 1995.
+13. N. Heintze. Control-flow analysis and type systems. In Proc. 2nd Int’l Static
+Analysis Symp., vol. 983 of LNCS, pp. 189–206, 1995.
+14. Proc. 1997 Int’l Conf. Functional Programming. ACM Press, 1997.
+15. T. Jim. What are principal typings and what are they good for? In POPL ’96 [2].
+16. M. P. Jones. Dictionary-free overloading by partial evaluation. In PEPM ’94 —
+ACM SIGPLAN Workshop Partial Eval. & Semantics-Based Prog. Manipulation,
+1994.
+17. X. Leroy. Unboxed objects and polymorphic typing. In Conf. Rec. 19th Ann. ACM
+Symp. Princ. of Prog. Langs., pp. 177–188. ACM, 1992.
+18. Y. Minamide, G. Morrisett, and R. Harper. Typed closure conversion. In POPL
+’96 [2].
+19. G. Morrisett. Compiling with Types. Ph.D. thesis, Carnegie Mellon University,
+1995.
+20. S. L. Peyton Jones. Compiling Haskell by program transformation: A report from
+the trenches. In Proc. European Symp. on Programming, 1996.
+21. S. L. Peyton Jones and E. Meijer. Henk: A typed intermediate language. In Proc.
+First Int’l Workshop on Types in Compilation, June 1997.
+22. B. C. Pierce. Programming with intersection types, union types, and polymorphism. Technical Report CMU-CS-91-106, Carnegie Mellon University, Feb. 1991.
+23. J. C. Reynolds. Towards a theory of type structure. In Colloque sur la Programmation, vol. 19 of LNCS, pp. 408–425, Paris, France, 1974. Springer-Verlag.
+
+24. J. C. Reynolds. Design of the programming language Forsythe. In P. O’Hearn and
+R. D. Tennent, eds., Algol-like Languages. Birkhauser, 1996.
+25. Z. Shao. Compiling Standard ML for Efficient Execution on Modern Machines.
+Ph.D. thesis, Princeton University, 1994.
+26. Z. Shao and A. Appel. A type-based compiler for Standard ML. In Proc. ACM
+SIGPLAN ’95 Conf. Prog. Lang. Design & Impl., 1995.
+27. D. Tarditi, G. Morrisett, P. Cheng, C. Stone, R. Harper, and P. Lee. TIL: A typedirected optimizing compiler for ML. In Proc. ACM SIGPLAN ’96 Conf. Prog.
+Lang. Design & Impl., 1996.
+28. V. Trifonov and S. Smith. Subtyping constrained types. In Proc. 3rd Int’l Static
+Analysis Symp., pp. 349–365, 1996.
+29. S. J. van Bakel. Intersection Type Disciplines in Lambda Calculus and Applicative
+Term Rewriting Systems. Ph.D. thesis, Catholic University of Nijmegen, 1993.
+30. M. Wand and P. Steckler. Selective and lightweight closure conversion. In POPL
+’94 [1], pp. 435–445.
+31. J. B. Wells. Intersection types revisited in the Church style. Manuscript, June
+1996.
+32. J. B. Wells, A. Dimock, R. Muller, and F. Turbak. A typed intermediate language
+for flow-directed compilation. In Proc. 7th Int’l Joint Conf. Theory & Practice of
+Software Development, pp. 757–771, 1997. Superseded by [33].
+33. J. B. Wells, A. Dimock, R. Muller, and F. Turbak. A calculus with polymorphic
+and polyvariant flow types. J. Funct. Programming, 200X. To appear. Supersedes
+[32].
+
+

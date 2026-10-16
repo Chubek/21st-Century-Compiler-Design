@@ -1,0 +1,39 @@
+# Dataflow macros name boundary facts, generated facts, and lattice operations.
+
+- Source file: `appendices/appendix-c.tex`
+- Original label: `tab:app-c-dataflow`
+- Original caption (verbatim):
+
+> Dataflow macros name boundary facts, generated facts, and lattice operations.
+
+| Macro | Meaning |
+| --- | --- |
+| `\In{B}` | fact true on entry to block B |
+| `\Out{B}` | fact true on exit from block B |
+| `\Gen{B}` | fact created inside block B |
+| `\Kill{B}` | fact removed by block B |
+| `\LiveIn{B}` | variable live on entry to block B |
+| `\LiveOut{B}` | variable live on exit from block B |
+| `\Tf{B}` | transfer function of block B |
+| `\meet` | greatest lower bound of lattice facts |
+| `\join` | least upper bound of lattice facts |
+
+<!-- Original LaTeX -->
+
+```latex
+\begin{tabular}{ll}
+    \toprule
+    Macro & Meaning \\
+    \midrule
+    \texttt{\textbackslash In\{B\}} & fact true on entry to block $B$ \\
+    \texttt{\textbackslash Out\{B\}} & fact true on exit from block $B$ \\
+    \texttt{\textbackslash Gen\{B\}} & fact created inside block $B$ \\
+    \texttt{\textbackslash Kill\{B\}} & fact removed by block $B$ \\
+    \texttt{\textbackslash LiveIn\{B\}} & variable live on entry to block $B$ \\
+    \texttt{\textbackslash LiveOut\{B\}} & variable live on exit from block $B$ \\
+    \texttt{\textbackslash Tf\{B\}} & transfer function of block $B$ \\
+    \texttt{\textbackslash meet} & greatest lower bound of lattice facts \\
+    \texttt{\textbackslash join} & least upper bound of lattice facts \\
+    \bottomrule
+  \end{tabular}
+```

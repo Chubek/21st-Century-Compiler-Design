@@ -1,0 +1,1453 @@
+Static Analysis of Numerical Algorithms
+Eric Goubault and Sylvie Putot
+CEA Saclay, F91191 Gif-sur-Yvette Cedex, France
+{eric.goubault, sylvie.putot}@cea.fr
+
+Abstract. We present a new numerical abstract domain for static analysis of the errors introduced by the approximation by ﬂoating-point arithmetic of real numbers computation, by abstract interpretation [3]. This
+work extends a former domain [4,8], with an implicitly relational domain
+for the approximation of the ﬂoating-point values of variables, based on
+aﬃne arithmetic [2]. It allows us to analyze non trivial numerical computations, that no other abstract domain we know of can analyze with
+such precise results, such as linear recursive ﬁlters of diﬀerent orders,
+Newton methods for solving non-linear equations, polynomial iterations,
+conjugate gradient algorithms.
+
+1
+
+Introduction
+
+The idea of the domain of [4,8]1 is to provide some information on the source
+of numerical errors in the program. The origin of the main losses of precision
+is most of the time very localized, so identifying the operations responsible for
+these main losses, while bounding the total error, can be very useful. The analysis
+follows the ﬂoating-point computation, and bounds at each operation the error
+committed between the ﬂoating-point and the real result. It relies on a model of
+the diﬀerence between the result x of a computation in real numbers, and the
+result f x of the same computation using ﬂoating-point numbers, expressed as
+
+x = fx +
+ωx ϕ .
+(1)
+∈L∪{hi}
+
+In this relation, a term ωx ϕ ,  ∈ L denotes the contribution to the global
+error of the ﬁrst-order error introduced by the operation labeled . The value
+of the error ωx ∈ R expresses the rounding error committed at label , and its
+propagation during further computations on variable x. Variable ϕ is a formal
+variable, associated to point , and with value 1. Errors of order higher than
+one, coming from non-aﬃne operations, are grouped in one term associated to
+special label hi. We refer the reader to [4,8] for the interpretation of arithmetic
+operations on this domain.
+A natural abstraction of the coeﬃcients in expression (1), is obtained using
+intervals. The machine number f x is abstracted by an interval of ﬂoating-point
+1
+
+Some notations are slightly diﬀerent from those used in these papers, in order to
+avoid confusion with the usual notations of aﬃne arithmetic.
+
+K. Yi (Ed.): SAS 2006, LNCS 4134, pp. 18–34, 2006.
+c
+ Springer-Verlag Berlin Heidelberg 2006
+
+Static Analysis of Numerical Algorithms
+
+19
+
+numbers, each bound rounded to the nearest value in the type of variable x. The
+error terms ωix ∈ R are abstracted by intervals of higher-precision numbers, with
+outward rounding. However, results with this abstraction suﬀer from the overestimation problem of interval methods. If the arguments of an operation are
+correlated, the interval computed with interval arithmetic may be signiﬁcantly
+wider than the actual range of the result.
+Resembling forms, though used in a very diﬀerent way, were introduced in
+the interval community, under the name of aﬃne arithmetic [2], to overcome
+the problem of loss of correlation between variables in interval arithmetic. We
+propose here a new relational domain, relying on aﬃne arithmetic for the computation of the ﬂoating-point value f x . Indeed, we cannot hope for a satisfying
+computation of the bounds of the error without an accurate computation of the
+value, even with very accurate domains for the errors. But aﬃne arithmetic is
+designed for the estimation of the result of a computation in real numbers. We
+will show that it is tricky to accurately estimate from there the ﬂoating-point
+result, and that the domain for computing f x had to be carefully designed.
+In section 2, we introduce this new domain and establish the deﬁnition of
+arithmetic operations over it. First ideas on these relational semantics were proposed in [12,13]. In section 3, we present a computable abstraction of this domain,
+including join and meet operations, and a short insight into practical aspects,
+such as ﬁxed-point computations, cost of the analysis, and comparison to other
+domains such as polyhedra. For lack of space, we only give hints of proofs of
+the correctness of the abstract semantics, in sections 2.3 and 3.1. Finally, we
+present in section 4, results obtained with the implementation of this domain in
+our static analyzer FLUCTUAT, that demonstrate its interest.
+Notations: Let F be the set of IEEE754 ﬂoating-point numbers (with their inﬁnities), R the set of real numbers with ∞ and −∞. Let ↑◦ : R → F be the function
+that returns the rounded value of a real number x, with respect to the rounding
+mode ◦. The function ↓◦ : R → F that returns the roundoﬀ error is deﬁned by
+∀x ∈ R, ↓◦ (x) = x− ↑◦ (x) .
+We note IR the set of intervals with bounds in R. In the following, an interval will
+be noted in bold, a, and its lower and upper bounds will be noted respectively
+a and a. And we identify when necessary, a number with the interval with its
+two bounds equal to this number. ℘(X) denotes the set of subsets of X.
+
+2
+
+New Domain for the Floating-Point Value f x
+
+Aﬃne arithmetic was proposed by De Figueiredo and Stolﬁ [2], as a solution to
+the overestimation in interval arithmetic. It relies on forms that allow to keep
+track of aﬃne correlations between quantities. Noise symbols are used to express
+the uncertainty in the value of a variable, when only a range is known. The
+sharing of noise symbols between variables expresses dependencies. We present
+here a domain using aﬃne arithmetic for the ﬂoating-point computation.
+
+20
+
+E. Goubault and S. Putot
+
+In section 2.1, we present brieﬂy the principles of aﬃne arithmetic for real
+numbers computations. Then in section 2.2, we show on an example the challenges of its adaptation to the estimation of ﬂoating-point computations. In
+sections 2.3 and 2.4, we present the solution we propose, and ﬁnally in section
+2.5 we demonstrate this solution on the example introduced in section 2.2.
+2.1
+
+Aﬃne Arithmetic for Computation in Real Numbers
+
+In aﬃne arithmetic, a quantity x is represented by an aﬃne form, which is a
+polynomial of degree one in a set of noise terms εi :
+x̂ = αx0 + αx1 ε1 + . . . + αxn εn , with εi ∈ [−1, 1] and αxi ∈ R.
+Let AR denote the set of such aﬃne forms. Each noise symbol εi stands for an
+independent component of the total uncertainty on the quantity x, its value is
+unknown but bounded in [-1,1]; the corresponding coeﬃcient αxi is a known real
+value, which gives the magnitude of that component. The idea is that the same
+noise symbol can be shared by several quantities, indicating correlations among
+them. These noise symbols can be used not only for modelling uncertainty in
+data or parameters, but also uncertainty coming from computation.
+Let E0 be the set of expressions on a given set V of variables (all possible
+program variables) and constants (intervals of reals), built with operators +, −,
+√
+∗, / and . We note CˆA the set of abstract contexts in AR. We can now deﬁne,
+ˆ : E0 × CˆA →
+inductively on the syntax of expressions, the evaluation function eval
+AR. For lack of space, we only deal with a few operations. The assignment of a
+variable x whose value is given in a range [a, b], introduces a noise symbol εi :
+x̂ = (a + b)/2 + (b − a)/2 εi .
+The result of linear operations on aﬃne forms, applying polynomial arithmetic,
+can easily be interpreted as an aﬃne form. For example, for two aﬃne forms x̂
+and ŷ, and a real number r, we get
+x̂ + ŷ = (αx0 + αy0 ) + (αx1 + αy1 )ε1 + . . . + (αxn + αyn )εn
+x̂ + r = (αx0 + r) + αx1 ε1 + . . . + αxn εn
+rx̂ = rαx0 + rαx1 ε1 + . . . + rαxn εn
+For non aﬃne operations, the result applying polynomial arithmetic is not an
+aﬃne form : we select an approximate linear resulting form, and bounds for
+the approximation error committed using this approximate form are computed,
+that create a new noise term added to the linear form. For example, for the
+multiplication of x̂ and ŷ, deﬁned on the set of noise symbols ε1 , . . . , εn , a ﬁrst
+over-approximation for the result (the one given in [2]), writes
+x̂ × ŷ = αx0 αy0 +
+
+n
+
+i=1
+
+n
+
+
+(αxi αy0 + αyi αx0 )εi + (
+
+i=1
+
+|αxi |.|
+
+n
+
+i=1
+
+|αyi |)εn+1 .
+
+Static Analysis of Numerical Algorithms
+
+21
+
+However, this new noise term can be a large over-estimation of the non-aﬃne
+part, the additional term is more accurately approximated by
+n
+
+i=1
+
+|αxi αyi |[0, 1] +
+
+
+
+|αxi αyj |[−1, 1].
+
+1≤i=j≤n
+
+This term is not centered on zero, the corresponding aﬃne form then writes
+x̂ × ŷ = (αx0 αy0 +
+
+n
+n
+n
+
+1 x y
+1 x y  x y
+|αi αi |) +
+(αxi αy0 + αyi αx0 )εi + (
+|α α | +
+|αi αj |)εn+1 .
+2 i=1
+2 i=1 i i
+i=1
+i=j
+
+For example, if x̂ = ε1 + ε2 and ŷ = ε2 , we get with the ﬁrst formulation,
+x̂ × ŷ = 2ε3 ∈ [−2, 2] and with the second formulation, x̂ × ŷ = 12 + 32 ε3 ∈ [−1, 2].
+However, the exact range here is [-0.25,2] : indeed there could be a more accurate
+computation for the multiplication, using Semi-Deﬁnite Programming2.
+2.2
+
+Motivation for the Aﬃne Real Form Plus Error Term Domain
+
+Using aﬃne arithmetic for the estimation of ﬂoating-point values needs some
+adaptation. Indeed, the correlations that are true on real numbers after an arithmetic operation, are not exactly true on ﬂoating-point numbers.
+Consider for example two independent variables x and y that both take their
+value in the interval [0,2], and the arithmetic expression ((x + y) − y) − x. Using
+aﬃne arithmetic in the classical way, we write x = 1 + ε1 , y = 1 + ε2 , and we
+get zero as result of the expression. This is the expected result, provided this
+expression is computed in real numbers. But if we take x as the nearest ﬂoatingpoint value to 0.1, and y = 2, then the ﬂoating-point result is −9.685755e − 8.
+In order to model the ﬂoating-point computation, a rounding error must thus
+be added to the aﬃne form resulting from each arithmetic operation. But we
+show here on an example that the natural extensions of real aﬃne arithmetic
+are not fully satisfying. We consider an iterated computation x = x − a ∗ x, for
+0 ≤ a < 1 and starting with x0 ∈ [0, 2].
+- With interval arithmetic, x1 = x0 − ax0 = [−2a, 2], and iterating we get an
+over-approximation (due to the use of ﬂoating-point numbers), of the already
+unsatisfying interval xn = [(1 − a)n − (1 + a)n , (1 − a)n + (1 + a)n ].
+- We now consider aﬃne arithmetic with an extra rounding error added for
+each arithmetic operation. We suppose for simplicity’s sake that all coeﬃcients
+are exactly represented, and we unfold the iterations of the loop. We note u the
+value ulp(1), which is the absolute value of the diﬀerence between 1 and the
+nearest ﬂoating-point number, and u = [−u, u]. We note fˆn = x̂n + δn , where
+x̂n is the aﬃne form representing the result of the computation of xn in real
+numbers, and δn the interval error term giving the ﬂoating-point number. We
+have x̂0 = 1 + ε1 and, using aﬃne arithmetic on real numbers, we get
+x̂n = (1 − a)n + (1 − a)n ε1 , ∀n ≥ 0.
+2
+
+We thank Stéphane Gaubert who pointed out this to us.
+
+22
+
+E. Goubault and S. Putot
+
+The rounding error on x0 is δ0 = 0. Using interval arithmetic for the propagation
+of the error δn , and adding the rounding errors corresponding to the product
+axn and to the subtraction xn − axn , we get
+δn+1 = (1 + a)δn + a(1 − a)n u + (1 − a)n+1 u = (1 + a)δn + (1 − a)n u
+
+(2)
+
+In this computation, u denotes an unknown value in an interval, that can be
+diﬀerent at each occurrence of u. Using property (1 − a)n ≥ 1 − an, ∀a ∈
+[0, 1] and n ≥ 1, we can easily prove that for all n, nu ⊂ δn . The error term
+increases, and fˆn is not bounded independently of the iterate n.
+- Now, to take into account the dependencies also between the rounding errors,
+we introduce new noise symbols. For a lighter presentation, these symbols are
+created after the rounding errors of both multiplication ax and subtraction x −
+ax, and not after each of them. Also, a new symbol is introduced at each iteration,
+but it agglomerates both new and older errors. In the general case, it will be
+necessary to keep as many symbols as iterations, each corresponding to a new
+error introduced at a given iteration. The error term is now computed as an
+aﬃne form δ̂n = μn ε2,n , with μ0 = 0 and
+δ̂n+1 = (1 − a)μn ε2,n + a(1 − a)n u + (1 − a)n+1 u.
+Introducing a new symbol ε2,n+1 ∈ [−1, 1], it is easy to prove that we can write
+δ̂n = n(1 − a)n−1 u ε2,n
+
+∀n ≥ 1.
+
+The error converges towards zero. However, we still loose the obvious information
+that xn is always positive. Also the computation can be costly : in the general
+case, one symbol per operation and iteration of the loop may be necessary.
+We now propose a semantics that avoids the cost of extra noise symbols, and
+with which we will show in section 2.5, that we can prove that xn ≥ 0, ∀n.
+2.3
+
+Semantics for the Floating-Point Value: Abstract Domain
+
+Linear correlations between variables can be used directly on the errors or on
+the real values of variables, but not on ﬂoating-point values. We thus propose
+to decompose the ﬂoating-point value f x of a variable x resulting from a trace
+of operations, in the real value of this trace of operations rx , plus the sum of
+errors δ x accumulated along the computation, f x = rx + δ x . Other proposals
+have been made to overcome this problem, most notably [10].
+We present in this section an abstract domain, in the sense that we model
+a program for sets of inputs and parameters (given in intervals). However, it is
+not fully computable, as we still consider coeﬃcients of the aﬃne forms to be
+real numbers. A more abstract semantics, and lattice operations, will be brieﬂy
+presented in the implementation section 3.
+Real Part r x : Aﬃne Arithmetic. We now index a noise symbol εi by the
+label i ∈ L corresponding to the operation that created the symbol. The representation is sparse, as all operations do not create symbols. In this section and for
+
+Static Analysis of Numerical Algorithms
+
+23
+
+more simplicity, we suppose that at most one operation, executed once, is associated to each label. The generalization will be discussed in the implementation
+section.
+ˆ is as follows. We note r x the
+The correctness of the semantics, deﬁned by eval,
+x
+smallest interval including r̂ and C, the set of concrete contexts, i.e. functions
+from the variables to R, seen as a subset of CˆA . We have an obvious concretisation
+function concR : CˆA → ℘(C), making all possible choices of values for the noise
+symbols in the aﬃne forms it is composed of. This also deﬁnes γ from aﬃne
+forms to intervals, which cannot directly deﬁne a strong enough correctness
+criterion. Aﬃne forms deﬁne implicit relations, we must prove that in whatever
+expression we are using them, the concretisation as interval of this particular
+expression contains the concrete values that this expression can take3 . We have to
+ˆ with the evaluation function eval : E0 × C → R which computes an
+compare eval
+arithmetic expression in a given (real number) context. Formally, the semantics
+ˆ is correct because for all e ∈ E0 ,
+of arithmetic expressions in AR, given by eval,
+ˆ
+for all Ĉ ∈ CA , we have property:
+ˆ
+Ĉ)
+∀C ∈ concR (Ĉ), eval(e, C) ∈ γ ◦ eval(e,
+
+(3)
+
+Error Term δ x : Errors on Bounds Combined with Maximum Error.
+The rounding errors associated to the bounds rx and rx is the only information needed to get bounds for the ﬂoating-point results. In the general case,
+x
+x
+our semantics only gives ranges for these errors : we note δ−
+and δ+
+the intervals including the errors due to the successive roundings committed on the
+bounds rx and rx . The set of ﬂoating-point numbers taken by variable x after
+the computation then lies in the interval
+x
+x ].
+f x = [rx + δ−
+, r x + δ+
+x
+x , so this is not equivalent to
+can be greater for example than δ+
+Note that δ−
+x
+x
+x
+x
+f = r + (δ− ∪ δ+ ).
+In aﬃne arithmetic, the bounds of the set resulting from an arithmetic operation x  y are not always got from the bounds of the operands x and y as
+in interval arithmetic : in this case, the error inside the set of values is also
+x
+that bounds all possible
+needed. We choose to represent it by an interval δM
+x
+errors committed on the real numbers in interval r .
+This intuition can be formalized again using abstract interpretation [3]. We
+deﬁne D = AR × IR3 and γ̃ : D → ℘(R × F) by:
+⎧
+⎪
+⎨ {(r,
+ f ) ∈ R × F/r ∈ γ(d), f − r ∈ δM }
+γ̃(d, δM , δ+ , δ− ) = ∩ (r, f ) ∈ R × F/f ≥ inf γ(d) + δ−
+⎪
+⎩
+∩ (r, f ) ∈ R × F/f ≤ sup γ(d) + δ+
+
+The correctness criterion for the abstract semantics  of an operator  (R
+in the real numbers, F in the ﬂoating-point numbers) is then the classical:
+3
+
+This is reminiscent to observational congruences dating back to the λ-calculus.
+
+24
+
+E. Goubault and S. Putot
+
+˜ ẽ ∈ D, ∀rx , ry ∈ R, ∀f x , f y ∈ F such that (rx , f x ) ∈ γ̃(d) and (ry , f y ) ∈ γ̃(e),
+∀d,
+(rx R ry , f x F f y ) ∈ γ̃(d e)
+
+(4)
+
+
+
+
+Now the order4 on D is as follows: (d, δM , δ+ , δ− ) ≤D (d , δM
+, δ+
+, δ−
+) if
+⎧
+
+⎪
+⎨ d ≤D d 
+δM ⊆ δM
+⎪
+⎩ min γ(d) + δ− , max γ(d) + δ+ ⊆ min γ(d ) + δ  , max γ(d ) + δ 
+−
+
+2.4
+
++
+
+Arithmetic Operations on Floating-Point Numbers
+
+The error on the result of a binary arithmetic operation x  y, with  ∈ {+, ×},
+is deﬁned as the sum of two terms :
+xy
+xy
++ δ.,n
+,
+δ.xy = δ.,p
+xy
+with . ∈ {−, +, M }. The propagated error δ.,p
+is computed from the errors on
+xy
+the operands, and δ.,n expresses the rounding error due to current operation .
+
+Propagation of the Errors on the Operands. The propagation of the maximum error uses the maximum errors on the operands. For computing the errors
+on the result, we need to compute the values of the noise symbols rˆx and rˆy for
+which the bounds of r z are obtained. For that, we compute the values of the εi
+that give the bounds of r z , and check if for these values, we are on bounds of
+r x and r y .
+Let bzi , for i ∈ L such that αzi = 0, be the value of εi that maximizes rˆz . We
+have
+
+
+αzi bzi = αz0 −
+|αzi |
+rz = αz0 −
+i∈L, αzi =0
+
+i∈L
+
+n
+
+
+
+
+rz = αz0 +
+
+αzi bzi = αz0 +
+
+i∈L, αzi =0
+
+|αzi |
+
+i∈L
+
+We can then compute the values of x and y that lead to the bounds of r z (such
+x (z)  rˆy (z) and rz = rˆx (z)  rˆy (z)) :
+that rz = rˆ−
+−
++
++
+
+
+x (z) = αx −
+αxi bzi +
+αxi εi
+rˆ−
+0
+{i, αzi =0}
+x (z) = αx +
+rˆ+
+0
+
+
+
+{i, αzi =0}
+
+{i, αzi =0}
+
+αxi bzi +
+
+
+
+αxi εi
+
+{i, αzi =0}
+
+x
+ˆx
+We note ex
+− (z) (resp e+ (z)) the interval of error associated to r− (z) (resp
+z
+x
+z
+rˆ+ (z)), used to get the lower bound r (resp the upper bound r ) of the result :
+4
+
+Depending on the order on AR to be formally deﬁned in section 3.1.
+
+Static Analysis of Numerical Algorithms
+
+ex− (z) =
+
+⎧ x
+x
+x
+x
+⎨ δ− if r− (z) = r− (z) = r ,
+x
+x
+x
+δ
+if r− (z) = r− (z) = r x ,
+⎩ +
+x
+δM otherwise.
+
+ex+ (z) =
+
+25
+
+⎧ x
+x
+x
+⎨ δ+ if r+ (z) = r+ (z) = r x ,
+x
+x
+x
+δ
+if r+ (z) = r+
+(z) = r x ,
+⎩ −
+x
+δM otherwise.
+
+x
+We deduce the following determination of ex
+− (z) and e+ (z) :
+x
+x z
+x
+x
+x
+and ex
+- if ∀i ∈ L such that αi = 0, αi αi > 0, then e− (z) = δ−
++ (z) = δ+
+x
+x z
+x
+x
+x
+x
+- else if ∀i ∈ L such that αi = 0, αi αi < 0, then e− (z) = δ+ and e+ (z) = δ−
+x
+x
+x
+- else e− (z) = e+ (z) = δM .
+
+Then, using these notations, we can state the propagation rules
+x+y
+y
+= ex
+δ−,p
+− (x + y) + e− (x + y)
+x+y
+y
+δ+,p
+= ex
++ (x + y) + e+ (x + y)
+x+y
+y
+x
+δM,p
+= δM
++ δM
+x×y
+y
+y
+y
+x
+x
+δ−,p
+= ex
+− (x × y)r (x × y) + e− (x × y)r (x × y) + e− (x × y)e− (x × y)
+x×y
+y
+y
+x
+y
+x
+δ+,p
+= ex
++ (x × y)r (x × y) + e+ (x × y)r (x × y) + e+ (x × y)e+ (x × y)
+x×y
+y
+x y
+x y
+= δM
+r + δM
+r x + δM
+δM
+δM,p
+
+Addition of the New Rounding Error. Adding the propagation error to
+the result of the computation in real numbers, we get the real result of the
+computation of f x  f y . We then have to add a new error corresponding to the
+rounding of this quantity to the nearest ﬂoating-point number.
+We note ↓◦ (i), the possible rounding error on a real number in an interval i.
+We suppose the rounding mode used for the execution is to the nearest ﬂoatingpoint, and note it “n” as subscript.
+↓n (i) =
+
+↓n (i)
+if i = i,
+1
+ulp(max(|i|,
+|i|))[−1,
+1]
+otherwise.
+2
+
+Then, the new rounding error is deﬁned by
+xy
+x y
+= − ↓n (rx y + δ−,p
+)
+δ−,n
+xy
+x y
+δ+,n
+= − ↓n (rx y + δ+,p
+)
+xy
+xy
+δM,n
+= − ↓n (r xy + δM,p
+)
+f g
+f g
+Note that the new rounding errors on the bounds, δ−,n
+and δ+,n
+, are in fact
+real numbers, identiﬁed to a zero-width interval.
+These error computations are correct with respect to (4), section 2.3.
+
+2.5
+
+Example
+
+We consider again the example introduced in section 2.2, and we now use the
+domain just described. The real part is computed using aﬃne arithmetic, as in
+x0
+x0
+x0
+section 2.2. We have δ−
+= δ+
+= δM
+= 0 , and, for n greater or equal than 1,
+
+26
+
+E. Goubault and S. Putot
+axn
+xn
+xn
+δ−
+= aδ−
++ ↓n (aδ−
+)
+
+axn
+xn
+xn
+δ+
+= aδ+
++ ↓n (2a(1 − a)n + aδ−
+)
+
+−axn
+axn
+Using δ−
+= −δ+
+, we deduce
+x
+
+−axn
+−axn
+xn
+xn
+δ−n+1 = δ−
++ δ+
++ ↓n (δ−
++ δ+
+)
+xn
+xn
+xn
+xn
+− ↓n (aδ−
+))
+= (1 − a)δ− − ↓n (aδ− )+ ↓n ((1 − a)δ−
+x0
+xn
+is zero, the error on the lower bound of xn stays zero : δ−
+= 0 for all
+As δ−
+xn
+n. This means in particular that f ≥ 0. The same computation for the error
+on the upper bound leads to
+x
+
+xn
+xn
+− ↓n (2a(1 − a)n + aδ+
+)
+δ+n+1 = (1 − a)δ+
+xn
+xn
++ ↓n (2(1 − a)n+1 + (1 − a)δ+
+− ↓n (2a(1 − a)n + aδ+
+))
+
+Using real numbers, errors on the lower and upper bounds could be computed
+exactly. The maximum error on the interval is got by the same computation as
+in section 2.2 with no extra noise symbols for the errors, that is by (2). Indeed,
+we could also improve the computation of the maximum error this way, but it
+will be no longer useful with the (future) relational computation of the errors,
+to be published elsewhere.
+The results got here and in section 2.2, are illustrated in ﬁgure 1. In 1 a), the
+bounds of the computation in real numbers for interval (IA) and aﬃne (AA)
+arithmetic are compared : the computation by aﬃne arithmetic gives the actual
+result. In 1 b), we add to the aﬃne arithmetic result the maximum rounding
+error computed as an interval, and we see that after about 120 iterates, the
+rounding error prevails and the result diverges. Then in 1 c), we represent the
+maximum rounding error computed using extra noise symbols. And ﬁnally, in 1
+d), we represent the rounding error computed on the higher bound of the real
+interval : it is always negative. Remembering that the error on the lower bound
+is zero, this proves that the ﬂoating-point computation is bounded by the result
+obtained from the aﬃne computation in real numbers. The ﬁxpoint computation
+is not presented, as it requires the join operator presented thereafter. However,
+the analysis does converge to the actual ﬁxpoint.
+
+3
+
+Implementation Within the Static Analyzer
+FLUCTUAT
+
+We deﬁne here a computable abstraction of the domain presented in section 2.3.
+We now abstract further away from trace semantics : we need control-ﬂow join
+and meet operators, which must be designed with special care in order to get
+an eﬃcient analysis of loops. Also, the analyzer does not have access to real
+numbers, we bound real coeﬃcients by intervals. The semantics for arithmetic
+operations presented in section 2.3 must thus be extended to interval coeﬃcients.
+Finally, we insist on the interest of our analysis, in terms of cost and accuracy,
+compared to existing domains such as polyhedrons.
+
+Static Analysis of Numerical Algorithms
+8
+
+27
+
+2
+’IA_min’
+’IA_max’
+’AA_min’
+’AA_max’
+
+6
+
+’Float_M_IA_min’
+’Float_M_IA_max’
+1.5
+
+4
+
+1
+
+2
+
+0.5
+
+0
+
+0
+
+-2
+
+-0.5
+
+-4
+
+-1
+
+-6
+
+-1.5
+
+-8
+
+-2
+0
+
+5
+
+10
+
+15
+
+20
+
+a) Real value : AA compared to IA
+
+0
+
+20
+
+40
+
+60
+
+80
+
+100
+
+120
+
+140
+
+160
+
+b) AA plus interval maximum error
+0
+
+1e-06
+’DeltaM_AA_min’
+’DeltaM_AA_max’
+
+’Delta_plus’
+
+8e-07
+6e-07
+
+-5e-08
+
+4e-07
+2e-07
+
+-1e-07
+
+0
+-2e-07
+
+-1.5e-07
+
+-4e-07
+-6e-07
+
+-2e-07
+
+-8e-07
+-1e-06
+
+-2.5e-07
+0
+
+20
+
+40
+
+60
+
+80
+
+100
+
+c) Reﬁned maximum error
+
+0
+
+20
+
+40
+
+60
+
+80
+
+100
+
+d) Error on the higher bound of the real
+
+Fig. 1. Evolution of xn and rounding errors with iterations
+
+3.1
+
+Extended Abstract Domain
+
+x
+x
+We note AI the set of aﬃne forms x̂ = αx0 + αx
+1 ε1 + . . . + αn εn with α0 ∈ R
+x
+and αi ∈ IR (i > 0). AR is seen as a subset of AI. Let now E be the set of
+expressions on variables in V, constant sets, and built with operators +, −, ∗,
+√
+ˆ generalized
+/, , ∪ and ∩. The semantics we are going to deﬁne, through eval
+to expressions in E and for AI, is correct with respect to criterion as (3), but
+now with expressions in E. We will only need to deﬁne the additional join ∪ and
+meet ∩ operations.
+The set AI forms a poset, with the following order: fˆ ≤ ĝ if for all variables x,
+for all abstract contexts Ĉ, calling Ĉfˆ (respectively Ĉĝ ) the context which has
+value Ĉ(y) for all variables y = x, and value fˆ (respectively ĝ) for variable x, we
+have:
+ˆ
+ˆ
+Ĉfˆ) ⊆ concR ◦ eval(e,
+Ĉĝ )
+concR ◦ eval(e,
+
+Note this implies that the concretization as a subset of R of Ĉfˆ is included in
+the concretization as a subset of R of Ĉĝ (take e = x). Note as well that this is
+coherent with property (3), deﬁning correctness: any bigger aﬃne interval than a
+correct one remains correct. Unfortunately, this does not deﬁne a lattice, and we
+will only have approximate join and meet operations. Also, an important prop-
+
+28
+
+E. Goubault and S. Putot
+
+erty is that concR does not always provide with an upper approximation of an
+environment, i.e. intervals are not always less precise than aﬃne forms, depending on the “continuation”. This can be true though, for instance if continuations
+only contain linear expressions.
+3.2
+
+Join and Meet Operations
+
+Aﬃne Forms. Technically, we use a reduced product of the domain of aﬃne
+intervals with the domain of intervals. As we just saw, it is not true that the
+evaluation of any expression using aﬃne forms is always more accurate than the
+evaluation of the same expression using intervals (i.e. fˆ ≤ γ(fˆ)).
+For any interval i, we note
+
+
+i+i
+mid(i) =↑◦
+, dev(i) = max(↑◦ (i − mid(i)), ↑◦ (mid(i) − i))
+2
+the center and deviation of the interval, using ﬁnite precision numbers. Suppose
+for instance αx0 ≤ αy0 . A natural join between aﬃne forms rˆx and rˆy , associated
+to a new label k is
+
+y
+y
+x
+r̂x∪y = mid([αx0 , αy0 ]) +
+(αx
+(5)
+i ∪ αi ) εi + dev([α0 , α0 ]) εk
+i∈L
+
+This join operation is an upper bound of rˆx and rˆy in the order deﬁned in
+section 3, but might be greater than the union of the corresponding intervals.
+However, if the over-approximation is not too large, it is still interesting to keep
+the relational formulation for further computations.
+There is no natural intersection on aﬃne forms, except in particular cases.
+In the general case, a possibility is to deﬁne the meet (at a new label k) of the
+aﬃne forms as the intersection of the corresponding intervals :
+r̂x∩y = mid(r x ∩ r y ) + dev(r x ∩ r y ) εk
+Another simple possibility is to take for r̂x∩y the smaller of the two aﬃne forms
+r̂x and r̂y , in the sense of the width of the concretized intervals r x and r y .
+Also, a relation can sometimes be established between the noise symbols of
+the two aﬃne forms, that may be used in further computations.
+Error Domain. The union on the intervals of possible errors due to successive
+roundings is
+x∪y
+y
+x
+= δM
+∪ δM
+.
+δM
+x∪y
+y
+x
+For errors on the bounds, a natural and correct union is δ−
+= δ−
+∪ δ−
+and
+x∪y
+y
+x
+= δ+
+∪ δ+
+. However, the set of ﬂoating-point values coming from this
+δ+
+model can be largely overestimated in the cases when the union of aﬃne forms
+gives a larger set of values than r x ∪ r y would do. We thus propose to use a
+more accurate model, still correct with respect to correctness criterion (4), where
+x∪y
+δ−
+is no longer the error on the lower bound due to successive roundings, but
+
+Static Analysis of Numerical Algorithms
+
+29
+
+the representation error between the minimum value represented by the aﬃne
+form, and the minimum of the ﬂoating-point value (same thing for the error on
+the maximum bound) :
+
+
+
+x∪y
+y
+x
+δ−
+δ−
+= δ−
++ rx − rx∪y
++ ry − rx∪y
+
+
+
+x∪y
+y
+x
+δ+
+= δ+
++ rx − rx∪y
++ ry − rx∪y
+δ+
+A disturbing aspect of this model is that we no longer have for all variable x,
+x
+x
+x
+x
+x
+x
+x ≤ δx .
+δ−
+⊂ δM
+and δ+
+⊂ δM
+. However, we still have δ−
+≥ δM
+and δ+
+M
+For the meet operation on errors, we deﬁne the obvious:
+x∩y
+y
+x
+= δM
+∩ δM
+δM
+
+x∩y
+y
+x
+δ−
+= δ−
+if rx ≥ ry , else δ−
+x∩y
+y
+x
+δ+
+= δ+
+if rx ≤ ry , else δ+
+
+3.3
+
+Loops and Widening
+
+In practice, a label may correspond not to a unique operation, but to sets of
+operations (for example a line of program or a function). The semantics can be
+easily extended to this case, creating noise symbols only when a label is met.
+Moreover, in loops, diﬀerent noise symbols will have to be introduced for the
+same arithmetic operation at diﬀerent iterations of the loop : a ﬁrst solution,
+accurate but costly, is to introduce each time a new symbol, that is εi,k for label
+i in the loop and iteration k of the analyzer on the loop, and to keep all symbols.
+A ﬁxpoint is got when the error terms are stable, for each label j introduced out
+n
+is stable, and for each label i introduced
+of the loop, the interval coeﬃcient αx
+j
+n
+xn
+5
+in the loop, the sum of contributions
+k=1 αi,k [−1, 1] is stable . That is, a
+ﬁxpoint of a loop is got at iteration n for variable x if
+x
+
+x
+
+x
+
+xn
+xn
+xn
+⊂ δ−n−1 , δ+
+⊂ δ+n−1 , δM
+⊂ δMn−1
+δ−
+xn−1
+xn
+αj ⊂ αj
+for all j outside the loop
+n
+n−1 xn−1
+xn
+α
+[−1,
+1]
+⊂
+α
+[−1,
+1]
+for all i in the loop
+k=1 i,k
+k=1 i,k
+
+In the same way, a natural widening consists in applying a standard widening
+componentwise on errors,
+on coeﬃcients of the aﬃne forms for labels outside
+n
+n
+the loop, and on the sum k=1 αx
+i,k [−1, 1] for a label i in the loop. However, in
+some cases, reducing the aﬃne form, or part of it, to an interval after a number
+of iterations, allows to get a ﬁnite ﬁxpoint while the complete form does not.
+Another possible implementation is to keep only dependencies between a limited number of iterations of a loop, and agglomerate older terms introduced
+in the loop. For example, a ﬁrst order recurrence will need only dependencies
+from one iteration to the next to get accurate results, while higher order recur5
+
+This is a correct criterion with respect to the order deﬁned in section 3.1, but weaker
+conditions may be used as well.
+
+30
+
+E. Goubault and S. Putot
+
+rences will need to keep more information. This problem has to be considered
+again when getting out of the loop, for a good trade-oﬀ between eﬃciency and
+accuracy.
+3.4
+
+Use of Finite Precision Numbers in the Analysis
+
+The analyzer does not have access to real numbers, real coeﬃcients in the aﬃne
+forms are abstracted using intervals with outward rounding. We use for this the
+MPFR library [11] that provides arithmetic on arbitrary precision ﬂoating-point
+numbers, with exact rounding. However, the abstract domain deﬁned in 3.1 has
+a real and not an interval coeﬃcient αx0 . Technically, this is achieved by creating
+a new noise symbol whenever coeﬃcient αx0 can no longer be computed exactly
+with the precision used. Morally, these additional noise symbols are used to keep
+the maximum of correlations, even between errors introduced artiﬁcially because
+of the imprecision of the analysis. Also, in some cases, using high precision
+numbers is useful to get more accurate results.
+3.5
+
+Comparison with Related Abstract Domains
+
+There is a concretisation operator from aﬃne intervals to polyhedra, whose image
+is the set of center-symmetric bounded polyhedra. Calling m the number of
+variables, n the number of noise symbols, the joint range of the m variables is
+a polyhedra with at most of the order of 2n faces within a n-dimensional linear
+subspace of Rm (if m ≥ n). Conversely, there is no optimal way in general to
+get an aﬃne form containing a given polyhedra.
+Zones [9] are particular center-symmetric bounded polyhedra, intersected with
+hypercubes, so our domain is more general (since we always keep aﬃne forms
+together with an interval abstraction), even though less general than polyhedra.
+It is more comparable to templates [7], where new relations are created along
+the way, when needed through the evaluation of the semantic functional.
+We illustrate this with the following simple program (labels are given as
+comments):
+x = [0,2]
+y = x+[0,2]
+
+// 1
+// 2
+
+z = xy;
+// 3
+t = z-2*x-y; // 4
+
+In the polyhedral approach, we ﬁnd as invariants the following ones:
+line 2
+
+line 3
+line 4
+⎧
+⎧
+0
+≤
+x≤2
+⎪
+⎪
+⎨0 ≤ x ≤ 2
+⎨
+0≤x≤2
+0≤y−x≤2
+0≤y−x≤2
+0≤y−x≤2 ⎩
+0≤z≤8
+⎪
+⎪
+0≤z≤8
+⎩
+−8 ≤ t ≤ 8
+At line 3, we used the concretisation of the invariant of line 2 on intervals to
+get the bounds for z, as is customarily done in zones and polyhedra for nonlinear expressions. The particular polyhedra that aﬃne intervals represent make
+it possible to interpret precisely non-linear expressions, which are badly handled
+in other linear relational domains:
+
+Static Analysis of Numerical Algorithms
+
+31
+
+line 2
+
+line 3
+line 4
+⎧
+⎧
+x
+=
+1
++
+1
+⎪
+⎪
+⎨
+⎨ x = 1 + 1
+x = 1 + 1
+y = 2 + 1 + 2
+y = 2 + 1 + 2
+y = 2 + 1 + 2 ⎩
+⎪ z = 52 + 31 + 2 + 32 3
+z = 52 + 31 + 2 + 32 3 ∈ [−3, 8] ⎪
+⎩
+t = − 32 + 32 3 ∈ [−3, 0]
+
+Notice the polyhedral approach is momentarily, at line 3, better than the estimate given by aﬃne arithmetic 6 , but the relational form we compute gives much
+better results in subsequent lines: t has in fact exact range in [− 94 , 0] close to
+what we found: [−3, 0]. This is because the representation of z contains implicit
+relations that may prove useful in further computations, that one cannot guess
+easily in the explicit polyhedral format (see the work [7] though).
+Another interest of the domain is that the implicit formulation of relations
+is very economical (in time and memory), with respect to explicit formulations,
+which need closure operators, or expensive formulations (such as with polyhedra). For instance: addition of two aﬃne forms with n noise symbols costs n
+elementary operations, independently of the number of variables. Multiplication
+costs n2 elementary operations. Moreover, aﬃne operations (addition and subtraction) do not introduce new noise symbols, and existing symbols can be easily
+agglomerated to reduce this number n. This leads to an analysis whose cost can
+be fairly well controlled.
+It is well known that it is diﬃcult to use polyhedra when dealing with more
+than a few tens or of the order of one hundred variables. We actually used
+this domain on programs containing of the order of a thousand variables (see
+example CG10 where we deal with 189 variables already) with no help from any
+partitioning technique.
+
+4
+
+Examples
+
+Our static analyzer Fluctuat is used in an industrial context, mostly for validating instrumentation and control code. We refer the reader to [6] for more on our
+research for industrial applications, but present here some analysis results. They
+show that the new domain for the values of variables is of course more expensive
+than interval arithmetic, but comparable to the domain used for the errors. And
+it allows us to accurately analyze non trivial numerical computations.
+Consider the program of ﬁgure 2 that computes the inverse of A by a Newton
+method. The assertion A = BUILTIN DAED DBETWEEN(20.0,30.0) tells the analyzer that the double precision input A takes its value between 20.0 and 30.0.
+Then the operation PtrA = (signed int *) (&A) casts A into an array of two
+integers. Its exponent exp is got from the ﬁrst integer. Thus we have an initial
+estimate of the inverse, xi, with 2−exp. Then a non linear iteration is computed
+until the diﬀerence temp between two successive iterates is bounded by e-10.
+6
+
+However, as pointed out in section 2.1, we could use a more accurate semantics for the
+multiplication. Note also that in our analyzer, we are maintaining a reduced product
+between aﬃne forms and intervals, hence we would ﬁnd here the same enclosure for
+z as with general polyhedra.
+
+32
+
+E. Goubault and S. Putot
+
+Here, using the relational domain, Fluctuat proves that, for all inputs between
+20.0 and 30.0, the algorithm terminates in a number of iterations between 5 and
+9, and states that the output xi is in the interval [3.33e-2,5.00e-2] with an error
+due to rounding in [-4.21e-13,4.21e-13]. Executions conﬁrm that respectively
+5 iterations for A = 20.0, and 9 iterations for A = 30.0, are needed. Exact
+bounds for the number of iterations of this loop for a range of input values is a
+diﬃcult information to be synthetized by the analyzer : indeed, if we study the
+same algorithm for simple precision ﬂoating-point numbers, instead of double
+precision, there are cases in which the algorithm does not terminate. Also, the
+interval for the values indeed is a tight enclosure of the inverse of the inputs.
+The error is over-estimated, but this will be improved by the future relational
+domain on the errors. More on this example can be found in [6].
+Now, to demontrate the eﬃciency of our approach, we used it on several
+typical examples, with performances shown on the table below. Column #l is the
+number of lines of C code of the program, #v describes the number of variables
+known to the main function (local variables are not counted). Column Int shows
+the ﬂoating-point value plus global error result, using an interval abstraction of
+the ﬂoating-point value. On the next line is the time spent by the analyzer, in
+seconds (laptop PC, Pentium M 800MHz, 512Mb of memory), and the maximal
+memory it had to use (which is allocated by big chunks, hence the round ﬁgures).
+The same is done in column Aﬀ, with the aﬃne forms plus error domain.
+Name #l
+
+#v
+(ﬂ/int)
+8
+3
+(3/0)
+26
+9
+(4/5)
+29
+8
+(6/2)
+11
+6
+(4/2)
+
+Int
+Aﬀ
+(time/mem)
+(time/mem)
+Poly
+[-7,8] + [-3.04,3.04]e-6 ε
+[-2.19, 2.75] +[-2.2,2.2]e-6 ε
+(0s/4Mb)
+(0.01s/4Mb)
+Inv
+[-∞,∞] + [-∞,∞]ε
+[3.33,5]e-2 + [-4.2,4.2]e-13 ε
+(≥12000s/4Mb)
+(228s/4Mb)
+F1a
+[-∞,∞] + [-∞,∞]ε
+[-10,10] + [-∞,∞]ε
+(0.1s/4Mb)
+(0.63s/7Mb)
+F1b
+[-∞,∞] + [-∞,∞]ε
+[-0.95,0.95] + [-∞,∞]ε
+(0.03/4Mb)
+(0.26/4Mb)
+idem
+[-1.9,1.9]e2 + [-4.8,4.8]e-3 ε
+(9.66s/8Mb)
+F2
+19
+7
+[-2.5,2.5]e12 + [-2.3,2.3]e-2 ε [-1.22e-4,1.01] + [-9.4,9.4]e-4 ε
+(6/1)
+(0.13s/4Mb)
+(0.45s/7Mb)
+SA
+164 32
+[1.06,2.52] + [-4.4,4.4]e-5ε
+[1.39,2.03] + [-4.1,4.1]e-5 ε
+(24/8)
+(24.96s/16Mb)
+(25.2s/16Mb)
+SH
+162
+9
+[-∞,∞] + [-∞,∞]ε
+[4.47,5.48] + [-1.4,1.4]e-4 ε
+(7/2)
+(116.72s/4Mb)
+(54.07s/4Mb)
+GC4 105 56
+[-∞,∞] + [-∞,∞]ε
+[9.99,10.0] + [-3.2,3.1]e-5 ε
+(53/3)
+(4.72s/10Mb)
+(1.11s/7Mb)
+GC10 105 189
+[-∞,∞] + [-∞,∞]ε
+[54.97,55.03] + [-∞,∞]ε
+(186/3)
+(22.18s/15Mb)
+(15.6s/23Mb)
+A2
+576 75 [6.523,6.524] + [-5.5,5.6]e-6 ε [6.523,6.524] + [-5.5,5.6]e-6 ε
+(59/16)
+(1.43s/9Mb)
+(2.4s/13Mb)
+
+Static Analysis of Numerical Algorithms
+
+33
+
+double xi, xsi, A, temp;
+signed int *PtrA, *Ptrxi, cond, exp, i;
+A = __BUILTIN_DAED_DBETWEEN(20.0,30.0);
+PtrA = (signed int *) (&A); Ptrxi = (signed int *) (&xi);
+exp = (signed int) ((PtrA[0] & 0x7FF00000) >> 20) - 1023;
+xi = 1; Ptrxi[0] = ((1023-exp) << 20);
+cond = 1; i = 0;
+while (cond) {
+xsi = 2*xi-A*xi*xi; temp = xsi-xi;
+cond = ((temp > e-10) || (temp < -e-10));
+xi = xsi; i++; }
+1
+Fig. 2. Newton method for computing A
+
+Poly is the computation of a polynomial of degree 4, not in Horner form,
+from an initial interval. Inv is the program we depicted above. F1a and F1b
+are two linear recursive ﬁlters of order 1. F1b is almost ill-conditionned, and
+needs an enormous amount of virtual unrollings to converge in interval semantics (we use 5000 unfoldings of the main loop, in the line below the entry corresponding to F1b, named idem). The potentially inﬁnite error found by our
+current implementation of aﬃne forms, in F1a and F1b, is due to the fact we
+do not have a relational analysis on errors yet. F2 is a linear recursive ﬁlter of
+order 2. SA and SH are two methods for computing the square root of a number, involving iterative computations of polynomials (in SH, of order 5). GC4
+and GC10 are gradient conjugate algorithms (iterations on expressions involving division of multivariate polynomials of order 2), for a set of initial matrices
+“around” the discretisation of a 1-dimensional Laplacian, with a set of initial conditions, in dimensions 4x4 and 10x10 respectively in GC4 and GC10. A2 is a sample of an industrial program, involving ﬁlters, and mostly simple iterative linear
+computations.
+
+5
+
+Conclusion
+
+In this paper, we introduced a new domain which gives tight enclosures for both
+ﬂoating-point and real value semantics of programs. This domain has been implemented in our static analyzer Fluctuat, which is used in an industrial context.
+As we see from the examples of section 4, it always provides much more precise
+results than the interval based abstract domain of [4], at a small memory expense,
+and sometimes even faster. Notice that our domain is in no way specialized, and
+works also well on non-linear iterative schemes. As far as we know, no current
+static analyzer is able to ﬁnd as tight enclosures for such computations as we do,
+not mentionning that we are also analyzing the diﬀerence between ﬂoating-point
+and real number semantics. The only comparable work we know of, for bounding
+the ﬂoating-point semantics, is the one of [1]. But the approach in [1] is more
+specialized, and would probably compare only on ﬁrst and second order linear
+recursive ﬁlters.
+
+34
+
+E. Goubault and S. Putot
+
+Current work includes relational methods for the error computation, as quickly hinted in [13] (it should be noted that the computation of values will also
+beneﬁt from the relational computation of errors), and better heuristics for join,
+meet and ﬁxed point approximations in the domain of aﬃne forms. We are also
+working on underapproximations relying on the same kind of domains.
+
+References
+1. B. Blanchet, P. and R. Cousot, J. Feret, L. Mauborgne, A. Miné, D. Monniaux
+and X. Rival. A static analyzer for large safety-critical software. PLDI 2003.
+2. J. Stolﬁ and L. H. de Figueiredo. An introduction to aﬃne arithmetic. TEMA
+Tend. Mat. Apl. Comput., 4, No. 3 (2003), pp 297-312.
+3. P. Cousot and R. Cousot. Abstract interpretation frameworks. Journal of Logic
+and Symbolic Computation, 2(4), 1992, pp 511-547.
+4. E. Goubault. Static analyses of the precision of ﬂoating-point operations. In Static
+Analysis Symposium, SAS’01, number 2126 in LNCS, Springer-Verlag, 2001.
+5. E. Goubault, M. Martel, and S. Putot. Asserting the precision of ﬂoating-point
+computations : a simple abstract interpreter. In ESOP’02, LNCS, Springer 2002.
+6. E. Goubault, M. Martel, and S. Putot. Some future challenges in the validation of
+control systems. In European Symposium on Real-Time Systems ERTS’06.
+7. S. Sankaranarayanan, M. Colon, H. Sipma and Z. Manna. Eﬃcient strongly relational polyhedral analysis. In Proceedings of VMCAI, to appear 2006.
+8. M. Martel. Propagation of roundoﬀ errors in ﬁnite precision computations : a
+semantics approach. In ESOP’02, number 2305 in LNCS, Springer-Verlag, 2002.
+9. A. Miné. The octagon abstract domain. In Journal of Higher-Order and Symbolic
+Computation, to appear 2006.
+10. A. Miné. Relational abstract domains for the detection of ﬂoating-point run-time
+errors. In ESOP’04, number 2986 in LNCS, Springer-Verlag, 2004.
+11. MPFR library Documentation and downloadable library at http://www.mpfr.org.
+12. S. Putot, E. Goubault and M. Martel. Static analysis-based validation of ﬂoatingpoint computations. In LNCS 2991, Springer-Verlag, 2004.
+13. S. Putot, E. Goubault. Weakly relational domains for ﬂoating-point computation
+analysis. In Proceedings of NSAD, 2005.
+
+

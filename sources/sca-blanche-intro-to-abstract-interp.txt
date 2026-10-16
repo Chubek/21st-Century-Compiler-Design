@@ -1,0 +1,1447 @@
+Introduction to Abstract Interpretation
+Bruno Blanchet
+Département d’Informatique
+École Normale Supérieure, Paris
+and Max-Planck-Institut für Informatik
+Bruno.Blanchet@ens.fr
+November 29, 2002
+
+Abstract
+We present the basic theory of abstract interpretation, and its application to static
+program analysis. The goal is not to give an exhaustive view of abstract interpretation,
+but to give enough background to make papers on abstract interpretation more understandable.
+
+Notations: λx.M denotes the function that maps x to M . f [x 7→ M ] denotes the function
+f extended so that x is mapped to M . If f was already defined at x, the new binding replaces
+the old one.
+
+1
+
+Introduction
+
+The goal of static analysis is to determine runtime properties of programs without executing
+them. (Scheme of an analyzer: Program → Analyzer → Properties.) Here are some examples
+of properties can be proved by static analysis:
+• For optimization:
+– Dead code elimination
+– Constant propagation
+– Live variables
+– Stack allocation (more complex)
+• For verification:
+– Absence of runtime errors: division by zero, square root of negative numbers,
+overflows, array index out of bounds, pointer dereference outside objects, . . .
+– Worst-case execution time (see Wilhelm’s work with his team and AbsInt)
+– Security properties (secrecy, authenticity of protocols, . . . )
+1
+
+However, most interesting program properties are undecidable. The basic result to show
+undecidability is the undecidability of the halting problem.
+Proof By contradiction. Assume that there exists Halt(P,E) returning Yes when P terminates on entry E, No otherwise. Consider P’(P) = if Halt(P,P) then loop else stop.
+• If P’(P’) loops, Halt(P’,P’) = true, so P’(P’) stops: contradiction.
+• If P’(P’) stops, Halt(P’,P’) = false, so P’(P’) loops: contradiction.
+2
+Illustration: Give a program that terminates if and only if Fermat’s theorem is wrong.
+Most program properties can be reduced to the halting problem. So we have to perform
+approximations.
+These approximations must be sound (or correct) approximations: if the system gives
+a definite answer, then this answer is true. But sometimes the system is going to answer
+“maybe”. We say the system is not complete. (This notion of approximation is different from
+numerical approximations that give an answer close to the exact value.)
+We want to formalize these approximations, to be able to prove the soundness of the
+analyses. First, we formalize the meaning of programs (semantics), then its approximations.
+(Scheme: semantics, exact, concrete properties → approximate, abstract properties.) Abstract interpretation is a theory of approximation.
+
+2
+
+A simple language
+
+2.1
+
+Syntax
+
+Expressions: E ::= x | n | E + E | E − E | E ∗ E | E/E | E ≥ E | . . .
+C ::=
+end
+x := E
+if E goto n
+input x
+print E
+
+commands
+end
+assignment
+conditional
+input
+print
+
+A program is a function Prog from integers to commands. (Indicates which command is
+at each address in the program.)
+
+2.2
+
+Trace semantics
+
+The state of the system, here is the program counter (pc), which says what is the next
+command to execute, and the values of the variables (recorded in an environment). We
+assume that variables take integer values, and we ignore problems of overflow (that is, we
+compute in Z).
+2
+
+ρ ∈ Env = Var → Z
+pc ∈ PC
+s ∈ State = PC × Env
+Definition of the semantics:
+1. Semantics of expressions: [[E]]ρ ∈ Z. (In case of error, for instance, division by 0, we
+say that [[E]]ρ is not defined. We could also have a special value ⊥ to represent that. In
+the same line, ρ is a partial map, defined only on variables that have been initialized.)
+[[x]]ρ = ρ(x).
+[[E1 + E2 ]]ρ = [[E1 ]]ρ + [[E2 ]]ρ, etc.
+2. Semantics of commands: pc, ρ → pc 0 , ρ0
+If Prog(pc) = x := E, pc, ρ → pc + 1, ρ[x 7→ [[E]]ρ] (if [[E]]ρ is defined)
+If Prog(pc) = input x, pc, ρ → pc + 1, ρ[x 7→ v] for some v ∈ Z.
+If Prog(pc) = print E, pc, ρ → pc + 1, ρ, if [[E]]ρ is defined.
+If Prog(pc) = if E goto n,
+pc, ρ → n, ρ if [[E]]ρ 6= 0.
+pc, ρ → pc + 1, ρ if [[E]]ρ = 0.
+The semantics of commands is a transition system. For a given program, and given user
+inputs, we can build a sequence of states, such that we go from one state to the next one
+following one of the above transitions. Such a sequence of states is said to be a trace. A
+program can have several execution traces, depending of the user input, so the semantics of
+a program is a set of traces rather than a single trace.
+Give an example of program, and its semantics.
+1: input x
+2: if x <= 0 goto 4
+3: print 10/x
+4: input y
+5: print y*y*x
+1: x := 0;
+2: if x >= y goto 5
+3: x := x+1;
+4: goto 2:
+5: print x
+
+3
+
+Approximation
+
+3.1
+
+Intuition
+
+We want to prove properties of a program, in the style: “all traces of the program satisfy
+a given condition”. To do this, we overapproximate the set of traces, that is, we compute
+3
+
+a superset of the set of traces, possibly in a more efficient representation. (For properties
+depending only on one state, that is, invariants, we can also simply overapproximate the set
+of states of the program.)
+For instance, if your program uses two variables x and y, you may wish to approximate
+the set of values of these variables. This can be done using various approximations (show
+some schemes, like those of P. Cousot).
+We also would like to compare analyses: which analysis is more precise than the other ?
+An analysis is more precise when it yields a smaller superset of the set of traces. The precision
+yields an ordering on the approximations of the set of traces. All correct approximations are
+the ones that are greater (in the precision ordering) than the smallest correct one, namely
+the set of traces itself.
+When we represent sets of traces/states by other structures, we have a similar precision
+ordering on those structures (example: intervals [a, b] ≤ [a0 , b0 ] iff a ≥ a0 and b ≤ b0 ).
+
+3.2
+
+Order, Lattices, complete lattices.
+
+Definition 1 (Partially ordered set) A partially ordered set (poset) is a set S equipped
+with a binary relation ≤ such that:
+1. ≤ is reflexive: ∀a ∈ S, a ≤ a.
+2. ≤ is transitive: ∀a, b, c ∈ S, if a ≤ b and b ≤ c then a ≤ c.
+3. ≤ is antisymmetric: ∀a, b ∈ S, if a ≤ b and b ≤ a, then a = b.
+c ∈ S is an upper bound of X ⊆ S if and only if ∀c0 ∈ X, c0 ≤ c.
+c ∈ S is a lower bound of X ⊆ S if and only if ∀c0 ∈ X, c ≤ c0 .
+c ∈ S is the least upper bound of X ⊆ S if and only if ∀c0 ∈ X, c0 ≤ c, and ∀c00 ∈ S such
+that ∀c0 ∈ X, c0 ≤ c00 , we have c ≤ c00 . When it exists, the least upper bound is unique. The
+greatest lower bound is similar.
+The ordering is not necessarily total, that is, we may not have a ≤ b or b ≤ a. Two
+elements can be incomparable. (Example: parts of S ordered by inclusion. {a} incomparable
+with {b} if a 6= b. ⊥ = ∅, > = S, t = ∪, u = ∩)
+Definition 2 (Lattice) A lattice is a partially ordered set L(≤) such that for all a, b in L,
+a and b have a least upper bound a t b and a greatest lower bound a u b. This lattice will be
+denoted by L(≤, t, u).
+In a lattice, all finite sets have least upper bounds and greatest lower bounds, but not
+necessarily infinite sets.
+Definition 3 (Complete lattice) A complete lattice is a partially ordered set L(≤) such
+that every subset X of L has a least upper bound tX and a greatest lower bound uX. In
+particular, L has a least element ⊥ = t∅ and a greatest element > = tL. This lattice will
+be denoted by L(≤, ⊥, >, t, u).
+
+4
+
+Proposition 1 If S is a set, P(S)(⊆, ∅, S, ∪, ∩) is a complete lattice.
+We adopt the precision ordering, that is, a ≤ b means intuitively that a is more precise
+than b; a gives more information than b. (Example on intervals [a, b] ≤ [a0 , b0 ] iff a ≥ a0 and
+b ≤ b0 . The lattice of intervals is {∅} ∪ {[a, b] | a ≤ b, a ∈ Z ∪ {−∞}, b ∈ Z ∪ {∞}}. By a slight
+abuse of notation, we denote the interval [a, b] even when one bound is infinite. Normally,
+the bracket is in the other direction for infinite bounds: ] − ∞, +∞[.)
+
+3.3
+
+Collecting semantics
+
+The collecting semantics is the semantics that computes the set of possible traces. Formally,
+we can define it by
+Tr = {s1 → · · · → sn | s1 is the initial state, si → si+1 is an allowed transition}
+The set of reachable states is defined by
+Sr = {s | s1 → · · · → s ∈ Tr }
+The set of all traces, of all states, are ordered by inclusion. Then, they form a complete
+lattice (the concrete lattice).
+
+3.4
+
+Galois connections
+
+A few words on Evariste Galois (1811-1832), French mathematician. He died in a duel,
+and in the night before, he wrote down much of his theory. He proved that no algebraic
+formula in radicals exists that gives the general solution of algebraic equations of degree at
+least 5. This result is based on group theory, of which he is a precursor. He uses so-called
+“Galois connections” between groups. In the definition below, one of the orderings is reversed
+with respect to Galois’ original definition, so purists say semi-dual Galois connections. (The
+reversal of the ordering gives better properties for the composition of Galois connections,
+see 4.2 below.)
+Definition 4 (Galois connection [10, Definition 5.3.0.1][11, Example 10]) Let L1 (≤1
+) and L2 (≤2 ) be posets. (α, γ) is a Galois connection (or pair of adjoined functions) between
+L1 and L2 if and only if α ∈ L1 → L2 , γ ∈ L2 → L1 and
+∀x ∈ L1 , ∀y ∈ L2 , α(x) ≤2 y ⇔ x ≤1 γ(y).
+This is denoted by:
+(L1 , ≤1 )
+
+γ
+α
+
+(L2 , ≤2 ).
+
+(L1 , ≤1 ) is the concrete lattice, (L2 , ≤2 ) is the abstract lattice, α is said to be the
+abstraction and γ the concretization. (Scheme)
+The two properties α(x) ≤2 y and x ≤1 γ(y) both mean that y is a correct approximation
+of the concrete property x. α(x) is the most precise approximation of x ∈ L 1 in L2 . γ(y) is
+the least precise element of L1 which can be correctly approximated by y ∈ L2 .
+5
+
+3.5
+
+Examples of Galois connections
+
+Examples: abstraction of a set of values into
+• constants: The concrete lattice is P(S) ordered by inclusion, for some set S. The
+abstract lattice contains ⊥, c, >, for each constant c ∈ S, ordered by ⊥ ≤ c ≤ >.
+The abstraction is defined by α(∅) = ⊥, α({c}) = c, α(S) = > otherwise.
+The concretization is defined by γ(⊥) = ∅, γ(c) = {c}, γ(>) = S.
+• sign. We can use parts of {−, 0, +} to represent signs. So for instance a value that may
+positive or zero is represented by {0, +}. The concrete lattice is Z, the abstract lattice
+P({−, 0, +}). Both are ordered by inclusion.
+The abstraction is then defined by
+α(S) = {+} if S∩ ]0, +∞[ 6= ∅
+∪ {0} if 0 ∈ S
+∪ {−} if S∩ ] − ∞, 0[ 6= ∅
+The concretization is defined by
+γ(S ] ) = ] − ∞, 0[ if − ∈ S ]
+∪ {0} if 0 ∈ S ]
+∪ ]0, +∞[ if + ∈ S ]
+• interval. The concrete lattice is P(Z) ordered by inclusion. The abstract lattice is
+{∅} ∪ {[a, b] | a ≤ b, a ∈ Z ∪ {−∞}, b ∈ Z ∪ {∞}}. The ordering is [a, b] ≤ [a0 , b0 ] if and
+only if a0 ≤ a and b ≤ b0 (the ordering corresponds to the inclusion of the corresponding
+intervals), and ∅ ≤ [a, b].
+The abstraction is defined by: if S = ∅, α(S) = ∅, otherwise α(S) = [min S, max S]).
+The concretization is defined by γ(∅) = ∅, γ([a, b]) = [a, b].
+• congruence. The concrete lattice is again P(Z) ordered by inclusion. The abstract
+lattice contains ∅ and (a, b), a ∈ [0, b − 1], b > 0 means x ≡ a(b), that is ∃y, x = a + by.
+The abstraction is defined as follows: α(∅) = ∅. Take S non empty, x0 ∈ S, let b be the
+greatest common divisor of x − x0 for x ∈ S, and a = x0 mod b, then α(S) = (a, b).
+
+3.6
+
+Properties
+
+Proposition 2 (α, γ) is a Galois connection if and only if α and γ are monotone, (α ◦
+γ)(y) ≤2 y, and (γ ◦ α)(x) ≥1 x [10, Theorem 5.3.0.4].
+Intuitively, α monotone means that the best approximation of a more precise information is
+also more precise. (γ ◦ α)(x) ≥1 x means that by first approximating then concretizing, you
+have necessarily less information than at the beginning.
+6
+
+Proof First assume that (α, γ) is a Galois connection.
+1. (α ◦ γ)(y) ≤2 y if and only if γ(y) ≤1 γ(y) which is true.
+2. x ≤1 (γ ◦ α)(x) if and only if α(x) ≤2 α(x), which is true.
+3. α is monotone: let x ≤1 x0 . α(x) ≤2 α(x0 ) if and only if x ≤1 γ(α(x0 )), which is true,
+since x ≤1 x0 and x0 ≤1 (γ ◦ α)(x0 ).
+4. γ is monotone: let y ≤2 y 0 . γ(y) ≤1 γ(y 0 ) if and only if α(γ(y)) ≤2 y 0 , which is true
+since (α ◦ γ)(y) ≤2 y and y ≤2 y 0 .
+For the converse, assume α(x) ≤2 y. Then γ(α(x)) ≤1 γ(y) since γ is monotone. Moreover,
+x ≤1 (γ ◦ α)(x), so x ≤1 γ(y). Conversely, assume x ≤1 γ(y). Then α(x) ≤2 α(γ(y)) since α
+is monotone. Moreover, (α ◦ γ)(y) ≤2 y, so α(x) ≤2 y.
+2
+Proposition 3 Let L1 (≤1 , ⊥1 , >1 , t1 , u1 ) and L2 (≤2 , ⊥2 , >2 , t2 , u2 ) be complete lattices.
+Let (α, γ) be a Galois connection between L1 and L2 .
+1. [10, Corollary 5.3.0.5, (3)]: Each function in the pair (α, γ) uniquely determines the
+other:
+α(x) = u2 {y ∈ L2 | x ≤1 γ(y)},
+γ(y) = t1 {x ∈ L1 | α(x) ≤2 y}.
+2. [10, Corollary 5.3.0.5, (4)] α is a complete join-morphism (i.e. is additive: α(tS) =
+t{α(x) | x ∈ S), α(⊥1 ) = ⊥2 .
+γ is a complete meet-morphism (i.e. γ(uS) = u{γ(x) | x ∈ S}), γ(>2 ) = >1 .
+Proof
+1. If x ≤1 γ(y), then α(x) ≤ y, so α(x) ≤ u2 {y ∈ L2 | x ≤1 γ(y)}. Moreover,
+α(x) ∈ L2 and x ≤1 γ(α(x)), so α(x) ∈ {y ∈ L2 | x ≤1 γ(y)}, so α(x) ≥ u2 {y ∈ L2 |
+x ≤1 γ(y)}, hence α(x) = u2 {y ∈ L2 | x ≤1 γ(y)}.
+The proof is similar for γ.
+2. Let X ⊆ L1 . Let us show that α(t1 X) = t2 {α(x) | x ∈ X}.
+a) t2 {α(x) | x ∈ X} ≤ α(t1 X) comes from the monotony of α.
+Precisely, for all x ∈ X, x ≤1 t1 X, so α(x) ≤2 α(t1 X) since α is monotone. So
+t2 {α(x) | x ∈ X} ≤ α(t1 X).
+b) To show α(t1 X) ≤2 t2 {α(x) | x ∈ X}, we show t1 X ≤1 γ(t2 {α(x) | x ∈ X}). Let
+x ∈ X. α(x) ≤2 t2 {α(x) | x ∈ X}, so x ≤1 ≤1 γ(t2 {α(x) | x ∈ X}) by the definition of
+Galois connections. Then t1 X ≤1 γ(t2 {α(x) | x ∈ X}), hence the result.
+We have α(t1 ∅) = t2 ∅, so α(⊥1 ) = ⊥2 .
+The proof is similar for γ.
+2
+7
+
+Proposition 4 Let L1 (≤1 , ⊥1 , >1 , t1 , u1 ) and L2 (≤2 , ⊥2 , >2 , t2 , u2 ) be complete lattices.
+If α : L1 → L2 is a complete join-morphism and γ(y) = t1 {x ∈ L1 | α(x) ≤2 y}, then
+(α, γ) is a Galois connection.
+If γ : L2 → L1 is a complete meet-morphism and α(x) = u2 {y ∈ L2 | x ≤1 γ(y)}, then
+(α, γ) is a Galois connection.
+Proof
+• First point: Let α : L1 → L2 be a complete join-morphism and γ(y) = t1 {x ∈
+L1 | α(x) ≤2 y}.
+a) If α(x) ≤ y, then x ∈ {x0 ∈ L1 | α(x0 ) ≤2 y}, so x ≤ γ(y).
+b) If x ≤ γ(y), x ≤ t1 {x0 ∈ L1 | α(x0 ) ≤2 y}, so α(x) ≤ t1 {α(x0 ) ∈ L1 | α(x0 ) ≤2 y}
+since α is a complete join-morphism, so α(x) ≤ y.
+Then (α, γ) is a Galois connection.
+• Second point: Let γ : L2 → L1 be a complete meet-morphism and α(x) = u2 {y ∈ L2 |
+x ≤1 γ(y)}.
+a) If α(x) ≤ y, then u2 {y 0 ∈ L2 | x ≤1 γ(y 0 )} ≤ y, so u2 {γ(y 0 ) ∈ L2 | x ≤1 γ(y 0 )} ≤
+γ(y), since γ is a complete meet-morphism, so x ≤ γ(y).
+b) If x ≤ γ(y), y ∈ {y 0 ∈ L2 | x ≤1 γ(y 0 )}, so α(x) ≤ y.
+Then (α, γ) is a Galois connection.
+2
+Proposition 5 [10, Theorem 5.3.0.6, (1)] α is onto if and only if γ is one-to-one if and only
+if α ◦ γ = λy.y.
+Proof If α ◦ γ = Id, then α is onto (for all y ∈ L2 , y = α(γ(y))) and γ is one-to-one (if
+γ(y) = γ(y 0 ) then y = α(γ(y)) = α(γ(y 0 )) = y 0 ). This is a general property of functions, that
+is not related to Galois connections.
+If α is onto, let x0 such that α(x0 ) = y. Then x0 ≤1 γ(y), so y = α(x0 ) ≤2 α(γ(y)). In
+general, we have α(γ(y)) ≤2 y, so y = α(γ(y)).
+Assume that γ is one-to-one. We have γ ◦ α ◦ γ(x) ≥1 γ(x) since γ ◦ α ≥1 Id, and
+γ ◦ α ◦ γ(x) ≤1 γ(x) since α ◦ γ ≤2 Id and γ is monotone. So γ ◦ α ◦ γ(x) = γ(x). Since γ is
+one-to-one, we have α ◦ γ(x) = x.
+2
+The property α ◦ γ = λy.y means intuitively that the concrete properties of L 1 are more
+precise than the abstract properties of L2 (every abstract property has a corresponding concrete property which has exactly the same meaning, whereas in general one can only find an
+approximate abstract property α(x) corresponding to a concrete property x). This property
+can be enforced by replacing L2 by α(L1 ).
+Remark Let σ(y) = u{y 0 | γ(y 0 ) = γ(y)}. Then α(L1 ) = σ(L2 ).
+Proof First, for all y 00 ∈ σ(L2 ), α ◦ γ(y 00 ) = y 00 . Indeed, let y 00 = σ(y). We always have
+α ◦ γ(y 00 ) ≤ y 00 . Conversely, γ ◦ α ◦ γ(y 00 ) ≥ γ(y 00 ), since γ ◦ α(x) ≥ x, and γ ◦ α ◦ γ(y 00 ) ≤ γ(y 00 )
+8
+
+since α ◦ γ(y 00 ) = y 00 . So γ ◦ α ◦ γ(y 00 ) = γ(y 00 ) = γ(y). So α ◦ γ(y 00 ) ∈ {y 0 | γ(y 0 ) = γ(y)}, so
+α ◦ γ(y 00 ) ≥ σ(y) = y 00 .
+Take y 00 ∈ σ(L2 ). α ◦ γ(y 00 ) = y 00 , so y 00 ∈ α(L1 ).
+Second, for all y 00 ∈ α(L1 ), σ(y 00 ) = y 00 . Indeed, let y 00 = α(x). We always have σ(y 00 ) ≤
+y 00 . Conversely, if γ(y 0 ) = γ(y 00 ), then γ(y 0 ) = γ ◦ α(x) ≥ x, so y 0 ≥ α(x) = y 00 . Then
+σ(y 00 ) = u{y 0 | γ(y 0 ) = γ(y 00 )} ≥ y 00 . So σ(y 00 ) = y 00 .
+Take y 00 ∈ α(L1 ). σ(y 00 ) = y 00 , so y 00 ∈ σ(L2 ).
+2
+The design of an analysis is then defining α or γ and computing for each construct of the
+analyzed language the image of its semantics by the abstraction α.
+
+3.7
+
+Computation of the abstract semantics
+
+The abstract semantics can be systematically computed from the concrete semantics and the
+Galois connection. (This an important advantage of abstract interpretation.)
+Let us consider for instance the small language defined at the beginning of the course. We
+start from the semantics of this language, lift it to sets to obtain the collecting semantics, and
+abstract the collecting semantics (lifting to sets ordering by inclusion is important to have
+lattices).
+Semantics
+
+Collecting semantics
+
+Abstraction
+γ
+
+P(Z), ⊆
+
+Values
+
+Z
+
+Operators
+
++:Z×Z→Z
+
+α
+
++ : P(Z) × P(Z) → P(Z)
+
+Abstract semantics
+L, ≤
+a] +] b] = α(γ(a] ) + γ(b] ))
+
+The correctness of the abstraction x] of a value x is α(x) ≤ x] (which is equivalent to x ≤ γ(x] )
+by definition of the Galois connection).
+The correctness of the abstraction of an operator, such a +, is defined by taking the
+above correctness as an invariant. That is, +] is a correct abstraction of + if and only if,
+if α(a) ≤ a] and α(b) ≤ b] , then α(a + b) ≤ a] +] b] . We can show that +] defined by
+a] +] b] = α(γ(a] ) + γ(b] )) satisfies this condition. It is in fact the best possible abstraction
+of + (the smallest that satisfies this condition). All operators can be abstracted in this way
+by a systematic computation. (See also Proposition 10 below.)
+Semantics
+Environments
+
+ρ : Var → Z
+
+Collecting semantics
+R : P(Var → Z), ⊆
+
+Abstraction
+γR
+αR
+
+Abstract semantics
+R] : Var → L, ≤
+
+The abstraction of environments can be defined in two steps:
+• First we abstract sets of environments to mappings from variables to sets of integers:
+P(Var → Z)
+
+γR1
+αR1
+
+Var → P(Z)
+
+The abstraction is defined by αR1 (R1 ) = λx.{ρ(x) | ρ ∈ R1 }.
+The concretization is defined by γR1 (R1] ) = {λx.y | y ∈ R1] (x)}.
+9
+
+This abstraction corresponds to losing relations between variables. Only the set of
+possible values of each variable is kept. (This is not the only possible way to do an
+analysis, but the simplest one. Some analyses keep relations between variables. For
+these analyses, we cannot use this abstraction; we must define another abstraction of
+environments into an abstract lattice, which is then not of the form Var → L.)
+• In the obtained mapping, we then abstract each result into L by (α, γ).
+Var → P(Z)
+
+γR2
+αR2
+
+Var → L
+
+The Galois connection (αR2 , γR2 ) is obtained by lifting (α, γ) to functions (see Proposition 8 below).
+The abstraction is defined by αR2 (R2 ) = λx.α(R2 (x)).
+The concretization is defined by γR1 (R2] ) = λx.γ(R2] (x)).
+The Galois connection
+P(Var → Z)
+
+γR
+αR
+
+Var → L
+
+is then obtained by composing the two Galois connections: αR = αR2 ◦αR1 and γR = γR1 ◦γR2 .
+(see Proposition 12).
+We can now abstract expressions:
+Semantics
+[[E]]ρ ∈ Z
+[[x]]ρ = ρ(x)
+[[E1 + E2 ]]ρ = [[E1 ]]ρ + [[E2 ]]ρ
+
+Collecting semantics
+[[E]]R ∈ P(Z)
+
+Abstr.
+
+Abstract semantics
+[[E]]] R] ∈ L
+[[x]]] R] = R] (x)
+[[E1 + E2 ]]] R] = [[E1 ]]] R] +] [[E2 ]]] R]
+
+[[E]]R is the set of evaluation of E for all environments in R, that is [[E]]R = {[[E]]ρ | ρ ∈ R}.
+The correctness of the abstract semantics of expressions is expressed by: if the environment
+is correctly abstracted, then the result of the expression is correctly abstracted. Formally: if
+αR (R) ≤ R] then α([[E]]R) ≤ [[E]]] R] .
+Proof of correctness of the abstract semantics of expressions: This proof is by induction
+on expressions. We handle the cases variable and +.
+• α([[x]]R) = α({ρ(x) | x ∈ R}) = αR (R)(x) ≤ R] (x) by correctness of R] .
+• We have [[E1 + E2 ]]R = {[[E1 ]]ρ + [[E2 ]]ρ | ρ ∈ R} ⊆ [[E1 ]]R + [[E2 ]]R. (We have only an
+inclusion, because on the left of the inclusion, both E1 and E2 must be evaluated in the
+same environment, whereas on the right they can be evaluated in different environments
+that both belong to R.)
+Then α([[E1 +E2 ]]R) ≥ α([[E1 ]]R+[[E1 ]]R) ≥ α(γ([[E1 ]]] R] )+γ([[E2 ]]] R] )) (by correctness
+on E1 and E2 by induction hypothesis). So α([[E1 + E2 ]]R) ≥ [[E1 ]]] R] +] [[E2 ]]] R] .
+
+10
+
+One can notice that the abstract semantics of expressions is simply obtained by replacing
+each concrete operator with its corresponding abstract operator (for example, + is replaced
+with +] ).
+The computation of the abstract trace semantics follows.
+If Prog(pc) = x := E, pc, R] → pc + 1, R] [x 7→ [[E]]] R] ]
+If Prog(pc) = input x, pc, R] → pc + 1, R] [x 7→ >].
+If Prog(pc) = print E, pc, R] → pc + 1, R]
+If Prog(pc) = if E goto n,
+pc, R] → n, R] .
+pc, R] → pc + 1, R] .
+We have a non-deterministic branch for the test. For some (simple) conditions, we can
+have a better analysis of tests. For instance, considering interval analysis:
+If Prog(pc) = if x > 0 goto n,
+pc, R] → n, R] [x 7→ R] (x) u [1, +∞[ ].
+pc, R] → pc + 1, R] [x 7→ R] (x)u] − ∞, 0] ].
+Indeed, when the test is true, we are sure that x is positive, and when the test is false, we
+are sure that x is negative or 0. This idea can be generalized to more complex expressions
+than just x > 0, by considering a backward analysis (that is, from the result of the test, we
+determine possible values for the variables contained in E). We are not going to detail this
+point here.
+The correctness of the abstract trace semantics is that if pc 1 , ρ1 → pc 2 , ρ2 , and αR ({ρ1 }) ≤
+]
+R1 , then there exists R2] , such that pc 1 , R1] → pc 2 , R2] and αR ({ρ2 }) ≤ R2] . That is intuitively,
+if a state is correctly abstracted, then the next state is also correctly abstracted.
+We now abstract sets of states.
+Semantics
+s : PC × (Var → Z)
+
+Collecting semantics
+
+Abstr.
+
+S : P(PC × (Var → Z))
+
+γS
+αS
+
+Abstract semantics
+S ] : PC → ({⊥} ∪ (Var → L))
+
+0 ({ρ | (pc, ρ) ∈ S}) where α0 (R) = α (R) when
+The abstraction is defined by αS (S) = λpc.αR
+R
+R
+0 (∅) = ⊥. Defining γ 0 (⊥) = ∅ and γ 0 (R] ) = γ (R] ) when R] 6= ⊥,
+R is not empty, and αR
+R
+R
+R
+we in fact get another Galois connection for sets of environments. (We could also consider
+abstract states as partial maps, that are not defined at pc when no concrete state exists at
+that pc. It is perhaps clearer to have an explicit value ⊥ for this situation.)
+0 (S ] (pc))}.
+The concretization is defined by γS (S ] ) = {(pc, ρ) | ρ ∈ γR
+The abstract semantics has one abstract environment for each program point, giving the
+possible values of variables at that program point.
+We define the function post that, from a set of states, returns the set of next states. We
+have post(S) = {s0 | s ∈ S, s → s0 }. We can now compute the corresponding abstract function
+post ] such that post ] ≥ αS ◦ post ◦ γS , that transforms an abstract state into the next abstract
+state, that represents the possible next states.
+0
+0
+αS ◦ post ◦ γS (S ] ) = λpc 2 .αR
+({ρ2 | ρ1 ∈ γR
+(S ] (pc 1 )), (pc 1 , ρ1 ) → (pc 2 , ρ2 )})
+
+11
+
+We have (pc 1 , ρ1 ) → (pc 2 , ρ2 ) and αR ({ρ1 }) ≤ S ] (pc 1 ), so by correctness of the abstract
+transition relation, there exists R2] such that (pc 1 , S ] (pc 1 )) → (pc 2 , R2] ) and αR ({ρ2 }) ≤ R2] .
+So
+αS ◦ post ◦ γS (S ] ) ≤ λpc 2 . t {R2] | ∃pc 1 , (pc 1 , S ] (pc 1 )) → (pc 2 , R2] )}
+We take
+
+post ] (S ] ) = λpc 2 . t {R2] | ∃pc 1 , (pc 1 , S ] (pc 1 )) → (pc 2 , R2] )}
+
+The upper bound corresponds to the case when we reach the same program point pc 2 from
+several program points pc 1 . In this case, we have to compute an abstract environment at pc 2
+that is correct with respect to (that is, greater than, in the precision ordering) all abstract
+environments coming from the various program points pc 1 . The upper bound does exactly
+that.
+Section 5 explain how we can compute a correct abstraction of the set of reachable states
+from the function post ] .
+Example: if we consider the example of interval analysis, we have
+• [a, b] +] [a0 , b0 ] = [a + a0 , b + b0 ], ∅ +] x] = x] +] ∅ = ∅.
+• [a, b] −] [a0 , b0 ] = [a − b0 , a0 − b], ∅ −] x] = x] −] ∅ = ∅.
+The computation of other abstract operations is left to the reader. (For product and division,
+note that it is a bit more complicated because of signs.) We also leave to the reader the
+special cases when one bound of the interval is infinite.
+For the example of program
+1: input x
+2: if x <= 0 goto 4
+3: print 10/x
+4: input y
+5: print y*y*x
+the abstract transition relation is
+1, R] → 2, R] [x 7→ ] − ∞, +∞[ ]
+2, R] → 4, R] [x 7→ R] (x)u ] − ∞, 0] ]
+2, R] → 3, R] [x 7→ R] (x) u [1, +∞[ ]
+3, R] → 4, R]
+4, R] → 5, R] [y 7→ ] − ∞, +∞[ ]
+5, R] → 6, R]
+
+12
+
+4
+
+Combinations of abstractions
+
+4.1
+
+Complex domains
+
+4.1.1
+
+Cardinal product
+
+Proposition 6 Let Li , L0i (i ∈ I) be complete lattices. If (αi , γi ) is a Galois connection,
+(Li , ≤i )
+
+γi
+
+(L0i , ≤0i )
+
+αi
+
+then we have a Galois connection:
+(×i∈I Li , ≤)
+
+γ
+α
+
+(×i∈I L0i , ≤0 )
+
+where a ≤ b if and only if for all i ∈ I, ai ≤i bi (similarly for ≤0 ), α((xi )i∈I ) = (αi (xi ))i∈I ,
+and γ((yi )i∈I ) = (γ(yi ))i∈I .
+4.1.2
+
+Sets
+
+Proposition 7 Let L be a complete lattice, and S a set. Let f : S → L be a function. Then
+we have a Galois connection:
+γ
+(P(S), ⊆) (L, ≤)
+α
+
+where α(x) = t{f (x0 ) | x0 ∈ x} and γ(y) = {x0 | f (x0 ) ≤ y}.
+Proof α(x) ≤ y if and only if for all x0 ∈ x, f (x0 ) ≤ y if and only if x ⊆ γ(y).
+
+2
+
+This is what we have done when lifting the abstraction to the collecting semantics.
+Example: for signs, f (x) = − if x < 0, f (x) = 0 if x = 0 and f (x) = + if x > 0.
+4.1.3
+
+Functions with fixed input
+
+Proposition 8 Let L and L0 be complete lattices, and S a set. If (αi , γi ) is a Galois connection,
+γ
+(L, ≤) (L0 , ≤0 )
+α
+
+then we have a Galois connection:
+(S → L, ≤)
+
+γ0
+α0
+
+(S → L0 , ≤0 )
+
+where the function lattices are ordered pointwise: f ≤ f 0 if and only if ∀x ∈ S, f (x) ≤ f 0 (x),
+α0 (f ) = λx.α(f (x)), and γ 0 (f ) = λx.γ(f (x)).
+This is a particular case of the cardinal product. This is what we have done for the
+environment in our small language.
+
+13
+
+Proposition 9 Let L and L0 be complete lattices, and S a set. If (αi , γi ) is a Galois connection,
+γ
+(L, ≤) (L0 , ≤0 )
+α
+
+then we have a Galois connection:
+(S → L, ≤)
+
+γ0
+α0
+
+(L0 , ≤0 )
+
+where the function lattices are ordered pointwise: f ≤ f 0 if and only if ∀x ∈ S, f (x) ≤ f 0 (x),
+α0 (f ) = t{α(f (x)) | x ∈ S}, and γ 0 (y) = {f | ∀x ∈ S, f (x) ≤ γ(y)}.
+This is a much coarser approximation.
+Application to arrays: An array corresponds to a function that associates to each index
+the element of the array at that index. The elements of an array can be analyzed either with
+one abstract value for each element of the array (this is the first abstraction), or with one
+abstract element for the whole array (this is the second abstraction).
+4.1.4
+
+Functions with abstracted input; higher-order abstract interpretation
+
+Proposition 10
+1. Let L1 (≤1 , ⊥1 , >1 , t1 , u1 ) and L2 (≤2 , ⊥2 , >2 , t2 , u2 ) be complete latm
+tices. The set of monotone functions (L1 → L2 )(≤f , ⊥f , >f , tf , uf ) ordered pointwise is
+a complete lattice.
+φ1 ≤f φ2 ⇔ ∀x ∈ X, φ1 (x) ≤ φ2 (x),
+⊥f = λx.⊥,
+
+>f = λx.>,
+
+tf F = λx. t {f (x) | f ∈ F },
+
+uf F = λx. u {f (x) | f ∈ F }.
+
+2. Let L1 (≤1 , ⊥1 , >1 , t1 , u1 ) and L2 (≤2 , ⊥2 , >2 , t2 , u2 ) be complete lattices. A function
+f : L1 → L2 is additive if and only if for all S ⊆ L1 , f (tS) = t{f (x) | x ∈ S}. The
+a
+set of additive functions (L1 → L2 )(≤f , ⊥f , >f , tf , uf ) ordered pointwise is a complete
+lattice.
+φ1 ≤f φ2 ⇔ ∀x ∈ X, φ1 (x) ≤ φ2 (x),
+⊥f = λx.⊥,
+
+>f = λx.>,
+
+tf F = λx. t {f (x) | f ∈ F },
+
+uf F = tf {g | ∀f ∈ F, g ≤f f }.
+
+Proposition 11 [11, (17)] Let L1 , L01 , L2 , L02 be complete lattices. If (α, γ) is a Galois
+connection,
+γ
+(L1 , ≤1 ) (L2 , ≤2 )
+α
+
+and (α0 , γ 0 ) is a Galois connection,
+(L01 , ≤01 )
+
+γ0
+α0
+
+14
+
+(L02 , ≤02 )
+
+then we have a Galois connection:
+γ 00
+
+m
+
+m
+
+(L1 → L01 , ≤001 ) 00 (L2 → L02 , ≤002 )
+α
+
+If γ and γ 0 are additive,
+γ 00
+
+a
+
+a
+
+(L1 → L01 , ≤001 ) 00 (L2 → L02 , ≤002 )
+α
+
+where the function lattices are ordered pointwise, α00 (f ) = α0 ◦ f ◦ γ and γ 00 (f ] ) = γ 0 ◦ f ] ◦ α.
+If α ◦ γ = Id and α0 ◦ γ 0 = Id then α00 ◦ γ 00 = Id.
+Proof that this is a Galois connection.
+• Assume that α00 (f ) ≤ f ] . Then for all x] , α0 ◦ f ◦ γ(x] ) ≤ f ] (x] ). So, by the definition
+of Galois connections, f ◦ γ(x] ) ≤ γ 0 ◦ f ] (x] ).
+Then, for all x, γ 00 (f ] )(x) = γ 0 ◦ f ] ◦ α(x) ≥ f ◦ γ ◦ α(x) by the above inequality applied
+to x] = α(x). Therefore, γ 00 (f ] )(x) ≥ f (x) since γ ◦ α ≥ Id and f is monotone.
+• Conversely, assume that γ 00 (f ] ) ≥ f . Then for all x, γ 0 ◦ f ] ◦ α(x) ≥ f (x). So, by the
+definition of Galois connections, f ] ◦ α(x) ≥ α0 ◦ f (x).
+Then, for all x] , α00 (f )(x] ) = α0 ◦f ◦γ(x] ) ≤ f ] ◦α◦γ(x] ) by the above inequality applied
+to x = γ(x] ). Therefore, α00 (f )(x] ) ≤ f ] (x] ) since α ◦ γ ≤ Id and f ] is monotone.
+Note that α00 maps really monotone functions to monotone functions (if f is monotone, α 0 ◦f ◦γ
+is monotone, since α0 and γ are monotone). We have the same property for γ 00 . We also have
+the same properties for additivity, when γ and γ 0 are additive. (Remember that abstraction
+functions are always additive.)
+We leave the proof that α00 ◦ γ 00 = Id to the reader.
+2
+This is a key result to abstract semantic operators. It can naturally be extended to
+functions with several parameters.
+Example: abstraction of + for the sign lattice.
+
+4.2
+
+Composition of abstractions; hierarchy of analyses
+
+Proposition 12 Let L1 , L2 , L3 be complete lattices. If (α, γ) is a Galois connection,
+(L1 , ≤1 )
+
+γ
+α
+
+(L2 , ≤2 )
+
+and (α0 , γ 0 ) is a Galois connection,
+(L2 , ≤2 )
+
+γ0
+α0
+
+(L3 , ≤3 )
+
+then we have a Galois connection:
+γ◦γ 0
+
+(L1 , ≤1 ) 0 (L3 , ≤3 )
+α ◦α
+
+If α ◦ γ = Id and α0 ◦ γ 0 = Id then (α0 ◦ α) ◦ (γ ◦ γ 0 ) = Id.
+Example: signs as abstraction of intervals.
+15
+
+4.3
+4.3.1
+
+Composition of analyses
+Reduced cardinal product
+
+You have two analyses of the same variable/program, and you want to do both of them. In
+some cases, doing both analyses together can result in a precise information than doing each
+analysis separately.
+Example: intervals and congruences. The congruence information can reduce the interval.
+This is formalized by the reduced cardinal product of the analyses.
+Definition 5 Let
+(L, ≤)
+and
+(L, ≤)
+
+γ1
+α1
+γ2
+α2
+
+(L1 , ≤1 )
+(L2 , ≤2 )
+
+be two Galois connections. Their reduced cardinal product is
+(L, ≤)
+
+γ
+α
+
+(σ(L1 × L2 ), ≤)
+
+where (a1 , a2 ) ≤ (b1 , b2 ) if and only if a1 ≤1 b1 and a2 ≤2 b2 , σ : L1 × L2 → L1 × L2 is defined
+by α(x) = (α1 (x), α2 (x)), γ(a1 , a2 ) = γ1 (a1 ) u γ2 (a2 ), and σ(a1 , a2 ) = u{(b1 , b2 ) | γ(a1 , a2 ) =
+γ(b1 , b2 )}.
+Proof that the reduced cardinal product is a Galois connection.
+x ≤ γ(a1 , a2 ) if and only if x ≤ γ1 (a1 ) and x ≤ γ2 (a2 ), if and only if α1 (x) ≤ a1 and
+α2 (x) ≤ a2 if and only if α(x) ≤ (a1 , a2 ).
+2
+Remark: σ is the reduction: it combines the informations of both analyses. It is used to
+enforce the third property of 3, since it is in general not true after the cardinal product has
+been computed.
+When we compute the transformers for the product, we use F ] = α ◦ F ◦ γ, which is more
+precise than the independent computation λ(a1 , a2 ).(α1 ◦ F ◦ γ1 (a1 ), α2 ◦ F ◦ γ2 (a2 )). Another
+way of improving the precision in a combination of analyses is to compute the analyses
+independently, and apply the reduction σ after each computation. Then, we also work in the
+lattice σ(L1 × L2 ), but the best precision is not always achieved (but the design is simpler: we
+can use the transfer functions for the independent analyses instead of recomputing transfer
+functions for the combined analyses).
+Example: see [10] for a program in which the reduced product of signs and parity is more
+precise than the independent analysis.
+4.3.2
+
+Reduced cardinal power
+
+The reduced cardinal power takes into account relations between two analyses.
+
+16
+
+Definition 6 Let
+(L, ≤)
+and
+(L, ≤)
+
+γ1
+α1
+γ2
+α2
+
+(L1 , ≤1 )
+(L2 , ≤2 )
+
+be two Galois connections. Their reduced cardinal power is
+(L, ≤)
+
+γ
+α
+
+m
+
+(σ(L1 → L2 ), ≤)
+
+where f ≤ f 0 if and only if ∀y1 ∈ L1 , f (y1 ) ≤ f 0 (y1 ), α(x) = λy1 .α2 (x u γ1 (y1 )), γ(f ) = t{x ∈
+L | ∀y1 ∈ L1 , γ1 (y1 ) u x ≤ γ2 (f (y1 ))}, and σ(f ) = u{f 0 | γ(f ) = γ(f 0 )}.
+Proof that the reduced cardinal power is a Galois connection.
+α is a complete join-morphism (since α2 and λx.x u γ1 (y1 ) are), and γ(y) = t{x ∈ L |
+α(x) ≤ y}, so by Proposition 4, (α, γ) is a Galois connection.
+2
+Example: see [10].
+
+5
+
+Loops
+
+Example of program with loop (see end of semantics section). Try to analyze it, and show
+that we need a fixpoint.
+
+5.1
+
+Collecting semantics; fixpoints
+
+A fixpoint of a function f is an element x such that f (x) = x. The least fixpoint of f is
+denoted by lfp(f ) and its greatest fixpoint by gfp(f ). The collecting semantics can also be
+defined by fixpoints.
+The set of reachable states can be computed from the function post. Formally, let F s (S) =
+S0 ∪ post(S), where S0 is the set of initial states (often only one state). The set of reachable
+states is then Sr = lfp(Fs ) = post ∗ (S0 ) = ∪{post n (S0 ) | n ∈ N}
+We can also compute the set of possible traces as a fixpoint. Let Ft (T ) = {s | s ∈
+S0 } ∪ {t → s0 | t ∈ T, T ends in s, s → s0 }. Then the set of possible traces is Tr = lfp(Ft ).
+Theorem 1 (Tarski) The set of fixpoints of a monotone operator f on a complete lattice
+L(≤, ⊥, >, t, u) is a non-empty complete lattice, ordered by ≤. The least fixpoint of f is
+lfp(f ) = u{x ∈ L | f (x) ≤ x}
+and its greatest fixpoint is
+gfp(f ) = t{x ∈ L | x ≤ f (x)}.
+
+17
+
+Proof I only prove that a = u{x ∈ L | f (x) ≤ x} is the least fixpoint of f .
+If f (x) ≤ x, f (a) ≤ f (x) ≤ x, so f (a) ≤ a.
+Then f (a) ∈ {x ∈ L | f (x) ≤ x}, so a ≤ f (a).
+Then a = f (a), so a is a fixpoint of f .
+Consider another fixpoint x: f (x) = x, so x ∈ {x ∈ L | f (x) ≤ x}, so a ≤ x. Then a is
+the least fixpoint of f .
+2
+The next few lines are for those who have heard about ordinals. The others can ignore.
+The least fixpoint could in fact be obtained by a transfinite iteration of f from ⊥. If f λ (⊥),
+where λ is an ordinal, is defined by
+f 0 (⊥) = ⊥
+f λ+1 (⊥) = f (f λ (⊥))
+f λ (⊥) = t{f β (⊥) | β < λ} if λ is a limit ordinal,
+this transfinite sequence eventually stabilizes, and its limit is lfp(f ) (this is a particular case
+of [3, Th. 2.5.2.0.2]).
+Definition 7 (CPO) Let S(≤) be a partially ordered set (poset). A chain C = (x n )n∈N is
+a monotone sequence of elements of S: x0 ≤ x1 ≤ ... ≤ xn ≤ xn+1 ≤ ....
+A complete partial order (CPO) is a poset S(≤) such that S has a least element ⊥ and
+every chain C has a least upper bound tC.
+Let S(≤) and S 0 (≤0 ) be two CPOs. An operator f : S → S 0 is continuous if and only if
+for all chains C ⊆ S, f (tC) = t0 f (C).
+Theorem 2 (Kleene) Let S(≤) be a CPO. Let f : S → S be a continuous operator. Then
+f has a least fixpoint:
+lfp(f ) = t{f i (⊥) | i ∈ N}.
+A complete lattice is also a CPO, then Kleene’s theorem can be applied: it shows that
+the above sequence stops at ordinal ω if f is continuous.
+
+5.2
+
+Abstraction of fixpoints
+
+Proposition 13 Let F be a monotone operator on a complete lattice F : L1 → L1 , and
+(α, γ) be a Galois connection between L1 and L2 . Then γ(lfp(α ◦ F ◦ γ)) ≥ lfp(F ), that is,
+lfp(α ◦ F ◦ γ) ≥ α(lfp(F )).
+This is a very important result in abstract interpretation: it is the key to the analysis of loops.
+Proof
+F (γ(lfp(α ◦ F ◦ γ))) ≤ (γ ◦ α ◦ F ◦ γ)(lfp(α ◦ F ◦ γ))
+≤ γ(lfp(α ◦ F ◦ γ))
+so a = γ(lfp(α ◦ F ◦ γ)) is a post-fixpoint of F (F (a) ≤ a). Knowing that lfp(F ) = u{x ∈ L |
+f (x) ≤ x}, lfp(F ) ≤ a.
+2
+18
+
+Example with signs (take again the same program of the end of the semantics section).
+Then, we compute the fixpoint of FS] = αS ◦ FS ◦ γS . We have FS] (S ] ) = αS (S0 ∪
+post(γS (S ] ))) = S0] t post ] (S ] ) with S0] = αS (S0 ) and post ] = αS ◦ post ◦ γS .
+Alternatively, we can also start from traces, to obtain the same result. The abstraction
+of traces is:
+• Let T be a set of traces. αT (T ) = αS ({s | ∃t ∈ T, s ∈ t})
+• Let T ] be an abstract trace. γT (T ] ) = {t | ∀s ∈ t, s ∈ γS (T ] )}
+The operator FT] of which we compute the fixpoint is F ] = αT ◦ FT ◦ γT , and
+FT] (T ] ) = αT ◦ FT ◦ γT (T ] )
+= αT ◦ FT ({t | ∀s ∈ t, s ∈ γS (T ] )})
+= αT ({s (one state trace) | s ∈ S0 } ∪ {t → s0 | ∀s00 ∈ t, s00 ∈ γS (T ] ), t ends in s, s → s0 })
+= αS ({s0 | s0 ∈ S0 or ∃s such that s ∈ γS (T ] ), s → s0 })
+= S0] t post ] (T ] )
+so we have in fact FS] = FT] . The interest of using traces appears for more precise analyses,
+that aim to determine properties depending not only on the set of reachable states, but also
+on the possible traces.
+Example: we can run the fixpoint iteration on the examples of programs of the semantics
+section, for the interval analysis.
+1:
+2:
+3:
+4:
+5:
+6:
+
+input x
+if x <= 0 goto 4
+print 10/x
+input y
+print y*y*x
+
+x
+∅
+
+y
+∅
+
+x
+∅
+IZ
+
+y
+∅
+∅
+
+x
+∅
+IZ
+I+
+I−
+
+y
+∅
+∅
+∅
+∅
+
+x
+∅
+IZ
+I+
+IZ
+I−
+
+y
+∅
+∅
+∅
+∅
+IZ
+
+x
+∅
+IZ
+I+
+IZ
+IZ
+I−
+
+y
+∅
+∅
+∅
+∅
+IZ
+IZ
+
+x
+∅
+IZ
+I+
+IZ
+IZ
+IZ
+
+y
+∅
+∅
+∅
+∅
+IZ
+IZ
+
+where IZ =] − ∞, +∞[, I+ = [1, +∞[, I− =] − ∞, 0].
+On each line, we give the abstract environment at the corresponding program point (that
+is, before the execution of the corresponding instruction). This abstract environment contains
+two abstract values, one for x, one for y.
+The first column (after the program itself) is the initial state: the abstract environment
+at the first program point is empty: all variables are mapped to ∅. Other program points are
+not yet found reachable. The next columns represent the successive iterations of F S] .
+In practice, we have one abstract environment at each program point, and we iterate. Let
+
+Ri] the information at pc = i. We project the iteration on each program point:
+• Initial state: Ri] ≥ S0] (i)
+19
+
+]
+]
+]
+]
+]
+]
+]
+0
+0
+• Iteration: Rpc
+0 ≥ post (λpc.Rpc )(pc ), or simply: if pc, Rpc → pc , R2 then Rpc 0 ≥ R2 .
+
+For the last example of program of section semantics, the equations are:
+R1] ≥ {x 7→ ∅, y 7→ Z}
+R2] ≥ R1] [x 7→ [0, 0]]
+R3] ≥ R2]
+R5] ≥ R2]
+R4] ≥ R3] [x 7→ [a + 1, b + 1]] if R3] (x) = [a, b]
+R2] ≥ R4]
+The variable y is considered as initialized with any value. (We could also have added input y
+at the beginning of the program.) Note that the test if x >= y does not give any information
+on the interval of x since y can have any value.
+The equations can be iterated in any order, provided that, when a parameter of an equation
+is modified, then the equation is executed again at some point. This is called chaotic iterations.
+
+5.3
+
+Widening [12]
+
+Example with intervals.
+input n;
+x := 0;
+2: x++;
+print x;
+if x < n goto 2
+The analysis does not terminate, because the interval becomes larger and large without stabilizing. This can happen when the height of the lattice is not finite. We need to “accelerate
+the convergence” of the iterations. This can be done by a widening.
+Definition 8 (Widening) A widening operator is a function 5 : L × L → L such that for
+all x, y in L, x ≤ x 5 y, y ≤ x 5 y, and for all increasing chains x0 ≤ x1 ≤ . . ., the increasing
+chain y0 = x0 , . . . , yi+1 = yi 5 xi+1 , . . . is not strictly increasing.
+Proposition 14 Assuming F monotone and 5 a widening, the sequence
+X0 = ⊥
+if F (Xi ) ≤ Xi
+
+Xi+1 = Xi
+= Xi 5 F (Xi )
+
+otherwise
+
+is ultimately stationary and its limit is greater than (or equal to) lfp(F ).
+
+20
+
+Proof The sequence Xi is increasing. Indeed, Xi+1 ≥ F (Xi ). This is obvious when Xi+1 =
+Xi . Otherwise, Xi+1 = Xi 5 F (Xi ) ≥ Xi . Define x0 = ⊥, xi+1 = F (Xi ). This sequence is also
+increasing since F is monotone. Taking y0 = x0 = ⊥, yi+1 = yi 5 xi+1 = yi 5 F (Xi ), yi = Xi
+by induction. Moreover, yi is not strictly increasing, so there exists i such that Xi+1 = Xi .
+That is, either Xi 5 F (Xi ) = Xi , so F (Xi ) ≤ Xi 5 F (Xi ) = Xi , so this case is impossible, or
+F (Xi ) ≤ Xi . Now, the sequence is stationary, since F (Xi+1 ) = F (Xi ) ≤ Xi = Xi+1 so the
+first case applies forever.
+When the sequence stabilizes, F (Xi ) ≤ Xi as shown above. Since the least fixpoint is the
+greatest lower bound of the post-fixpoints of F , Xi ≥ lfp(F ).
+2
+Numerous variants are possible. We could use a different widening for each iterate, or a
+widening that depends on the history of all previous iterates.
+Example: widening for intervals ∅ 5 X = X 5 ∅ = X, [a, b] 5 [a0 , b0 ] = [if a0 < a then −
+∞ else a, if b0 > b then + ∞ else b]. We will run this widening on the example in the course.
+
+5.4
+
+Narrowing
+
+However, the widening may lead to an important loss of precision. Example with intervals.
+x := 0;
+2: x++;
+print x;
+if x < 5 goto 2
+We obtain [0, ∞[ as interval for x, while in reality x ∈ [0, 5]. We can regain some precision
+by performing decreasing iterations after the widening sequence has stabilized.
+Definition 9 (Narrowing) A narrowing operator is a function ∆ : L × L → L such that
+for all x, y in L, y ≤ x implies y ≤ x∆y ≤ x, and for all decreasing chains x0 ≥ x1 ≥ . . ., the
+decreasing chain defined by y0 = x0 , . . . , yi+1 = yi ∆xi+1 , . . . is not strictly decreasing.
+Proposition 15 Assume that F is monotone, and ∆ is a narrowing. If X0 ≥ lfp(F ) and
+F (X0 ) ≤ X0 , then the sequence Xi+1 = Xi ∆F (Xi ) is decreasing, ultimately stationary and
+its limit is greater than (or equal to) lfp(F ).
+Proof First, for all i, Xi ≥ lfp(F ) and F (Xi ) ≤ Xi . True for X0 . If it is true for i,
+Xi+1 = Xi ∆F (Xi ), then F (Xi ) ≤ Xi ∆F (Xi ) = Xi+1 ≤ Xi , so Xi+1 ≥ F (Xi ) ≥ F (lfp(F )) =
+lfp(F ) (since Xi ≥ lfp(F ) and F is monotone). F (Xi+1 ) ≤ F (Xi ) since Xi+1 ≤ Xi , so
+F (Xi+1 ) ≤ Xi+1 .
+We have also seen that Xi+1 ≤ Xi so the sequence is decreasing.
+Take xi+1 = F (Xi ). The sequence xi is decreasing. Take y0 = x0 , . . . , yi+1 = yi ∆xi+1 .
+Then yi = Xi , so Xi is not strictly decreasing. When Xi+1 = Xi , the sequence stabilizes. 2
+If F (Xi ) = Xi then Xi+1 = Xi , so if X0 is a fixpoint of F , it cannot be improved by narrowing.
+The iterations with narrowing can be stopped at any point, since all iterates are greater
+than the fixpoint. Waiting until the sequence stabilizes yields the best precision. Note that
+21
+
+it is also possible to iterate simply F after computing the sequence with widening, but then,
+we have to set an arbitrary limit on the number of iterations, because we have no guarantee
+that the decreasing iterations of F will terminate.
+Example with intervals: ∅∆X = X∆∅ = ∅, [a, b]∆[a0 , b0 ] = [if a = ∞ then a0 else a, if b =
++∞ then b0 else b]. This narrowing improves infinite bounds only. In the previous example
+of program, we now find the good bound for x. (We will show that in the course.)
+One interesting question is whether all analyses that can be done with widening and
+narrowing can be done with lattices of finite height. The answer is no, see [12]. In contrast,
+all analyses done with an abstraction can be done with a widening/narrowing in the concrete
+lattice.
+
+5.5
+
+Iteration strategies [1, 18]
+
+At least when we have no widening/narrowing, the result of the computation does not depend
+on the order in which we iterate the equations, so we can iterate them in any order (chaotic
+iterations).
+However, choosing a good iteration ordering can reduce the computation time dramatically. The main idea is that, when x depends on y, we try to compute y first, then x. Of
+course, this is not possible when there are cycles in the dependencies (that’s why we need to
+iterate).
+Here, we give a good iteration algorithm, taken from [18].
+1. Build the dependency graph of the equations: nodes n are unknowns, edges are n → n 0
+when n0 depends on n.
+2. Split the dependency graph into strongly connected components (see Tarjan’s scc algorithm [22] and below). In an oriented graph, a strongly connected component is a
+subset S of the nodes of the graph, such that for all nodes n and n0 in S, there exists a
+path from n to n0 and from n0 to n.
+3. Consider the strongly connected components in topological order. In an acyclic oriented
+graph, the topological order is defined by n ≤ n0 if and only if there exists a path from n
+to n0 . After merging all nodes of the strongly connected components in the dependency
+graph, the remaining graph is acyclic, so we can compute the topological order on it.
+Inside each strongly connected component, iterate in the order given by the scc building
+(reverse order of nodelist below, since nodelist contains the node in reverse dependency order, and it is better iterating in dependency order: if the value at n0 depends
+on the value at n, try to compute n first). At each iteration, apply all equations of the
+scc, and repeat until the scc stabilizes.
+In the presence of widening/narrowing, it is enough to apply them at least once per cycle, for
+example at the end of back edges of the dependency graph.
+A theoretically better algorithm (that is, better in the worst case) has been given in [1].
+In practice, the one above is quite good, probably better than [1], and certainly simpler.
+
+22
+
+Here is Tarjan’s algo. We do not detail how this algorithm works, since it is a bit far away
+from abstract interpretation strictly speaking. For general information on graph algorithms
+(including another algorithm for splitting into strongly connected components), see [2].
+age := 0
+nodelist := []
+for all nodes n, n.age := -1
+depth n =
+if n.age = -1 then
+begin
+age := age + 1;
+nodelist := n :: nodelist;
+n.age := age;
+age_sons := min { depth n’ | n -> n’ is an edge }
+if age_sons >= n.age then
+begin
+(* top node of a scc *)
+(* An scc is the set of nodes in nodelist until n (n included)
+Do the desired treatment on that scc here *)
+nodelist := the tail of nodelist, after n
+return age_sons
+end
+else
+return age_sons
+end
+else
+return n.age
+
+6
+
+Abstract domains
+
+6.1
+
+Numerical abstract domains
+
+6.1.1
+
+Constants
+
+⊥≤c≤>
+6.1.2
+
+Intervals
+
+∅ ≤ [a, b], with a ∈ Z ∪ {−∞}, b ∈ Z ∪ {+∞}, a ≤ b.
+6.1.3
+
+Linear equalities [19]
+
+a1 x1 + . . . + a n xn = c
+
+23
+
+6.1.4
+
+Polyhedra [14]
+
+a1 x1 + . . . + a n xn ≤ c
+6.1.5
+
+Octagons [20]
+
++/ − x + / − y ≤ c.
+6.1.6
+
+Congruences [17]
+
+a1 x1 + . . . + an xn ≡ c(d)
+
+6.2
+
+Other abstract domains
+
+6.2.1
+
+Alias analysis [15, 21, 23]
+
+6.2.2
+
+Escape analysis [16]
+
+7
+
+Abstract interpretation frameworks [11]
+
+7.1
+
+Upper closure operators
+
+Definition 10 An upper closure operator ρ is a function ρ : L → L, where L is a complete
+lattice, such that ρ is monotone, ρ(x) ≥ x, and ρ ◦ ρ = ρ.
+Proposition 16
+1. If (α, γ) is a Galois connection from L1 to L2 , then γ ◦ α is an upper
+closure operator on L1 .
+2. If ρ is an upper closure operator on L1 , then (ρ, Id) is a Galois connection from L1 to
+ρ(L1 ).
+So we have equivalence between the formalism of Galois connections and the one of upper
+closure operators.
+
+7.2
+
+Concretization
+
+When there is no best approximation (so we cannot define an abstraction α), we can work
+with only a concretization relation γ. y is a correct approximation of x if and only if x ≤ γ(y).
+With such a framework, we cannot systematically compute the analysis, but we can prove
+the correctness of an analysis.
+
+7.3
+
+Correctness relation
+
+The most general framework, but also the weakest, is to use neither an abstraction nor a
+concretization, but only a correctness relation σ. y is a correct approximation of x if and only
+if σ(x, y).
+If we work with only one lattice (like in the upper closure operator framework), the
+correctness relation is simply x ≤ y.
+24
+
+8
+
+Abstract interpretation as a “thinking tool”
+
+Abstract interpretation can be used to formalize many concepts in the area of programming
+languages. Here are some examples with references to the corresponding papers. (Not very
+easy to read!)
+
+8.1
+
+Hierarchy of semantics of programming languages [4]
+
+Semantics are abstractions of other semantics (the trace semantics being the most concrete
+one). For instance, the set of states considered above is an abstraction of the set of traces.
+
+8.2
+
+Types as abstract interpretation [5]
+
+8.3
+
+Program transformations [13]
+
+9
+
+Some introductory papers
+
+The following papers can be a good starting point to study abstract interpretation: [6–8]. The
+papers [7] and [8] give some intuition without too much formalism. [6] is much more formal.
+If you skip the more complex formulae (or if you are very courageous to decrypt them!), it
+can be a good example of how to formally design an analysis by abstract interpretation.
+Then, [11] and [12] can be good papers to continue with. The first papers, [9] and [10] are
+also interesting, but rather difficult to read.
+Papers by Patrick Cousot are available at http://www.di.ens.fr/~cousot/COUSOTpapers.shtml.
+
+References
+[1] François Bourdoncle. Efficient chaotic iteration strategies with widenings. In Proc. of
+the International Conference on Formal Methods in Programming and their Applications,
+volume 735 of Lecture Notes on Computer Science, pages 128–141. Springer Verlag, 1993.
+[2] Thomas H. Cormen, Charles E. Leiserson, and Ronald L. Rivest. Introduction to algorithms. MIT Press, 1990.
+[3] Patrick Cousot. Méthodes itératives de construction et d’approximation de points fixes
+d’opérateurs monotones sur un treillis, analyse sémantique des programmes. PhD thesis,
+Université Scientifique et Médicale de Grenoble, 21 March 1978.
+[4] Patrick Cousot. Constructive design of a hierarchy of semantics of a transition system
+by abstract interpretation. Electronic Notes in Theoretical Computer Science, 6, 1997.
+URL: http://www.elsevier.nl/locate/entcs/volume6.html, 25 pages.
+[5] Patrick Cousot. Types as Abstract Interpretations. In 24th ACM SIGPLAN-SIGACT
+Symposium on Principles of Programming Languages (POPL’97), pages 316–331, Paris,
+France, January 1997.
+
+25
+
+[6] Patrick Cousot. The Calculational Design of a Generic Abstract Interpreter. In M. Broy
+and R. Steinbrüggen, editors, Calculational System Design. NATO ASI Series F. IOS
+Press, Amsterdam, 1999.
+[7] Patrick Cousot.
+Abstract Interpretation:
+Achievements and Perspectives.
+In Proceedings of the SSGRR 2000 Computer & eBusiness International Conference, Compact disk paper 224 and electronic proceedings
+http://www.ssgrr.it/en/ssgrr2000/proceedings.htm, L’Aquila, Italy, July 31
+– August 6 2000. Scuola Superiore G. Reiss Romoli.
+[8] Patrick Cousot. Abstract Interpretation Based Formal Methods and Future Challenges,
+invited paper. In R. Wilhelm, editor, ” Informatics — 10 Years Back, 10 Years Ahead ”,
+volume 2000 of Lecture Notes on Computer Science, pages 138–156. Springer Verlag,
+2001.
+[9] Patrick Cousot and Radhia Cousot. Abstract Interpretation: a Unified Lattice Model
+for Static Analysis of Programs by Construction or Approximation of Fixpoints. In
+Conference Record of the 4th Annual ACM Symposium on Principles of Programming
+Languages, pages 238–252, Los Angeles, California, January 1977.
+[10] Patrick Cousot and Radhia Cousot. Systematic Design of Program Analysis Frameworks. In Conference Record of the Sixth Annual ACM Symposium on Principles of
+Programming Languages, pages 269–282, San Antonio, Texas, 29-31 January 1979.
+[11] Patrick Cousot and Radhia Cousot. Abstract Interpretation Frameworks. Journal of
+Logic and Computation, 2(4):511–547, August 1992.
+[12] Patrick Cousot and Radhia Cousot. Comparing the Galois Connection and Widening/Narrowing Approaches to Abstract Interpretation. In Maurice Bruynooghe and
+Martin Wirsing, editors, Proceedings of the fourth international symposium PLILP’92
+(Programming Language Implementation and Logic Programming), Lecture Notes on
+Computer Science, pages 269–295. Springer Verlag, August 1992.
+[13] Patrick Cousot and Radhia Cousot. Systematic design of program transformation frameworks by abstract interpretation. In Conference Record of the Twentyninth Annual ACM
+SIGPLAN-SIGACT Symposium on Principles of Programming Languages, pages 178–
+190, Portland, Oregon, January 2002. ACM Press.
+[14] Patrick Cousot and Nicolas Halbwachs. Automatic Discovery of Linear Restraints Among
+Variables of a Program. In Conference Record of the Fifth Annual ACM Symposium on
+Principles of Programming Languages, pages 84–96, January 1978.
+[15] Alain Deutsch. Interprocedural May-Alias Analysis for Pointers: Beyond k-limiting.
+In Proceedings of the SIGPLAN ’94 Conference on Programming Language Design and
+Implementation, pages 230–241, Orlando, Florida, 20-24 June 1994. ACM Press.
+
+26
+
+[16] David Gay and Bjarne Steensgaard. Fast Escape Analysis and Stack Allocation for
+Object-Based Programs. In David A. Watt, editor, Compiler Construction, 9th International Conference, CC’2000, volume 1781 of Lecture Notes on Computer Science, pages
+82–93. Springer Verlag, March 2000.
+[17] Philippe Granger. Static Analysis of Linear Congruence Equalities among Variables of a
+Program. In Proceedings of the International Joint Conference on Theory and Practice
+of Software Development (TAPSOFT’91), volume 1, pages 169–192, April 1991.
+[18] Susan Horwitz, Alan Demers, and Tim Teitelbaum. An Efficient General Iterative Algorithm for Dataflow Analysis. Acta Informatica, 24(6):679–694, 1987.
+[19] Michael Karr. Affine Relationships Among Variables of a Program. Acta Informatica,
+6:133–151, 1976.
+[20] Antoine Miné. The octagon abstract domain. In Analysis, Slicing, and Transformation
+(AST 2001) in WCRE 2001, pages 310–319. IEEE Computer Society Press, October
+2001.
+[21] Bjarne Steensgaard. Points-to analysis in almost linear time. In Proceedings of the
+Twentythird Annual ACM SIGPLAN-SIGACT Symposium on Principles of Programming Languages, pages 32–41, January 1996.
+[22] Robert E. Tarjan. Depth-first search and linear graph algorithms. SIAM Journal on
+Computing, 1(2):146–160, 1972.
+[23] Arnaud Venet. Nonuniform Alias Analysis of Recursive Data Structures and Arrays. In
+Manuel V. Hermenegildo and German Puebla, editors, Static Analysis, 9th International
+Symposium, SAS 2002, volume 2477 of Lecture Notes on Computer Science, pages 36–51,
+Madrid, Spain, September 2002. Springer Verlag.
+
+27
+
+

@@ -126,6 +126,78 @@ br t2, loop, exit
 Arithmetic checks the decision: $1201 \geq 1000$ promotes, $151 \geq 100$ but $< 1000$ holds at baseline, and $51 < 100$ waits.
 Each transition keeps a way back, which the next chapter implements.
 
+\section{Basic Block Versioning}
+\label{sec:ch34-bbv}
+
+Tier promotion compiles whole methods, but a method can be hot in one type context and cold in another.
+\term{Basic block versioning} specializes within a method instead: it compiles several versions of the same block, each valid under one observed context, and routes control to the version that matches the current values.
+A context here is a small, checkable fact such as the observed kinds of live variables at a block entry.
+Compilation stays lazy: the first version covers the first observed context, and a new version is enqueued only when execution arrives with an uncovered context and the version budget allows.
+When the budget is exhausted or the context is too vague, control falls back to a generic version that tests kinds explicitly.
+This keeps warm-up proportional to behaviors actually seen rather than to behaviors imaginable.
+
+Algorithm~\ref{alg:ch34-bbv} states the lazy versioning loop for one method.
+\begin{algorithm}[htbp]
+\caption{Lazy basic block versioning under a version budget.}
+\label{alg:ch34-bbv}
+\begin{pseudocode}
+\Require control-flow graph with entry $E$, version limit $K$ per block, generic fallback for every block
+\Ensure specialized versions for observed contexts plus fallback coverage for the rest
+\State compile version $v_0$ of $E$ under the first observed entry context
+\State $Pending \gets \{(E, v_0)\}$
+\While{$Pending \neq \emptyset$}
+\State remove some $(B, v)$ from $Pending$
+\ForAll{successors $S$ of $B$ along the observed edge}
+\State $c \gets$ context propagated from $v$ to $S$
+\If{a version of $S$ already covers $c$}
+\State route the edge there
+\ElsIf{$S$ has fewer than $K$ versions}
+\State compile a new version of $S$ under $c$
+\State add it to $Pending$
+\Else
+\State route the edge to the generic version of $S$
+\EndIf
+\EndFor
+\EndWhile
+\end{pseudocode}
+\end{algorithm}
+Each edge carries the facts the source version established, so a type test proved on one block need not repeat in its specialized successor.
+Figure~\ref{fig:ch34-bbv-versions} shows the shape: one generic diamond becomes two narrow paths plus a fallback edge.
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=1.2cm and 1.6cm]
+\node[basic block] (head) {head: $x$ int};
+\node[basic block, below left=of head] (fast) {body v1: unchecked add};
+\node[basic block, below right=of head] (gen) {body generic: guarded add};
+\node[basic block, below=of fast, xshift=1.6cm] (join) {join};
+\draw[cfg edge] (head) -- node[left, font=\sffamily\scriptsize] {int} (fast);
+\draw[cfg edge] (head) -- node[right, font=\sffamily\scriptsize] {other} (gen);
+\draw[cfg edge] (fast) -- (join);
+\draw[cfg edge] (gen) -- (join);
+\end{tikzpicture}
+\caption{Versioning splits one body into an unchecked path for the observed kind and a guarded path for everything else, so the common case skips the test.}
+\label{fig:ch34-bbv-versions}
+\end{figure}
+Table~\ref{tab:ch34-bbv-limits} records the budget trade that keeps the technique honest.
+\begin{table}[htbp]
+\centering
+\caption{Version-budget choices with their payoff and danger.}
+\label{tab:ch34-bbv-limits}
+\begin{tabular}{lll}
+\toprule
+Choice & Payoff & Danger \\
+\midrule
+Small budget ($1$--$2$) & little code growth & misses rarer contexts \\
+Large budget & covers more contexts & code growth and compile time \\
+Lazy only & pays only for seen behavior & first new context diverts \\
+Generic fallback kept & correctness without full coverage & fallback stays slow \\
+\bottomrule
+\end{tabular}
+\end{table}
+A static variant of the same idea explores contexts without runtime observation and must separately argue that its exploration terminates; the lazy form here terminates because each compilation covers one observed arrival and arrivals are bounded by the budget plus fallback routing.
+Test versioning with a two-kind loop that observes integers $99$ times and a string once: the integer path must stay unchecked, the string arrival must reach the generic path, and the final result must match interpreted execution exactly.
+% TODO(cite): need primary references for basic block versioning in JIT compilers and for its static variant.
+
 \section{On-Stack Replacement}\label{sec:ch34-osr}
 
 Compiling a method is not enough when the program already sits inside a long-running loop.

@@ -1,0 +1,557 @@
+λ-Calculus
+Christian Sternagel
+November 9, 2017
+
+A little bit of syntactic sugar
+helps you swallow the lambda
+calculus.
+Peter Landin
+
+Already Leibniz wanted to create a universal language in which all possible problems
+can be stated. Outcomes of such efforts you may already know are for instance Turing
+machines [7] and register machines. From there also the expression Turing completeness
+stems. A computational model is said to be Turing complete if it can compute all
+“effectively” computable functions. In this chapter one of those Turing complete formal
+frameworks is introduced: the λ-calculus (speak “lambda calculus”) [2].
+
+1 Syntax
+The basic building blocks of the λ-calculus are λ-terms (or λ-expressions).
+Definition 1 (Raw terms). The possible shapes of a raw λ-term t are defined by the
+following BNF grammar:
+t ::= x | (t t) | (λx. t)
+Here x is a variable (or atom), (t u) is the application of the left λ-term to the right one
+(the idea is that t encodes a function that can be applied to input u), and (λx. t) is a
+(lambda) abstraction (somewhat similar to a function definition like f (x) = t).
+The set of all raw λ-terms is denoted by R (deliberately using an odd symbol, so that
+we will try hard to avoid it).
+Remark. The Haskell equivalent to abstractions are anonymous functions. The term
+(λx. x) for example is equivalent (modulo typing) to the Haskell function (\x -> x)
+(the backslash should give the visual impression of a lambda).
+
+© Christian Sternagel
+licensed under Creative Commons License SA
+
+Example 1. Some examples of raw λ-terms are:
+x
+(λx. x)
+(λx. (λy. (x y)))
+(((λx. x) (λx. x)) (λx. x))
+In order to save parentheses the conventions that (1) outermost parentheses are dropped,
+(2) application binds tighter than abstraction, and (3) applications associate to the left,
+are used. Then the above can be written as
+x
+λx. x
+λx. (λy. x y)
+(λx. x) (λx. x) (λx. x)
+Furthermore, nested abstractions associate to the right and in order to save λs, variables
+are grouped together, for example, the rather longish term
+(λx. (λy. (λz. ((x y) z))))
+is compressed to
+λxyz. x y z
+using the above conventions. (The same conventions apply also to Haskell, where for
+example \x y z -> x y z is the short form of (\x -> (\y -> (\z -> ((x y) z)))).)
+
+1.1 α-Equivalence
+As in programming, the names of parameters are not supposed to change the meaning
+of a function. For example, id x = x is the same function as id y = y. To make this
+irrelevance of “names” more formal the notion of α-equivalence is introduced.
+But before we can do so, we need to be able to talk about renaming of variables and the
+set of free variables of a term.
+Definition 2 (Renaming variables). Variables are renamed by applying permutations π
+(between variables) to terms as follows:1
+π • x = π(x)
+π • (t u) = (π • t) (π • u)
+π • (λx. t) = λπ(x). (π • t)
+1
+
+A permutation is a bijective function π such that π(x) 6= x for only finitely many variables x; it can
+be equivalently expressed by a finite list of swappings.
+
+2
+
+Thus, the permutation π is applied to every variable occurrence throughout a given
+term.
+Example 2. Consider the permutation (x
+(x
+
+y), replacing xs by ys and vice versa. Then
+
+y) • (λxy. x (λzx. z x)) = λyx. y (λzy. z y)
+
+Definition 3 (Free variables). The set of free variables F(t) of a (raw) λ-term t consists
+of all variables that occur outside the scope of a lambda abstraction:
+F(x) = {x}
+F(t u) = F(t) ∪ F(u)
+F(λx. t) = F(t) \ {x}
+(Raw) terms without free variables (that is, F(t) = ∅) are called closed.
+Definition 4 (Freshness constraints). We say that a set of variables X is fresh for a
+given syntactic object o—written X ] o—if none of the variables in X occurs in the
+“free variables” of o. For terms the “free variables” are given by F and for permutations
+by their domain (that is, the set of variables that are modified by the permutation).
+The curious reader might be interested in the following formal definition of α-equivalence
+(≡α ). If you prefer an informal account, you may skip to the subsequent remark.
+Definition 5 (α-Equivalence). The notion of α-equivalence is introduced simultaneously
+with an auxiliary notion of equivalence between variable-term pairs with respect to
+a given permutation (≡π ). The pair (x, t) is π-equivalent to the pair (y, u)—written
+(x, t) ≡π (y, u)—if and only if all of the following conditions are satisfied
+F(t) \ {x} = F(u) \ {y}
+
+F(t) \ {x} ] π
+
+π • t ≡α u
+
+π(x) = y
+
+At the same time α-equivalence is defined inductively as follows
+t ≡α t0
+x ≡α x
+
+u ≡α u0
+0
+
+(x, t) ≡π (y, u) for some π
+
+0
+
+t u ≡α t u
+
+λx. t ≡α λy. u
+
+Remark. While the above is a formally correct definition of α-equivalence, it might be
+instructive to just remember that two raw terms are α-equivalent if one is obtained from
+the other by consistently renaming its bound variables (which might require to apply
+several renaming permutations in a row).
+As the name suggests, α-equivalence is an equivalence relation on raw terms. Thus, we
+are finally in a position to obtain λ-terms (notice the lack of the prefix “raw”).
+Definition 6 (λ-Terms). The set of λ-terms Λ is obtained by taking the quotient of the
+set of raw terms with respect to α-equivalence. Formally: Λ = R/ ≡α .
+
+3
+
+Mathematically, a single term is represented by a whole set of raw terms: its α-equivalence
+class. Thus, for example, when writing λxy. y; we really mean
+{. . . , λxy. y, . . . , λyx. x, . . . , λab. b, . . .}
+With this definition of λ-terms as a quotient, α-equivalent terms are in fact equal (because their α-equivalence classes coincide)!
+
+2 Evaluation of Lambda Expressions
+Until now you know how the syntax of the λ-calculus looks like, but it only starts to
+get interesting after knowing how to do computations using such syntactic constructs.
+The surprising fact is that the λ-calculus does only need a single rule to receive its full
+computational power. Before this rule (called the “β-rule,” for historical reasons) can
+be given, we need to talk about substitutions though.
+
+2.1 Substitutions
+A substitution is a mapping from a variable to a λ-term. We use the notation [x := t]
+to denote the substitution replacing the variable x by the term t.
+The application of a substitution [x := s] to a λ-term t (written as t[x := s]) is defined
+by
+x[x := s] = s
+if x 6= y
+
+y[x := s] = y
+(t u)[x := s] = (t[x := s]) (u[x := s])
+(λy. t)[x := s] = λy. (t[x := s])
+
+if y ] (x, s)
+
+Note that the variable y in the last case is assumed to be fresh for x and s, that is, it
+is different from all the free variables of s and also unequal to x. Thus, bound variables
+are not substituted.
+As an indication for why the freshness condition in the last case is required, note
+what would happen if it was allowed to apply a substitution [x := s] directly to a
+term t = λy. u with y ∈ F(s). This would for example yield (λx. y)[y := x] = λx. x and
+(λz. y)[y := x] = λz. x. While the α-equivalent raw λ-terms λx. y and λz. y provide the
+same results for the same inputs (and actually represent one and the same λ-term), the
+two (non-α-equivalent) raw λ-terms λx. x (resulting from a wrong substitution) and λz. x
+do not behave identical (and indeed represent two different λ-terms). (This problem is
+sometimes referred to as variable capture.)
+
+4
+
+2.2 The β-Rule
+Computations within the λ-calculus are done by applying the β-rule stepwise (which is
+called β-reduction).
+Definition 7 (β-Reduction). The β-rule is defined inductively by
+x]u
+(λx. t) u →β t[x := u]
+
+(root)
+
+s →β t
+s u →β t u
+
+(app-l)
+
+s →β t
+u s →β u t
+
+(app-r)
+
+s →β t
+λx. s →β λx. t
+
+(abs)
+
+So if there is a subterm u of s that is of the form u = (λx. v) w where x is fresh for w,
+then s →β t, where t is obtained from s by replacing u with v[x := w]. We say that s
+β-reduces to t in one step.
+Note that it is always possible to satisfy the freshness side condition by appropriately
+renaming bound variables first (since our λ-terms are actually ≡α -equivalence classes,
+doing so does not even change the term).
+Let s and t be λ-terms. If s reduces to t in a number of β-steps then we denote this by
+s →∗β t (or s →nβ t to make concrete that the reduction has exactly n steps).
+Consider for example the reduction step
+((λx. x) (λx. x)) y →β (x[x := λx. x]) y = (λx. x) y
+where the underlined expression (λx. x) (λx. x) is called a redex (the short form of
+red ucible ex pression) and λx. x is called its contractum. The resulting term (λx. x) y is
+called the reduct of the step. In principle this alone is sufficient to define and evaluate
+every effectively computable function. At least, as long as we can answer the question:
+What is the result of a computation?
+
+2.3 Normal Forms
+A λ-term is said to be in normal form (NF) if it is not possible to apply any β-reduction.
+A normal form can be considered as the outcome of a computation. Note that there are
+λ-terms that do not have any normal form. For others it might depend on the order in
+which β-steps are applied whether a normal form is reached or not.
+Example 3. Reducing the term (λx. x x) (λx. x x) results in the infinite reduction sequence
+(λx. x x) (λx. x x) →β (λx. x x) (λx. x x) →β (λx. x x) (λx. x x) →β . . .
+In fact, the term (λx. x x) (λx. x x) does not have a normal form. Compare this with the
+term (λyz. z) ((λx. x x) (λx. x x)). There are two (underlined) redexes: the whole term
+itself and the subterm (λx. x x) (λx. x x). If the first one is contracted then the normal
+form λz. z is reached immediately, but the second redex can be contracted indefinitely.
+
+5
+
+3 Representing Data Types in the λ-Calculus
+To get a grasp of the power of the λ-calculus it is shown how some data types and
+operations on them that are frequently used in functional programming languages—like
+Booleans with Boolean connectives, integers with integer arithmetic, pairs, and lists with
+list operations—can be encoded in the λ-calculus.
+
+3.1 Booleans and Conditionals
+Consider an expression like if b then t else e. To encode this as a λ-term, something of
+the shape λbte. s is needed, where s has to specify that if b holds then the result should
+be t and otherwise it should be e. In order to achieve such behavior of s the Boolean
+values True and False have to be encoded as λ-terms. One possibility is
+True = λxy. x
+False = λxy. y
+Then the if b then t else e of Haskell can be encoded as
+if = λxyz. x y z
+since
+if True t e = (λxyz. x y z) (λxy. x) t e →3β (λxy. x) t e →2β t
+and
+if False t e = (λxyz. x y z) (λxy. y) t e →3β (λxy. y) t e →2β e
+
+3.2 Natural Numbers
+One way to encode (natural) numbers, that is, only the non-negative part of integers, in
+the λ-calculus are the so called Church numerals.
+Definition 8 (Church numerals). Let s and t be λ-terms, and n be a natural number
+(that is, n ∈ N2 ). Then sn t is defined inductively by
+s0 t = t
+sn+1 t = s (sn t)
+The Church numerals (denoted by 0, 1, 2, . . . in the following) are defined by
+n = λf x. f n x
+2
+
+For the purpose of this note N always denotes the set {0, 1, 2, 3, . . . } of non-negative integers.
+
+6
+
+Example 4. Using the above definition, the first four Church numerals are given by
+0 = λf x. x
+1 = λf x. f x
+2 = λf x. f (f x)
+3 = λf x. f (f (f x))
+On first sight this definition does not look very obvious (a reason for that could be that
+it is not), however using the above encoding of numbers, the definitions of addition,
+multiplication, and exponentiation are very succinct, namely
+add = λmnf x. m f (n f x)
+mult = λmnf. m (n f )
+exp = λmn. n m
+Example 5. To familiarize ourselves with Church numerals we reduce the λ-term add 1 2
+to normal form (the contracted redex is underlined in each step):
+add 1 2 = (λmnf x. m f (n f x)) 1 2
+→β (λnf x. 1 f (n f x)) 2
+→β λf x. 1 f (2 f x)
+= λf x. 1 f ((λgy. g (g y)) f x)
+→β λf x. 1 f ((λy. f (f y)) x)
+→β λf x. 1 f (f (f x))
+= λf x. (λgy. g y) f (f (f x))
+→β λf x. (λy. f y) (f (f x))
+→β λf x. f (f (f x)) = 3
+After we have seen that add 1 2 →∗β 3, we investigate why the add combinator works as
+it should. First consider the λmnf x prefix. Here, the m and n are the two parameters
+that add expects. The f and the x are needed since the result of add m n should be a
+Church numeral again, that is, of the shape λf x. t for some term t. Now what happens
+if we apply add to Church numerals m and n? We have
+add m n = (λmnf x. m f (n f x)) m n →2β (λf x. m f (n f x))
+Before we continue, look at the redex n f x. We have
+n f x = (λg y. g n y) f x →2β f n x
+and hence for the redex m f (n f x) we obtain
+m f (n f x) →2β m f (f n x) = (λg y. g m y) f (f n x) →2β f m (f n x) = f m+n x
+
+7
+
+The last identity is left as an exercise. In total, we have add m n →∗β m + n.
+The reasoning for mult is similar but a bit more involved. We start from
+mult m n = (λmnf. m (n f )) m n →2β λf. m (n f )
+and for the redex n f we have
+n f = (λgx. g n x) f →β λx. f n x
+and hence for the redex m (n f ) we obtain
+m (n f ) = (λgx. g m x) ((λgx. g n x) f ) →β (λgx. g m x) (λx. f n x)
+→β λx. (λy. f n y)m x →∗β λx. f nm x
+We leave the proof of (λy. f n y)m x →∗β f nm x as an exercise. In total, we obtain
+mult m n →∗β mn.
+
+3.3 Pairs
+Concerning pairs, some means to construct them—given two values—and to select the
+first and second component are needed. This is achieved with the λ-terms
+Pair = λxyf. f x y
+fst = λp. p True
+snd = λp. p False
+The vigilant reader may already have missed subtraction on natural numbers. The
+reason for this omission is that pairs are needed before subtraction can be defined. For
+Church numerals subtraction is an awfully complex (and costly) operation. We will
+compute subtraction by repeatedly applying the predecessor function. Hence the first
+problem is to obtain λf x. f n x from λf x. f n+1 x, that is, get the Church numeral n from
+n+1 by computing the predecessor function. Consider the function
+pairsucc = λf p. Pair (f (fst p)) (fst p)
+which may be more readable using pattern matching and syntactic sugar for pairs
+pairsucc = λf (x, ). (f x, x)
+If (pairsucc f ) is applied n + 1 times to an argument pair (x, y) then the result is
+(pairsucc f )n+1 (x, y) = (f n+1 x, f n x) (as can be proved by induction on n). The encoding of a Church numeral λf x. f n x basically is the function that applies f n to x (that
+is, f is applied n times to x). Hence the result of
+(λf x. f n+1 x) (pairsucc f ) (Pair x x)
+
+8
+
+is (f n+1 x, f n x) and by selecting the second component the predecessor n of n+1 can
+be obtained. This facilitates the definitions
+pre = λnf x. snd (n (pairsucc f ) (Pair x x))
+sub = λmn. n pre m
+for the predecessor function and subtraction (m − n). Note that by this definition we
+have pre 0 →β 0 and thus, if n is larger than m, we obtain sub m n →∗β 0.
+
+3.4 Lists
+Having pairing and Booleans, a nonempty list x : y can be encoded by the nested
+pairs Pair False (Pair x y) (or (False, (x, y)), if we use syntactic sugar for pairs) where
+False indicates that the list is not empty. Before defining the encoding for empty lists,
+consider the functions that should work on lists. Those are: head, tail, null (checking
+whether a list is empty), and Cons. Most of them are easy:
+Cons = λxy. Pair False (Pair x y)
+head = λz. fst (snd z)
+tail = λz. snd (snd z)
+Now for null the desired result for empty lists is True whereas for nonempty lists it is
+False. For nonempty lists it would suffice to return the first component of the given pair.
+It only remains to define Nil in a way that fst l evaluates to False for nonempty lists and
+to True for empty lists. Since fst = λp. p True the solution is
+Nil = λx. x
+null = fst
+
+4 Recursion
+Consider an implementation of a recursive function in the λ-calculus. For instance the
+list function length. In Haskell it could be implemented by
+length x = if null x then 0
+else 1 + length (tail x)
+Hence it should be possible to write something like
+?
+
+length = λx. if (null x) 0 (add 1 (length (tail x)))
+
+9
+
+The only problem here is that the definition of length already needs the length function (which after all is the point of recursive definitions). The idea is to extend length
+from above by an additional parameter f and replace all occurrences of length by this
+parameter. The result is
+length0 = λf x. if (null x) 0 (add 1 (f (tail x)))
+Since in the end, length should only take one argument, another λ-term has to be added.
+Currently it is not clear how this term should look like, but lets call it Y. Then length
+is defined by
+length = Y length0
+Suppose that Y has the property that for every λ-term t it holds that Y t ≡β t (Y t)
+(where ≡β means that we can apply arbitrarily many β-steps in both directions; formally,
+≡β is the symmetric, transitive, and reflexive closure of →β ) then the following reduction
+is possible (where length corresponds to Y t):
+length ≡β (λf x. if (null x) 0 (add 1 (f (tail x)))) length
+→β λx. if (null x) 0 (add 1 (length (tail x)))
+which yields the desired result. Indeed such a Y exists.
+Definition 9. The ‘Y’-combinator Y—discovered by Haskell B. Curry—is defined by
+Y = λf. (λx. f (x x)) (λx. f (x x))
+and has the fixed point3 property, that is, for all λ-terms t
+Y t ≡β t (Y t)
+A remarkable result is that the content of this chapter until here is sufficient to encode
+almost all Haskell programs that were implemented so far during the lecture, only using
+the λ-calculus. For example, strings are lists of characters, however, on a computer
+characters are essentially numbers.
+
+5 Reduction Strategies
+A reduction strategy (or strategy for short) determines which redex to choose if there is
+more than one possibility. Until now the decision was arbitrary, but when implementing
+β-reduction the computer needs to know exactly what to do. Two natural choices of
+reduction strategies are outlined in the following.
+3
+
+Intuitively speaking, a fixed point of a function f is a value v such that applying f to v always results
+in v. Consequently v = f v = f (f v) = · · · = f n v for an arbitrary n ∈ N. A fixed point combinator
+computes such a fixed point for a given function.
+
+10
+
+Definition 10 (Applicative Order). Applicative order reduction chooses the (necessarily
+unique) rightmost innermost redex first.
+Intuitively, applicative order reduction always reduces the arguments of a function before
+the function call itself. Or put differently: functions are only applied to normal forms.
+Definition 11 (Normal Order). Normal order reduction chooses the (necessarily unique)
+leftmost outermost redex first.
+The “normal” in normal order reduction, stems from the fact that using this reduction
+strategy, whenever a normal form exists, reduction will definitely reach a normal form
+eventually.
+Before we can introduce further reduction strategies (which are closer to actual evaluation strategies that are used by programming languages) we need two ways to classify
+λ-terms.
+Definition 12 (Values). A λ-term that is not an application is called a value.
+Definition 13 (WHNFs). A λ-term is said to be in weak head normal form (WHNF) if
+it satisfies:
+whnf(x) = true
+whnf(λx. t) = true
+whnf((λx. t) u) = false
+whnf(t u) = whnf(t)
+Definition 14 (Call by Value). Call by value reduction stops at values and otherwise
+chooses an outermost redex whose right-hand side has already reduced to a value.
+Like applicative order reduction, call by value reduction reduces arguments of functions
+first. But in addition, it never “peeks” below a lambda.
+Definition 15 (Call by Name). Call by name reduction chooses the same redex as normal
+order reduction, but stops as soon as a WHNF is reached.
+In particular, call by name reduction does not take place below lambdas either.
+Call by value reduction and call by name reduction are tightly connected to two evaluation strategies for programming languages of the same name: call by value evaluation
+and call by name evaluation. Call by value evaluation is a strict or eager evaluation
+strategy that is adopted by most programming languages. Non-strict or lazy programming languages, like Haskell, adopt variants of call by name evaluation, which usually
+means that function arguments are only evaluated on demand.4
+4
+
+Lazy evaluation and call by name are not the same, but quite similar. Lazy evaluation corresponds
+to call by name evaluation where additionally a technique called sharing (or memoization) is used to
+avoid multiple computations of the same expression (this combination is one possible implementation
+of call by need evaluation). However, that’s a different story.
+
+11
+
+Example 6. For example the function call to f in
+
+let f x = x + 1 in f (3 + 2)
+will be evaluated in the following order in Haskell
+f (3 + 2) → (3 + 2) + 1
+→5 + 1
+→6
+Still, it is thinkable to do the derivation in a different order, as in
+f (3 + 2) → f 5
+→5 + 1
+→6
+
+which would be call by value evaluation.
+Note that call by name reduction means that the body of a function without arguments
+is not reduced (since it is in WHNF), for example, in
+foo = (\x -> 1 + 2)
+The redex 1 + 2 inside foo is not reduced as long as foo does not get any argument.
+This is of practical interest because if the function foo is never applied to any argument
+in the remainder of the program then the (useless) effort of evaluating 1 + 2 is avoided.
+(Note that in general the body of a function might contain more costly, possibly even
+non-terminating, computations.)
+Example 7. Consider the λ-term length Nil, computing the length of the empty list. This
+corresponds to the term
+(Y (λf x. if (null x) 0 (add 1 (f (tail x))))) (λx. x)
+having the eight redexes
+tail x
+
+(1)
+
+add 1
+
+(2)
+
+null x
+
+(3)
+
+snd z
+
+(4)
+
+if (null x)
+
+(5)
+
+snd (snd z)
+
+(6)
+
+(λx. f (x x)) (λx. f (x x))
+
+(7)
+
+Y (λf x. if (null x) 0 (add 1 (f (tail x))))
+
+(8)
+
+12
+
+where (4) and (6) are hidden in the definition of tail and (7) is hidden in the definition
+of Y. If scanning for redexes starting at the left then the first one obtained is (8), which
+turns out to be the leftmost outermost redex since it is not a subterm of any other redex.
+Using an outermost strategy will yield the result 0 in some reduction steps. However,
+call by value reduction of the above term causes the reduction
+(λx. f (x x)) (λx. f (x x)) →β f ((λx. f (x x)) (λx. f (x x)))
+→β f (f ((λx. f (x x)) (λx. f (x x))))
+...
+which does not terminate. Indeed, every recursive definition using Y is nonterminating
+under call by value reduction.
+As can be seen from the above example, Y is not suitable for call by value reduction.
+Gladly, there is an alternative to Y that works also in this case.
+Definition 16. The ‘Z’-combinator Z (a slight variation of Y) is defined by
+Z = λf. (λx. f (λy. x x y)) (λx. f (λy. x x y))
+and satisfies the property Z t ≡β t (λx. Z f x) with x ] Z f . While this is not exactly
+the fixed point property, it is close enough in practice.5
+But note that with call by value, also other constructs have to be modified (the astute
+reader might already have noticed that Z length0 Nil still does not terminate). For example, if ... then ... else is usually assumed to be evaluated non-strictly. This can be
+achieved for if by judiciously sprinkling in dummy abstractions and dummy arguments,
+as in the following variant of length0 which together with Z yields a definition of length
+that also works with call by value:
+length = Z (λf x. if (null x) (λy. 0) (λy. add 1 (f (tail x))) x)
+
+6 Chapter Notes
+Similar examples and further information can be found in the literature [1, 4, 6]. An
+important property of the λ-calculus is that β-reduction (that is, computation) gives
+unique results: there is no term s such that s →∗β t and s →∗β u for different normal
+forms t and u. The lambda calculus satisfies this property since it satisfies the stronger
+“Church-Rosser property,” which guarantees that for all terms t and u with t ≡β u we
+can find a common reduct v of t and u, that is, t →∗β v and u →∗β v. We refer to the
+Archive of Formal Proofs [3,5], for a recent, relatively simple, and machine checked proof
+of this fact.
+5
+
+The point of the additional abstraction, is to turn the whole subterm into a value and thereby prevent
+its immediate reduction, which would cause a loop.
+
+13
+
+References
+[1] Henk P. Barendregt and Erik Barendsen. Introduction to lambda calculus. In Aspenæs Workshop on Implementation of Functional Languages, Göteborg. Programming Methodology Group, University of Göteborg and Chalmers University of Technology, 1988.
+[2] Alonzo Church. An unsolvable problem of elementary number theory. American
+Journal of Mathematics, 58(2):345–363, 1936. doi:10.2307/2371045.
+[3] Bertram Felgenhauer, Julian Nagele, Vincent van Oostrom, and Christian Sternagel.
+The Z property. Archive of Formal Proofs, June 2016. https://www.isa-afp.org/
+entries/Rewriting_Z.shtml, Formal proof development.
+[4] Anthony J. Field and Peter Harrison. Functional Programming. Addison-Wesley,
+1988.
+[5] Julian Nagele, Vincent van Oostrom, and Christian Sternagel. A short mechanized
+proof of the Church-Rosser theorem by the Z-property for the λβ-calculus in Nominal
+Isabelle. In Proceedings of the 5th International Workshop on Confluence (IWC),
+2016. arXiv:1609.03139.
+[6] Larry C. Paulson. ML for the Working Programmer. Cambridge University Press,
+second edition, 1996. http://www.cl.cam.ac.uk/~lp15/MLbook/pub-details.
+html.
+[7] Alan M. Turing. On computable numbers, with an application to the entscheidungsproblem. London Mathematical Society, s2-42(1):230–265, 1937. doi:10.1112/
+plms/s2-42.1.230.
+
+14
+
+

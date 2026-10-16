@@ -1,0 +1,990 @@
+.
+
+.
+
+Published: 19 October 2021
+.
+
+.
+
+.
+
+Latest updates: hps://dl.acm.org/doi/10.1145/3486606.3486781
+
+.
+
+.
+
+.
+
+PDF Download
+3486606.3486781.pdf
+30 January 2026
+Total Citations: 7
+Total Downloads: 3722
+
+Citation in BibTeX format
+
+MAXIME CHEVALIER-BOISVERT, Shopify Inc., Oawa, ON, Canada
+
+SPLASH '21: Soware for Humanity
+October 19, 2021
+IL, Chicago, USA
+
+.
+
+.
+
+Conference Sponsors:
+SIGPLAN
+
+.
+
+JEAN BOUSSIER
+
+.
+
+NOAH GIBBS, Shopify Inc., Oawa, ON, Canada
+
+.
+
+.
+
+YJIT: a basic block versioning JIT compiler for CRuby
+
+.
+
+.
+
+RESEARCH-ARTICLE
+
+.
+
+SIXING WU, Shopify Inc., Oawa, ON, Canada
+.
+
+AARON PATTERSON, Shopify Inc., Oawa, ON, Canada
+.
+
+KEVIN NEWTON, Shopify Inc., Oawa, ON, Canada
+
+.
+
+.
+
+View all
+
+.
+
+Open Access Support provided by:
+.
+
+Shopify Inc.
+.
+
+GitHub, Inc.
+
+VMIL 2021: Proceedings of the 13th ACM SIGPLAN International Workshop on Virtual Machines and Intermediate Languages (October 2021)
+hps://doi.org/10.1145/3486606.3486781
+ISBN: 9781450391092
+
+YJIT: A Basic Block Versioning JIT
+Compiler for CRuby
+Maxime Chevalier-Boisvert
+
+Noah Gibbs
+
+Jean Boussier
+
+Shopify
+Canada
+maxime.chevalierboisvert@shopify.com
+
+Shopify
+United Kingdom
+noah.gibbs@shopify.com
+
+Shopify
+France
+jean.boussier@shopify.com
+
+Si Xing (Alan) Wu
+
+Aaron Patterson
+
+Kevin Newton
+
+Shopify
+Canada
+paper@alanwu.email
+
+Shopify
+United States
+aaron.patterson@shopify.com
+
+Shopify
+United States
+kevin.newton@shopify.com
+
+John Hawthorn
+GitHub
+Canada
+john@hawthorn.email
+
+Abstract
+
+Keywords: just-in-time, compiler, dynamically typed, optimization, bytecode, ruby
+
+Ruby is a dynamically typed programming language with
+a large breadth of features which has grown in popularity
+with the rise of the modern web, and remains at the core of
+the implementation of many widely-used websites.
+CRuby, the default implementation of the language, features a JIT compiler known as MJIT, but developers often do
+not enable it in production environments, because it does
+not always yield performance improvements on real-world
+software. Attempts to independently reimplement the Ruby
+language, such as JRuby and TruffleRuby have shown impressive performance results on benchmarks, but often lag
+behind CRuby when it comes to supporting new additions
+to the language, which limits their adoption.
+We introduce YJIT, a new JIT compiler built inside CRuby
+based on a Lazy Basic Block Versioning (LBBV) architecture.
+We show that while our compiler does not match the peak
+performance of TruffleRuby, it offers near-100% compatibility with existing Ruby code, impressively fast warmup, and
+speedups from 15% to 19% on sizeable benchmarks based on
+real-world software.
+
+ACM Reference Format:
+Maxime Chevalier-Boisvert, Noah Gibbs, Jean Boussier, Si Xing
+(Alan) Wu, Aaron Patterson, Kevin Newton, and John Hawthorn.
+2021. YJIT: A Basic Block Versioning JIT Compiler for CRuby. In
+Proceedings of the 13th ACM SIGPLAN International Workshop on
+Virtual Machines and Intermediate Languages (VMIL ’21), October
+19, 2021, Chicago, IL, USA. ACM, New York, NY, USA, 8 pages.
+https://doi.org/10.1145/3486606.3486781
+
+1 Introduction
+Ruby is a programming language featuring dynamic typing
+and garbage collection, as well as both object-oriented and
+functional programming constructs. The language, which
+takes inspiration from Perl and Smalltalk, has grown in popularity with the rise of the modern web, and remains at the
+core of the implementation of many widely-used websites.
+The feature-rich and highly dynamic nature of Ruby make
+it challenging to optimize. CRuby, the official Ruby implementation, includes a JIT compiler known as MJIT, but despite impressive numbers on synthetic benchmarks, MJIT
+has not, thus far, yielded speedups in production workloads.
+Large-scale enterprise users such as Shopify and GitHub
+typically leave it disabled, relying on the CRuby interpreter
+only.
+There are ongoing efforts, such as JRuby and TruffleRuby,
+to produce alternative Ruby implementations. These have
+shown great peak performance numbers, but for a variety of
+reasons, both practical and political, real-world deployments
+are still very limited. The current situation mirrors that of
+alternative reimplementations of other existing languages.
+TruffleRuby, JRuby, PyPy and LuaJIT are all impressive implementation efforts with attractive performance numbers,
+but there is often a gap in terms of compatibility with and
+
+CCS Concepts: · Software and its engineering → Justin-time compilers.
+
+This work is licensed under a Creative Commons Attribution 4.0 International License.
+VMIL ’21, October 19, 2021, Chicago, IL, USA
+© 2021 Copyright held by the owner/author(s).
+ACM ISBN 978-1-4503-9109-2/21/10.
+https://doi.org/10.1145/3486606.3486781
+
+25
+
+VMIL ’21, October 19, 2021, Chicago, IL, USA
+
+M. Chevalier-Boisvert, N. Gibbs, J. Boussier, S. X. Wu, A. Patterson, K. Newton, and J. Hawthorn
+
+support for all the features of the latest reference implementation. This gap makes it challenging for users to switch.
+YJIT is an open source1 development effort being led at
+Shopify, with active participation from developers at GitHub,
+to build a new JIT compiler for Ruby inside the reference
+CRuby implementation. Retrofitting a new JIT compiler into
+an older codebase which was not originally designed with
+JIT compilation in mind presents its own set of challenges,
+however, it also comes with some important benefits. Namely,
+YJIT is nearly 100% compatible with the latest CRuby as
+well as all existing Ruby packages, and it is practically a
+drop-in replacement for existing CRuby binaries, making
+deployment very straightforward. As of today, YJIT has been
+able to pass all of the nearly 30,000 CRuby unit tests, and
+to match the reference CRuby implementation in all of the
+tests in the Shopify and GitHub continuous integration (CI)
+test suites.
+The architecture of YJIT is based on a Lazy Basic Block Versioning (LBBV) JIT compiler architecture [6, 7]. This workin-progress paper provides clear evidence that such an architecture can realistically scale to large, real-world software,
+providing both fast warmup times and significant speedups.
+Our contributions are:
+
+such as integer arithmetic are not primitive operations in
+the language and are instead calls to methods which can
+be redefined at run-time. Ruby has support for first-class
+environments which allow local variable access from outside
+the local scope. That is, callees can redefine local variables
+in their callers. This can make a number of compiler optimizations more challenging to implement correctly.
+2.2 The CRuby Virtual Machine
+The core of CRuby is a stack-based interpreter, which executes YARV bytecode instructions [17] one at a time, with
+each instruction able to push and pop values off of the temporary stack. A second separate stack is used to keep track
+of control frame objects corresponding to activation records
+for method calls. We will mention specific aspects that are
+relevant to this work, but the design of the CRuby VM is
+explained in great detail in the book Ruby Under a Microscope [19].
+CRuby uses a system of tag bits to differentiate small
+immediate values such as fixnums (63-bit integers), as well
+as the constants true, false, and nil from heap objects,
+and a generational mark and sweep garbage collector which
+has the ability to move objects in memory.
+Ruby, taking inspiration from Smalltalk, makes heavy use
+of method calls. Internally, there are multiple different types
+of method calls, including calls to Ruby methods, calls to
+blocks (a special kind of closure), and calls to methods that
+are implemented in C. CRuby internally categorizes methods into 11 different types, each with a slightly different
+implementation of the send instruction [19]. This makes optimization work difficult because the send operation cannot
+easily be reduced to one single atomic primitive.
+
+• An open source implementation of YJIT, a JIT compiler
+based on LBBV for the Ruby programming language
+which is highly compatible with existing Ruby code.
+• Empirical evidence that a JIT compiler based on an
+LBBV architecture can deliver fast warmup times on
+benchmarks based on real-world software.
+• Empirical evidence that YJIT produces speedups relative to the current CRuby interpreter and MJIT on
+benchmarks based on real-world software.
+Section 2 of this paper delves into some background about
+Ruby and its reference implementation. Section 3 surveys
+key details of the architecture and implementation of YJIT.
+Section 4 looks at performance results and warmup time
+on benchmarks. Finally, section 5 surveys related work and
+section 6 outlines directions for future work.
+
+2.3
+
+MJIT compiles Ruby source by generating C source code.
+It calls an external C compiler, then loads the output via
+dynamic linking. Outputting C source code allows MJIT to
+reuse parts of the interpreter’s source in its output where
+appropriate, allowing for ease of development. It uses a background thread to generate C code and waits for the external
+C compiler to produce a shared library.
+MJIT translates Ruby methods to C functions largely by
+concatenating the interpreter’s implementation of bytecode
+instructions. Branch instructions are mapped to C control
+flow constructs and method call instructions have special
+handling. MJIT uses the same monomorphic inline cache
+structure as the interpreter to specialize call sites. For select
+callees that are leaves (do not make further calls), MJIT is
+able to avoid creating a stack frame. Calls to other compiled
+methods are done through a function pointer.
+MJIT benefits from optimizations implemented in the C
+compiler. Additionally, using C means MJIT can target different machine architectures relatively easily. However, using
+
+2 Background
+2.1
+
+MJIT
+
+The Ruby Programming Language
+
+Ruby has a very broad set of features and makes JavaScript
+look minimalistic by comparison. For instance, there are
+four different types of executable objects in Ruby: methods,
+blocks, procs, and lambdas. This broad set of features, in and
+of itself, makes implementing the language more challenging.
+There is more implementation work, and there are more
+potential edge cases to consider.
+Ruby method calls perform dynamic dispatch. Methods
+can be dynamically redefined and the method lookup order can also be dynamically changed. Common operations
+1 https://github.com/Shopify/yjit
+
+26
+
+YJIT: A Basic Block Versioning JIT Compiler for CRuby
+
+VMIL ’21, October 19, 2021, Chicago, IL, USA
+
+an external compiler means MJIT does not have full control over compilation time. MJIT currently uses the same
+C compiler used to build the interpreter, which might have
+unsatisfactory performance in the context of JIT compilation. Lack of control over code generation details also makes
+implementing techniques such as code patching difficult,
+limiting optimization opportunities.
+
+2.4
+
+3.1
+
+Integration with CRuby
+
+YJIT uses CRuby’s direct-threaded interpreter as a baseline.
+A counter monitors how many times a given method is called,
+and when a threshold is hit (currently 10 calls by default),
+YJIT begins incrementally generating code for said method.
+A JIT entry point is installed, which all future calls to the
+method will dispatch to. Generated code for methods with
+branches may include stubs that are only executed when a
+given target of a branch is hit. These stubs call back into YJIT
+(see Figure 1), which lazily generates more code on demand,
+patches the stub, and returns control to the newly generated
+code.
+
+Lazy Basic Block Versioning
+
+YJIT is built on an architecture based on LBBV, as described
+in previous works [6, 7]. This architecture aims to provide
+fast compilation times while generating relatively efficient
+machine code when compared to a traditional baseline JIT
+compiler, without relying on expensive fixed-point program
+analyses and transformations.
+Code for methods is compiled incrementally, one basic
+block at a time, as opposed to method-based compilers which
+treat whole methods as compilation units. LBBV can be seen
+as a form of lazy evaluation applied to code generation. This
+is achieved by using stubs and code patching. Code generation proceeds for as long as the compiler can determine the
+direction of a branch. When a branch whose direction cannot be determined is encountered, branch stubs are installed,
+and execution is resumed. Hitting a stub in turn interrupts
+execution to resume code generation.
+LBBV interleaves code generation and execution, which
+opens up opportunities to specialize code based on the types,
+values, and execution paths that are encountered at run-time.
+Code that is not executed is never compiled. Machine code is
+appended to an array, and stubs are generated in a separate
+out-of-line (not inline) memory region so that they do not
+impact the instruction cache when they are not executed. The
+resulting generated code tends to be fairly linear and follows
+the natural flow of execution seen at run-time, helping reduce
+the occurrence of branch mispredictions.
+To prevent a code size explosion due to the generation
+of multiple versions of basic blocks, YJIT relies on the same
+simple scheme described in [6], that is, we allow a fixed,
+maximum number of versions to be generated for each block
+(currently set to 4 by default). The last version generated
+must always be generic, in that it can accept any incoming
+value types.
+
+Figure 1. YJIT Compilation Pipeline.
+
+3 Architecture of YJIT
+
+The CRuby bytecode is rich and complex, and YJIT does
+not implement every operation on every type. Guards are
+used to specialize the fast path for various operations. When
+guards fail, YJIT can exit back to the interpreter, even in
+the middle of a method. This is done by restoring the interpreter’s stack pointer and program counter, and then returning control to the interpreter. During development, statistics
+are routinely gathered to establish which operations cause
+us to exit to the interpreter most frequently, which guides
+our development, with the goal of maximizing time spent in
+code we generate.
+For the sake of simplicity, YJIT uses the same calling convention and stack frame layout as CRuby, which makes entering and leaving generated code relatively simple. At this
+stage, YJIT also uses the CRuby stack to store temporary
+values, and has no register allocator. This is far from optimal, but it simplifies interfacing with the CRuby GC, and we
+believe that the main source of overhead, at present, is the
+inefficiency of the CRuby calling convention (see Section 6).
+
+Currently, YJIT only targets Linux and macOS platforms and
+x86-64 CPUs. This is in part motivated by the desire to prototype quickly, but also because the servers that run Shopify
+and GitHub’s software are currently x86-64 machines running Linux. Future versions may add ARM64 support. YJIT
+supports all Ruby 3 features.
+
+The architecture of YJIT allows fine-grained code invalidation at the level of individual basic blocks versions. That is,
+individual versions of a basic block can be invalidated if specific assumptions made at code generation time are found to
+
+3.2
+
+27
+
+Deoptimization
+
+VMIL ’21, October 19, 2021, Chicago, IL, USA
+
+M. Chevalier-Boisvert, N. Gibbs, J. Boussier, S. X. Wu, A. Patterson, K. Newton, and J. Hawthorn
+
+be violated at run-time. We make use of this to speculate that
+operations such as integer addition and subtraction will not
+be redefined at run-time, that constants will not be redefined,
+and that methods we are calling will not be redefined.
+3.3
+
+time, either positive or negative. This is likely because execution time is dominated by bottlenecks in the CRuby implementation, such as inefficient method calls and instance
+variable accesses (see Section 6). Hence, we cannot yet make
+any claims about the impact of type specialization in this
+paper, but it is our belief that the impact will be positive once
+these inefficiencies are addressed.
+
+Run-Time Value Promotion
+
+We implemented a technique originally described by Armin
+Rigo and used in the Psyco VM for Python [13], then subsequently implemented in PyPy [2]. That is, YJIT can promote
+run-time values to compile-time constants, implementing
+the equivalent of Psyco’s unlift operator. This is done by
+interrupting compilation and inserting a new stub which
+will then peek at the run-time value, and resume compilation once the value is known. The use of LBBV makes this
+relatively simple because our architecture naturally allows
+incrementally compiling subsets of a method.
+YJIT relies on the promotion of run-time values to implement a mechanism that is functionally similar to polymorphic inline caches. When generating code for an instance
+variable read instruction, we peek at the run-time value and
+determine its class, so that we can generate specialized machine code for reading the requested property on the class
+that was encountered. If at run-time, an object of a new class
+is encountered, this causes a jump to a stub, which will call
+back in to the JIT to generate a specialized instance variable
+read for the new class, again using the same run-time value
+promotion mechanism. The same technique is also used to
+specialize method calls based on the class of the receiver, and
+when the identity of callees is known, type information can
+be propagated interprocedurally.
+3.4
+
+4 Evaluation
+A list of benchmarks used in our experiments is provided
+in Table 2, along with the number of instruction sequences
+(iseqs) compiled by YJIT to give an idea of scale and complexity. Methods which are never called are never compiled. We
+have intentionally avoided using microbenchmarks in our
+evaluation, and favored benchmarks that are based on realworld software. Our largest benchmarks are liquid-render,
+which renders Shopify’s Liquid web template language, activerecord, which is based on the widely-used database access middleware, and railsbench, using the Ruby on Rails
+web framework.
+The optcarrot benchmark is a synthetic benchmark that
+implements a Nintendo console emulator. We have included
+it because it is sizeable, and was considered an optimization
+target by the Ruby core developers in the development of
+CRuby for a long time. The Lee benchmark was written by
+Chris Seaton, key contributor on the TruffleRuby project, to
+experiment with transactional memory.
+The 30k_methods and 30k_ifelse benchmarks are synthetic benchmarks written by us, designed to be a torture
+test for YJIT. These were not included for performance comparisons against other systems, but rather to assess whether
+large code size would lead to a collapse of performance due
+to instruction cache misses. Each benchmark features several
+thousand small methods that call each other in an acyclic call
+graph with depth 30. The generated code is large enough that
+it cannot completely fit in the L1 instruction cache of any
+modern CPU. The 30k_ifelse benchmark has conditional
+branches to make branch prediction more challenging.
+To increase the stability of our benchmark results, experiments were performed on AWS c5.metal dedicated instances
+with CPU frequency scaling disabled. The AWS instances
+used were running Ubuntu Linux 20.04 on Intel Xeon Cascade Lake processors. Each benchmark run was given 500
+warmup iterations before 200 timing iterations were performed. Final results are averaged over 15 full runs for CRuby,
+YJIT, MJIT, and TruffleRuby.
+Experiments with CRuby’s MJIT used version 3.0.2, while
+experiments on YJIT were based on CRuby version 3.1.0dev,
+YJIT commit hash e9990eda712 . We used a publicly released
+version of CRuby to benchmark MJIT because there are often
+performance bugs in prerelease versions. For benchmarks
+
+Type Specialization
+
+As in prior works on LBBV [6, 7], YJIT implements a scheme
+to track and propagate type information, which is then used
+to specialize machine code. Table 1 outlines the types which
+are currently tracked by YJIT.
+Table 1. Basic types tracked by YJIT.
+Type
+Description
+IMM
+Immediate value of unknown type
+FALSE
+The immediate value false
+NIL
+The immediate value nil
+TRUE
+The immediate value true
+FIXNUM
+Immediate 63-bit signed integer
+FLONUM
+Immediate floating point value
+STATIC_SYMBOL Immediate Ruby symbol
+HEAP
+Heap-allocated object of unknown type
+ARRAY
+Dynamically-extensible list
+HASH
+Map of keys to values
+STRING
+Character string
+We note that this type specialization does not appear to
+have a measurable impact on performance at this point in
+
+2 https://github.com/Shopify/yjit
+
+28
+
+YJIT: A Basic Block Versioning JIT Compiler for CRuby
+
+VMIL ’21, October 19, 2021, Chicago, IL, USA
+
+Table 2. Number of compiled instruction sequences (iseqs).
+Benchmark
+
+Description
+
+Compiled iseqs
+
+30k_ifelse
+30k_methods
+lee
+optcarrot
+psych-load
+liquid-render
+activerecord
+railsbench
+
+Calling over 9000 methods in a loop with conditionals
+Calling over 5000 methods in a loop
+Solving electronic circuit routing using Lee’s algorithm
+Emulating a Nintendo NES console
+Loading a large YAML file
+Rendering Liquid templates
+Fetching from a SQLite database using ActiveRecord
+Generating HTTP responses with a Rails application
+
+9258
+5777
+71
+197
+60
+144
+190
+1381
+
+using MJIT, we specified the command-line arguments -jit-max-cache=10000 as well as --jit-min-calls=10 to
+enable it to reach the best peak performance possible.3 For
+experiments with TruffleRuby, version 21.2.0 of the JVM
+implementation was used as recommended by members of
+the TruffleRuby team, with the --jvm command-line switch.
+4.1
+
+benchmark. Notably, it tends to perform worse on benchmarks that call many native C functions, such as psych-load,
+as TruffleRuby uses an interpreter and JIT to run C extensions rather than directly running the native code. We also
+note that YJIT, which warms up very fast and predictably,
+produces performance numbers with very little variance. In
+contrast, TruffleRuby, presumably because it uses complex
+heuristics and background compilation threads, has nondeterministic warmup behavior, and sometimes produces
+numbers with high variance, as exemplified by railsbench.
+The 30k_methods and 30k_ifelse benchmarks, which
+cannot entirely fit into the L1 instruction cache by design,
+clearly demonstrate that a large code size does not automatically translate into poor performance. LBBV generates linear
+code with more easy to predict branches, which helps the
+processor prefetching logic avoid costly i-cache misses.
+
+Performance on Benchmarks
+
+4.2 Warmup Time
+As shown in Table 3, the warmup time for YJIT is very fast,
+with clear speedups over the interpreter and MJIT even on
+the first iteration, and even on activerecord, which runs
+for less than 200ms. MJIT, which relies on an external C compiler in a background thread for compilation, has somewhat
+slower warmup. TruffleRuby, being that it initially relies on
+a tree-walking interpreter, has very high latency for the first
+many iterations, a problem which can get worse on larger
+programs. It also shows much more variance across time. It
+is a more sophisticated, but also less predictable VM.
+Figure 3 is a plot of the time taken per iteration over the total run-time of the railsbench program, for the interpreter,
+MJIT, YJIT and TruffleRuby. This data is averaged over 6
+independent runs for each VM. On this benchmark, MJIT
+yields a small speedup over the interpreter, on the order of
+4%. YJIT warms up almost instantly, and TruffleRuby takes
+slightly over 120s to reach and then exceed the performance
+of YJIT. The latency for TruffleRuby is initially very high,
+which can be problematic for web applications. There is also
+a subsequent temporary loss of performance, again resulting
+in very high latency, presumably due to deoptimization.
+
+Figure 2. Mean execution time on benchmarks, normalized
+to the time taken by the interpreter (lower is better).
+The results in Figure 2 show a comparison of the mean
+execution time after warmup for the CRuby interpreter, YJIT,
+MJIT, and TruffleRuby. Importantly, YJIT is always faster
+than the interpreter, which is not the case for MJIT. Even on
+railsbench, our most complex benchmark, YJIT achieves a
+speedup of 14% over the interpreter. Its performance compares favorably to that of MJIT, particularly when looking
+at benchmarks such as liquid-render, activerecord, and
+railsbench, which are all based on real-world software.
+TruffleRuby, having the most sophisticated optimizations,
+and being a more mature JIT compiler, tends to have the
+best peak performance, though this is not the case on every
+3 https://k0kubun.medium.com/?p=756310f235a
+
+29
+
+VMIL ’21, October 19, 2021, Chicago, IL, USA
+
+M. Chevalier-Boisvert, N. Gibbs, J. Boussier, S. X. Wu, A. Patterson, K. Newton, and J. Hawthorn
+
+Table 3. Execution times at various iterations during the warmup process (lower is better) for 6 runs of every benchmark.
+
+Iter #
+
+No-JIT
+ActiveRecord
+
+YJIT
+ActiveRecord
+
+MJIT
+ActiveRecord
+
+Truffle
+ActiveRecord
+
+No-JIT
+Railsbench
+
+YJIT
+Railsbench
+
+MJIT
+Railsbench
+
+Truffle
+Railsbench
+
+1
+5
+10
+50
+100
+200
+500
+
+167𝑚𝑠 ± 0.8%
+166𝑚𝑠 ± 0.9%
+166𝑚𝑠 ± 0.8%
+166𝑚𝑠 ± 0.8%
+166𝑚𝑠 ± 0.7%
+166𝑚𝑠 ± 0.7%
+166𝑚𝑠 ± 0.8%
+
+140𝑚𝑠 ± 0.7%
+134𝑚𝑠 ± 0.6%
+133𝑚𝑠 ± 0.6%
+134𝑚𝑠 ± 0.7%
+134𝑚𝑠 ± 0.7%
+134𝑚𝑠 ± 0.7%
+134𝑚𝑠 ± 0.6%
+
+179𝑚𝑠 ± 0.8%
+178𝑚𝑠 ± 0.6%
+177𝑚𝑠 ± 1.4%
+177𝑚𝑠 ± 1.2%
+178𝑚𝑠 ± 1.8%
+178𝑚𝑠 ± 1.3%
+177𝑚𝑠 ± 1.4%
+
+1.1𝑠 ± 2.7%
+809𝑚𝑠 ± 9.0%
+486𝑚𝑠 ± 14.6%
+190𝑚𝑠 ± 4.6%
+154𝑚𝑠 ± 14.1%
+101𝑚𝑠 ± 9.8%
+60.4𝑚𝑠 ± 14.6%
+
+3.8𝑠 ± 0.5%
+3.7𝑠 ± 1.2%
+3.8𝑠 ± 1.1%
+3.8𝑠 ± 0.9%
+3.9𝑠 ± 0.9%
+4.0𝑠 ± 1.1%
+4.0𝑠 ± 2.5%
+
+3.4𝑠 ± 0.9%
+3.3𝑠 ± 0.7%
+3.4𝑠 ± 1.8%
+3.4𝑠 ± 2.2%
+3.4𝑠 ± 1.6%
+3.5𝑠 ± 1.8%
+3.6𝑠 ± 1.2%
+
+3.7𝑠 ± 1.9%
+3.8𝑠 ± 3.0%
+3.8𝑠 ± 2.7%
+3.8𝑠 ± 2.5%
+3.8𝑠 ± 2.8%
+3.9𝑠 ± 1.4%
+3.9𝑠 ± 1.2%
+
+18.9𝑠 ± 3.4%
+5.4𝑠 ± 3.3%
+4.5𝑠 ± 7.1%
+2.9𝑠 ± 2.6%
+2.2𝑠 ± 2.3%
+2.4𝑠 ± 6.7%
+2.1𝑠 ± 8.6%
+
+iteration of the main benchmark loop, demonstrating that
+there is no direct correlation between generated code size
+and performance.
+
+5 Related Work
+Smalltalk & Self Key ideas in dynamic language optimization, such as the use of inline caches and maps, which are
+now more commonly referred to as object shapes, can be
+traced back to Smalltalk [10] and Self [5].
+Quickening is a technique for optimizing the performance
+of interpreters [4] by using inline caching to dispatch to
+specialized versions of bytecode instructions. This results
+in code which is easier for the compiler to optimize and
+has fewer unpredictable branches. YJIT leverages LBBV to
+achieve the same benefits and more, but quickening has the
+advantage that it is easier to implement and does not involve
+code generation.
+Run-time Value Promotion The Psyco prototype for
+Python [13] proposed the notion of specializing an interpreter based on the running program. A key concept was
+the idea of promoting run-time values to compile-time so
+that code could be specialized based on these. This notion
+was later successfully adapted to JavaScript [8]. YJIT also implements run-time value promotion and uses it to specialize
+instance variable accesses and method calls.
+PyPy and Meta-Tracing The PyPy project began as a followup to Psyco. PyPy [2, 3] uses a tracing JIT compiler to
+trace through a Python interpreter, itself written in an restricted subset of Python known as RPython [1]. This interpreter contains a few special annotations which help the
+tracing JIT unroll it into compiled and optimized native code.
+Lazy Basic Block Versioning is a novel kind of JIT compiler architecture first introduced in [6] and subsequently
+extended to propagate type information interprocedurally
+in [7]. The technique has been adapted for use in functional
+programming languages such as Scheme [14, 15] and to optimize gradual typing [12].
+JRuby is a JVM-based implementation of Ruby [16, 23] which
+is still in active development. It leverages JVM features aimed
+at optimizing dynamic languages such as invokedynamic
+and offers very competitive performance results on some
+
+Figure 3. Time per iteration over total run-time averaged
+over 6 runs of one benchmark (lower is better).
+4.3
+
+Code Size
+Table 4. Generated code size for each benchmark.
+Benchmark
+
+Inline code size
+
+Outlined code size
+
+30k_ifelse
+30k_methods
+activerecord
+lee
+liquid-render
+optcarrot
+psych-load
+railsbench
+
+5.21 MiB
+2.03 MiB
+796 KiB
+144 KiB
+337 KiB
+381 KiB
+132 KiB
+1.85 MiB
+
+5.26 MiB
+2.12 MiB
+744 KiB
+132 KiB
+317 KiB
+402 KiB
+120 KiB
+1.69 MiB
+
+In Table 4 we list the inline code size versus the outlined
+code size for each benchmark. The code size metrics give us a
+general sense of the scale and complexity of each benchmark.
+By keeping a separate outlined area for stubs and side-exits,
+we avoid interrupting the flow of code generated for method
+bodies. The 30k_ifelse benchmark has very large code size
+by design, and YJIT still delivers a very large performance
+gain, even though every single method gets executed in each
+
+30
+
+YJIT: A Basic Block Versioning JIT Compiler for CRuby
+
+VMIL ’21, October 19, 2021, Chicago, IL, USA
+
+benchmarks. However, warmup times can be lengthy on
+larger benchmarks, and it greatly lacks when it comes to
+compatibility with existing Ruby code, because it does not
+support native Ruby gems, which are very common.
+TruffleRuby is an implementation of Ruby based on the
+Truffle/Graal platform. The Truffle platform for building
+VMs bears some similarity to the idea of meta-tracing found
+in PyPy. An annotated interpreter is written for the source
+language, and this interpreter is automatically rewritten and
+compiled into optimized code using partial evaluation [21,
+22]. TruffleRuby began by reusing code shared with JRuby,
+and eventually became an independent Ruby implementation. It benefits from many years of work on The Truffle
+platform, but also integrates optimizations that are specific
+to Ruby [9, 11, 18].
+Stripe’s Sorbet Compiler Stripe has recently announced
+that they will be open sourcing an ahead-of-time Ruby compiler4 they have been working on. This compiler translates
+Ruby source files with additional Sorbet type annotations
+(gradual typing) into Ruby gems that integrate with the
+CRuby VM. Their motivations for building a compiler that
+integrates with CRuby include compatibility and ease of
+deployment, similarly to YJIT.
+Other Ruby implementations There has been a surprisingly large number of projects aiming to implement Ruby
+JIT compilers and VMs, though most of these are no longer
+being maintaned. To name a few: Vidar Hokstad’s Ruby compiler, IronRuby, LLRB, MacRuby, MagLev, Ruby OMR, RTL
+MJIT, Rubinius, RubyX, and Topaz.
+
+believe that the same solution can be used in CRuby to greatly
+improve the performance of instance variable accesses.
+Optimizing Backend At the moment, YJIT directly generates machine code targetting x86-64. It would be desirable,
+both for the sake of portability, and to enable some simple
+low-level optimizations, to introduce some kind of intermediate representation between Ruby bytecode and the machine
+code we generate. Implementing this new level of abstraction could add some complexity to the system, and has the
+potential to slow down YJIT’s warmup somewhat, but it may
+also lead to a codebase that is easier to maintain and better
+performance in the long run.
+
+7 Discussion & Conclusion
+We have presented YJIT, an open source JIT compiler built
+inside CRuby. This compiler is based on an LBBV JIT compiler architecture, and, although it is still in early stages of
+development, our empirical data suggests that it succeeds in
+delivering fast warmup times and significant performance
+improvements over both the CRuby interpreter and MJIT.
+YJIT is nearly 100% compatible with existing Ruby code
+and is able to match CRuby on all the tests in the Shopify and
+GitHub backend test suites. It has very fast and predictable
+warmup characteristics, delivering speedups on the first iteration, even for short-running benchmarks. Speedups from
+15% to 19% over the CRuby interpreter were achieved on
+sizeable benchmarks based on real-world software.
+Given that there are multiple obvious improvements that
+we can make to the design of YJIT, we have a clear path
+forward in terms of directions to pursue to enable YJIT to
+deliver much bigger speedups in the future.
+
+6 Future Work
+Faster Calling Convention Ruby is a programming language dominated by method calls. Basic constructs like loops
+to iterate over elements of an arrays are typically implemented as method calls with block arguments (closures)
+and most method bodies are very short. The way CRuby
+implements method calls is meant to be convenient for an
+interpreter, but it is clearly suboptimal for a JIT compiler.
+Each send instruction must set up a new control frame object
+that lives on a separate stack, and write multiple fields to it.
+We believe that the overhead from method calls currently
+dominates execution time. Inlining is possible in some cases,
+but in order to become performance-competitive, CRuby will
+need a faster calling convention, otherwise the current design will always impose an upper bound on the performance
+that can be achieved.
+Object Shapes Similarly to method calls, the scheme used
+in CRuby for instance variable accesses is very costly, with
+multiple dynamic checks required for every read and write.
+This is likely to become a performance bottleneck. Modern
+dynamic language implementations have converged on the
+use of object shapes to solve this problem [5, 7, 20] and we
+
+References
+[1] Davide Ancona, Massimo Ancona, Antonio Cuni, and Nicholas D.
+Matsakis. 2007. RPython: A Step towards Reconciling Dynamically
+and Statically Typed OO Languages. In Proceedings of the 2007 Symposium on Dynamic Languages (Montreal, Quebec, Canada) (DLS ’07).
+Association for Computing Machinery, New York, NY, USA, 53ś64.
+https://doi.org/10.1145/1297081.1297091
+[2] Carl Friedrich Bolz, Antonio Cuni, Maciej Fijałkowski, Michael
+Leuschel, Samuele Pedroni, and Armin Rigo. 2011. Runtime Feedback in a Meta-Tracing JIT for Efficient Dynamic Languages. In Proceedings of the 6th Workshop on Implementation, Compilation, Optimization of Object-Oriented Languages, Programs and Systems (Lancaster, United Kingdom) (ICOOOLPS ’11). Association for Computing Machinery, New York, NY, USA, Article 9, 8 pages. https:
+//doi.org/10.1145/2069172.2069181
+[3] Carl Friedrich Bolz, Antonio Cuni, Maciej Fijalkowski, and Armin
+Rigo. 2009. Tracing the Meta-Level: PyPy’s Tracing JIT Compiler. In
+Proceedings of the 4th Workshop on the Implementation, Compilation,
+Optimization of Object-Oriented Languages and Programming Systems
+(Genova, Italy) (ICOOOLPS ’09). Association for Computing Machinery,
+New York, NY, USA, 18ś25. https://doi.org/10.1145/1565824.1565827
+[4] Stefan Brunthaler. 2010. Efficient Interpretation Using Quickening.
+SIGPLAN Not. 45, 12 (Oct. 2010), 1ś14. https://doi.org/10.1145/1899661.
+1869633
+
+4 https://sorbet.org/blog/2021/07/30/open-sourcing-sorbet-compiler
+
+31
+
+VMIL ’21, October 19, 2021, Chicago, IL, USA
+
+M. Chevalier-Boisvert, N. Gibbs, J. Boussier, S. X. Wu, A. Patterson, K. Newton, and J. Hawthorn
+
+[5] C. Chambers, D. Ungar, and E. Lee. 1989. An Efficient Implementation
+of SELF a Dynamically-Typed Object-Oriented Language Based on
+Prototypes. In Conference Proceedings on Object-Oriented Programming
+Systems, Languages and Applications (New Orleans, Louisiana, USA)
+(OOPSLA ’89). Association for Computing Machinery, New York, NY,
+USA, 49ś70. https://doi.org/10.1145/74877.74884
+[6] Maxime Chevalier-Boisvert and Marc Feeley. 2015. Simple and Effective Type Check Removal through Lazy Basic Block Versioning. In
+29th European Conference on Object-Oriented Programming, ECOOP
+2015, July 5-10, 2015, Prague, Czech Republic (LIPIcs, Vol. 37), John Tang
+Boyland (Ed.). Schloss Dagstuhl - Leibniz-Zentrum für Informatik,
+101ś123. https://doi.org/10.4230/LIPIcs.ECOOP.2015.101
+[7] Maxime Chevalier-Boisvert and Marc Feeley. 2016. Interprocedural
+Type Specialization of JavaScript Programs Without Type Analysis.
+In 30th European Conference on Object-Oriented Programming, ECOOP
+2016, July 18-22, 2016, Rome, Italy (LIPIcs, Vol. 56), Shriram Krishnamurthi and Benjamin S. Lerner (Eds.). Schloss Dagstuhl - LeibnizZentrum für Informatik, 7:1ś7:24. https://doi.org/10.4230/LIPIcs.
+ECOOP.2016.7
+[8] Igor Costa, Péricles Alves, Henrique Nazaré Santos, and Fernando Magno Quintão Pereira. 2013. Just-in-time value specialization. In Proceedings of the 2013 IEEE/ACM International Symposium on Code Generation and Optimization (CGO). 1ś11. https:
+//doi.org/10.1109/CGO.2013.6495006
+[9] Benoit Daloze, Stefan Marr, Daniele Bonetta, and Hanspeter Mössenböck. 2016. Efficient and Thread-Safe Objects for DynamicallyTyped Languages. In Proceedings of the 2016 ACM SIGPLAN International Conference on Object-Oriented Programming, Systems, Languages, and Applications (Amsterdam, Netherlands) (OOPSLA 2016).
+Association for Computing Machinery, New York, NY, USA, 642ś659.
+https://doi.org/10.1145/2983990.2984001
+[10] L. Peter Deutsch and Allan M. Schiffman. 1984. Efficient Implementation of the Smalltalk-80 System. In Proceedings of the 11th ACM
+SIGACT-SIGPLAN Symposium on Principles of Programming Languages
+(Salt Lake City, Utah, USA) (POPL ’84). Association for Computing
+Machinery, New York, NY, USA, 297ś302. https://doi.org/10.1145/
+800017.800542
+[11] Kevin Menard, Chris Seaton, and Benoit Daloze. 2018. Specializing
+Ropes for Ruby. In Proceedings of the 15th International Conference
+on Managed Languages & Runtimes (Linz, Austria) (ManLang ’18).
+Association for Computing Machinery, New York, NY, USA, Article
+10, 7 pages. https://doi.org/10.1145/3237009.3237026
+[12] Gregor Richards, Ellen Arteca, and Alexi Turcotte. 2017. The VM
+already knew that: leveraging compile-time knowledge to optimize
+gradual typing. Proc. ACM Program. Lang. 1, OOPSLA (2017), 55:1ś
+55:27. https://doi.org/10.1145/3133879
+[13] Armin Rigo. 2004. Representation-Based Just-in-Time Specialization
+and the Psyco Prototype for Python. In Proceedings of the 2004 ACM
+SIGPLAN Symposium on Partial Evaluation and Semantics-Based Program Manipulation (Verona, Italy) (PEPM ’04). Association for Computing Machinery, New York, NY, USA, 15ś26. https://doi.org/10.1145/
+1014007.1014010
+[14] Baptiste Saleil and Marc Feeley. 2017. Interprocedural Specialization
+of Higher-Order Dynamic Languages Without Static Analysis. In 31st
+
+European Conference on Object-Oriented Programming, ECOOP 2017,
+June 19-23, 2017, Barcelona, Spain (LIPIcs, Vol. 74), Peter Müller (Ed.).
+Schloss Dagstuhl - Leibniz-Zentrum für Informatik, 23:1ś23:23. https:
+//doi.org/10.4230/LIPIcs.ECOOP.2017.23
+[15] Baptiste Saleil and Marc Feeley. 2018. Building JIT compilers for
+dynamic languages with low development effort. In Proceedings of
+the 10th ACM SIGPLAN International Workshop on Virtual Machines
+and Intermediate Languages, VMIL@SPLASH 2018, Boston, MA, USA,
+November 4, 2018, Stephen Kell and Stefan Marr (Eds.). ACM, 36ś46.
+https://doi.org/10.1145/3281287.3281294
+[16] Aibek Sarimbekov, Andrej Podzimek, Lubomir Bulej, Yudi Zheng,
+Nathan Ricci, and Walter Binder. 2013. Characteristics of Dynamic
+JVM Languages. In Proceedings of the 7th ACM Workshop on Virtual
+Machines and Intermediate Languages (Indianapolis, Indiana, USA)
+(VMIL ’13). Association for Computing Machinery, New York, NY,
+USA, 11ś20. https://doi.org/10.1145/2542142.2542144
+[17] Koichi Sasada. 2005. YARV: Yet Another RubyVM: Innovating the
+Ruby Interpreter. In Companion to the 20th Annual ACM SIGPLAN
+Conference on Object-Oriented Programming, Systems, Languages, and
+Applications (San Diego, CA, USA) (OOPSLA ’05). Association for Computing Machinery, New York, NY, USA, 158ś159. https://doi.org/10.
+1145/1094855.1094912
+[18] Chris Seaton. 2015. Specialising Dynamic Techniques for Implementing
+the Ruby Programming Language. Ph.D. Dissertation. University of
+Manchester.
+[19] Pat. Shaughnessy. 2013 - 2014. Ruby under a microscope : An illustrated
+guide to ruby internals (1st edition ed.). No Starch Press, San Francisco.
+[20] Andreas Wöß, Christian Wirth, Daniele Bonetta, Chris Seaton, Christian Humer, and Hanspeter Mössenböck. 2014. An Object Storage
+Model for the Truffle Language Implementation Framework. In Proceedings of the 2014 International Conference on Principles and Practices
+of Programming on the Java Platform: Virtual Machines, Languages, and
+Tools (Cracow, Poland) (PPPJ ’14). Association for Computing Machinery, New York, NY, USA, 133ś144. https://doi.org/10.1145/2647508.
+2647517
+[21] Thomas Würthinger, Christian Wimmer, Andreas Wöß, Lukas Stadler,
+Gilles Duboscq, Christian Humer, Gregor Richards, Doug Simon, and
+Mario Wolczko. 2013. One VM to Rule Them All. In Proceedings of the
+2013 ACM International Symposium on New Ideas, New Paradigms, and
+Reflections on Programming & Software (Indianapolis, Indiana, USA)
+(Onward! 2013). Association for Computing Machinery, New York, NY,
+USA, 187ś204. https://doi.org/10.1145/2509578.2509581
+[22] Thomas Würthinger, Andreas Wöß, Lukas Stadler, Gilles Duboscq,
+Doug Simon, and Christian Wimmer. 2012. Self-Optimizing AST Interpreters. In Proceedings of the 8th Symposium on Dynamic Languages
+(Tucson, Arizona, USA) (DLS ’12). Association for Computing Machinery, New York, NY, USA, 73ś82. https://doi.org/10.1145/2384577.
+2384587
+[23] Shijie Xu, David Bremner, and Daniel Heidinga. 2017. Fusing Method
+Handle Graphs for Efficient Dynamic JVM Language Implementations.
+In Proceedings of the 9th ACM SIGPLAN International Workshop on
+Virtual Machines and Intermediate Languages (Vancouver, BC, Canada)
+(VMIL 2017). Association for Computing Machinery, New York, NY,
+USA, 18ś27. https://doi.org/10.1145/3141871.3141874
+
+32
+
+

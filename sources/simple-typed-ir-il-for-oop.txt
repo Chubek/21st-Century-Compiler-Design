@@ -1,0 +1,1572 @@
+A Simple Typed Intermediate Language for Object-Oriented
+Languages
+Juan Chen
+
+David Tarditi
+
+Microsoft Research
+One Microsoft Way
+Redmond, WA 98052
+
+Microsoft Research
+One Microsoft Way
+Redmond, WA 98052
+
+juanchen@microsoft.com
+
+dtarditi@microsoft.com
+
+ABSTRACT
+
+One reason compilers for object-oriented languages have
+not adopted type-preserving compilation is the complexity of traditional class and object encodings. A practical
+compiler requires simple, general and eﬃcient type systems.
+First, compiler writers who are not type theorists should be
+able to understand the type system. Second, the type system needs to cover a large set of realistic language features
+and compiler transformations. Third, the type system needs
+to express standard implementation techniques without introducing extra runtime overhead. Traditional encodings
+are not a good match for these goals. We discuss these encodings more in Section 7.
+This paper describes a simple typed intermediate language LILC (Low-level Intermediate Language with Classes)
+for compiling class-based object-oriented languages. LILC is
+lower level than JVML [25] or CIL [14]. The key ideas are to
+preserve lightweight notions of classes and objects instead of
+compiling them away and to separate name-based subclassing from structure-based subtyping.
+LILC divides types into two parts: one part uses class
+names to type objects and keeps the name-based class hierarchy; the other part uses record types and has structural
+subtyping. Each class has a corresponding record type that
+represents its object layout. Objects and records can be
+coerced to each other with no runtime overhead. Keeping
+classes and objects has a low cost because most interesting
+work, such as ﬁeld fetching, method invocation and cast, is
+done on records.
+Our approach simpliﬁes the type system. First, structural
+recursive types are not necessary because each record type
+can refer to any class name, including the class to which the
+record type corresponds. Second, it simpliﬁes the bounded
+quantiﬁcation that is needed to express inheritance. The
+bounds for type variables are in terms of subclassing, not
+subtyping as in traditional bounded quantiﬁcation. Thus,
+the bounds must be classes or type variables, not arbitrary
+types. As a result, LILC has decidable type checking.
+The contributions of this work include:
+
+Traditional class and object encodings are diﬃcult to use
+in practical type-preserving compilers because of the complexity of the encodings. We propose a simple typed intermediate language for compiling object-oriented languages
+and prove its soundness. The key ideas are to preserve
+lightweight notions of classes and objects instead of compiling them away and to separate name-based subclassing
+from structure-based subtyping. The language can express
+standard implementation techniques for both dynamic dispatch and runtime type tests. It has decidable type checking
+even with subtyping between quantiﬁed types with diﬀerent
+bounds. Because of its simplicity, the language is a more
+suitable starting point for a practical type-preserving compiler than traditional encoding techniques.
+
+Categories and Subject Descriptors
+D.3.3 [Programming Languages]: Language Constructs
+and Features—Classes and Objects; D.3.1 [Programming
+Languages]: Formal Deﬁnitions and Theory
+
+General Terms
+Languages
+
+Keywords
+Typed intermediate language, class and object encoding
+
+1.
+
+INTRODUCTION
+
+Preserving types during compilation has signiﬁcant beneﬁts [33, 32, 25, 14]. Types can be used to debug compilers,
+to guide optimizations, and to generate safety proofs for
+programs [26]. In practice, however, compilers for objectoriented languages do not use statically typed low-level intermediate languages, even though their input is statically
+typed.
+
+• LILC is simpler and more natural than traditional encodings. It is also sound and eﬃcient.
+Permission to make digital or hard copies of all or part of this work for
+personal or classroom use is granted without fee provided that copies are
+not made or distributed for profit or commercial advantage and that copies
+bear this notice and the full citation on the first page. To copy otherwise, to
+republish, to post on servers or to redistribute to lists, requires prior specific
+permission and/or a fee.
+POPL’05, January 12–14, 2005, Long Beach, California, USA.
+Copyright 2005 ACM 1-58113-830-X/05/0001 ...$5.00.
+
+• LILC can express standard implementation strategies
+for self application, dynamic type dispatch, and runtime type tests.
+LILC uses existential types and invariant array types
+to describe covariant source-level array types. It can
+also express runtime “store checks”.
+
+38
+
+We use the following example throughout the paper:
+
+tag(Point)
+tag
+vtable
+
+class Point {
+int x;
+int distance(){. . .}}
+
+distance
+
+x
+
+The object layout of Point is shown in Figure 1. Type
+R(Point) represents this layout naturally:
+Instructions
+for distance
+
+R(Point) =
+{vtable : {tag : Tag(Point),
+distance : (∃α  Point. α) → int},
+x : int}
+
+Figure 1: Object Layout for Point
+
+The tag of a class C identiﬁes C at run time. Its type
+is represented as Tag(C), where T ag is an abstract type
+constructor. For simplicity, we treat tags as abstract.
+An object of C can be coerced to a record of type R(C)
+and vice versa. The coercions are no-ops at run time and
+introduce no overhead.
+Object Creation To create an object of class C, we create a record of R(C) and then coerce the record to an object.
+Field Fetch To fetch a ﬁeld from an object, we coerce
+the object to a record and fetch the ﬁeld from the record.
+Method Invocation To call a method on an object o
+of class C, we coerce o to a record, fetch the vtable from
+the record, then fetch the method from the vtable, and
+pass o (after packing it to have type ∃α  C. α) to the
+method. This is exactly how most compilers implement virtual method invocation, if we ignore types and coercions,
+which turn into no-ops at run time anyway.
+R(C) speciﬁes the full shape of an object of C, including
+the ﬁelds and methods from C’s super classes. The inherited members must have the same order in C as in C’s super
+classes, and appear before the members speciﬁc to C. Suppose class Point2D extends class Point as follows:
+
+By supporting the decomposition of runtime primitives such as type cast and runtime store checks, LILC
+makes the interface between the runtime system and
+compiled code more explicit and checkable.
+The rest of the paper is organized as follows. Section 2
+gives an informal overview of LILC . The next two sections
+explain the syntax and semantics of LILC . Section 5 describes a source language and the translation from the source
+language to LILC . Section 6 presents some extensions. Section 7 discusses related work and Section 8 concludes.
+
+2.
+
+OVERVIEW
+
+This section describes informally how LILC addresses the
+implementation of object-oriented features such as object
+layout, inheritance, dynamic dispatch and runtime type tests.
+Roughly speaking, LILC supports features in Featherweight
+Java [21], assignments and arrays. For clarity, we make
+some simpliﬁcations. First, we omit non-virtual methods.
+The compiler can transform those methods to global functions (with explicit “this” pointers) because it knows all call
+sites of those methods. Second, we make each class contain
+declarations of all its members, including the inherited ones
+from its super classes. Third, we rename variables so that
+they are all unique. Finally, we omit null references and
+consider only proper objects.
+
+class Point2D : Point{
+int y;
+int distance(){. . . y . . .}}
+R(Point2D) will be the following type :
+R(Point2D) =
+{vtable : {tag : T ag(Point2D),
+distance : (∃α  Point2D. α) → int},
+x : int, y : int}
+
+2.1 Object Layout
+LILC has both class names and record types. We use B,
+C and D to range over class names. Each class name C
+has a corresponding record type R(C) that describes its object layout—the organization of ﬁelds, methods and runtime
+tags. R is not a constructor in LILC , but a “macro” used
+by the type checker (Section 4.1.1).
+We use a standard object layout. An object of C contains
+a vtable of C and ﬁelds. Therefore, R(C) is a record type
+containing entries for C’s vtable and ﬁelds. The vtable is a
+record that includes a runtime tag for the class and function
+pointers for the virtual methods. The runtime tag contains
+class-speciﬁc information and is used to identify the class.
+As shown in Section 4.1.1, it is easy to substitute other
+layout strategies for the current one.
+The type of a ﬁeld or a method in R(C) can refer to
+any class name declared in the program, including C. This
+allows a straightforward typing of self-application semantics [22], where each method takes the “this” pointer as its
+ﬁrst parameter. LILC assigns the type ∃α  C. α, which
+represents objects of class C or C’s subclasses, to the “this”
+pointer of methods in C. We explain the type in Section 2.2.
+
+R(Point2D) includes members in Point, but it has its own
+tag and its own type for the “this” pointer.
+
+2.2 Subclassing and Bounded Quantification
+LILC deﬁnes a subclassing relation “” between class
+names to preserve the name-based class hierarchy in the
+source program. If a class C extends class B, then C  B.
+For example, Point2D  Point. The subclassing relation is
+reﬂexive and transitive.
+In most source languages, a class name C describes objects of C and C’s subclasses. LILC translates a source-level
+class name C to an existential type with subclassing-based
+quantiﬁcation: ∃α  C. α, where α indicates the “actual”
+class. Objects that have type C or one of C’s subclasses can
+be packed to have type ∃α  C. α. A class name in LILC
+represents only objects of itself.
+Similarly, type variables introduced by universal types can
+have bounds too. Type ∀α  C. τ describes terms (polymorphic functions) that work on C and any subclass of C.
+
+39
+
+The bound of a type variable must be a class name or
+another type variable, not an arbitrary type. The bound
+never refers to the type variable it constrains1 .
+
+tag(C)
+
+tag(B)
+
+tag
+
+2.3 Dynamic Dispatch
+Dynamic dispatch requires a distinction between the static
+type and the dynamic type of an object. LILC uses class
+names for “exact” types (dynamic types) and existential
+types for “imprecise” types (static types).
+By having “exact” notions, LILC excludes unsafe dynamic
+dispatch. Consider the following function:
+
+vtable of C
+
+Figure 2: Tag Chains
+Inheritance Subsumption If C  B and an object o
+has type ∃α  C. α, then o can be used wherever an object
+of class B or B’s subclasses (type ∃α  B. α) is expected.
+Inherited Method Implementation A subclass can inherit a method implementation from its super classes. Suppose class C is a subclass of B. The “this” pointer of methods in C has type ∃α  C. α. The “this” pointer of methods in B has type ∃α  B. α. Because (∃α  C. α) ≤
+(∃α  B. α), a function that takes a parameter of type
+∃α  B. α can be used as one with a parameter of type
+∃α  C. α, that is, C can use B’s method implementation.
+Subclassing is distinct from subtyping. If C  B and C
+and B are diﬀerent classes, then C is not a subtype of B, and
+neither is R(C) a subtype of R(B), because C represents
+objects of exact C. An object of exact C cannot be used
+where an object of exact B is needed.
+
+void Test(Point p1 , Point p2 ){
+vt = p1 .vtable;
+dist = vt.distance;
+dist(p2 ); }
+This function is unsafe, even though the distance method
+fetched from p1 requires an object of Point and p2 is indeed
+an object of Point. The function Test can be called in an
+unsafe way:
+Point point1 = new Point2D(. . .);
+Point point2 = new Point(. . .);
+Test(point1 , point2 );
+The argument point1 is an object of Point2D. The distance method fetched from point1 ’s vtable accesses the ﬁeld
+y, which point2 does not have. A language without a way to
+express “exact” dynamic types cannot catch such errors.
+In LILC , if an object has type τ and its vtable contains
+a method m, then only objects of type ∃α  τ . α can be
+passed to the “this” pointer of m. In this representation,
+Test is translated to an ill-typed function:
+
+2.5 Type Cast
+It is diﬃcult to model the implementation of downward
+type casts in a typed language. Most typed intermediate
+languages treat downcast as a primitive.
+Downward type casts check at run time whether an arbitrary object belongs to some class or its subclasses. In a
+typical implementation, each class stores a tag in its vtable.
+If C extends B, then the tag of C has a pointer pointing
+to the tag of B (Figure 2). The pointers form a tag chain.
+Downward type casts fetch tags in the chain and compare
+them with the tag of the target class.
+This implementation can be expressed as a well-typed
+function in LILC that can be used for arbitrary objects and
+arbitrary classes. The key ideas are to use types to connect an object with the tag it contains, and to reﬁne types
+according to the tag comparison result.
+The tag of class C is represented as a constant tag(C),
+which has type Tag(C). If an object has type τ , then the
+tag it contains has type Tag(τ ). The type checker checks
+the connection at object creation sites.
+Tag comparison is based on that two classes are the same
+iﬀ their tags are equal. If an object o has type τ and the
+tag in o is equal to tag(C), then τ = C. If one of the parent
+tag, which identiﬁes a parent class of τ , is equal to tag(C),
+then τ  C and o can be packed to have type ∃δ  C. δ.
+Figure 3 shows a global polymorphic function that implements downcast.
+More details of the function are in
+Section 4.1.3. Primitive “ifEqTag” compares tags and “ifParent” tests whether there exists a parent tag. Each of
+them corresponds to only two x86 instructions—compare
+and branch. We could further break down the primitives by
+exposing tag details. The details are irrelevant to our basic
+ideas, so we keep tags abstract for simplicity.
+A companion technical report explains how to express optimizations of the above linear search, such as caching the
+
+void Test(p1 : ∃α  Point. α, p2 : ∃β  Point. β){
+(α, p1 ) = open(p1 );
+p1 = toRecord(p1 );
+vt = p1 .vtable;
+dist = vt.distance;
+dist(p2 ); //ill-typed! }
+p1 has type α and dist requires an object of type ∃δ  α. δ.
+Object p2 does not have this type.
+
+2.4 Subtyping
+LILC also has structural subtyping, represented by “≤”.
+The subtyping relation is reﬂexive and transitive.
+Record types have standard preﬁx subtyping and depth
+subtyping on immutable ﬁelds. By preﬁx subtyping, appending more ﬁelds to a record type creates a subtype. The
+super type is a preﬁx of the subtype. Specializing immutable
+ﬁeld types leads to depth subtyping. LILC excludes depth
+subtyping on mutable ﬁelds to preserve soundness. The label order in a record type is signiﬁcant because the ﬁelds
+represent the physical layout of data.
+LILC uses record subtyping to approximate the layout of
+an object whose “exact” type is unknown at compile time.
+A detailed explanation is in Section 4.1.1.
+Bounded quantiﬁed types have subtyping. The most frequently used rule is (∃α  C. α) ≤ (∃α  B. α) if C  B.
+It is used for:
+1
+LILC has a much simpler solution to binary methods than
+F-bounded quantiﬁcation [5]. See Section 6.2.
+
+40
+
+f ix Downcast α, β (tα : Tag(α), obj : β) : ∃δ  α. δ =
+//tα : tag of target class α, obj : object to cast
+loop[α, β, β](tα , obj, (c2r(obj).vtable).tag)
+f ix loop α, γ, β  γ (tα : Tag(α), obj : β, tγ : Tag(γ)) : ∃δ  α. δ =
+//tγ : a tag in the tag chain
+ifEqTag∃δα. δ (tγ , tα ) then pack β as δ  γ in (obj : δ) else //γ = α
+ifParent(tγ ) then bind (γ  , tγ ) in loop[α, γ  , β](tα , obj, tγ ) else error[∃δ  α. δ]
+//γ  γ 
+Figure 3: Cast Method
+Standard types in LILC include int, type variables, array
+types, function types and record types {l1φ1 : τ1 , . . . , lnφn :
+τn }. The superscript annotations I or M on record ﬁelds
+indicate immutable or mutable ﬁelds respectively. For convenience, I is often omitted.
+Non-standard types are class names, tag types, bounded
+quantiﬁed types and exact record types. Section 2 explained
+the ﬁrst three types already.
+Exact record types are denoted by “{{” and “}}”. Sometimes the type checker needs to know the full shape of a
+record—all ﬁelds in the record. For example, when a record
+is coerced to an object, the record must have and only have
+the elements speciﬁed in the class declaration. Extra ﬁelds
+are undesirable. The normal record type is imprecise because of preﬁx subtyping. A record of an exact record type
+{{l1φ1 : τ1 , . . . , lnφn : τn }} has and only has ﬁelds labeled as
+l1 , . . . , ln . These ﬁelds have types τ1 , . . . , τn respectively.
+Type R(C), which describes the object layout of C, is an
+exact record type. The vtable in R(C) also has an exact
+record type to exclude extra ﬁelds (extra methods).
+To simplify the type system, LILC has the subtyping rule
+{{l1φ1 : τ1 , . . . , lnφn : τn }} ≤ {l1φ1 : τ1 , . . . , lnφn : τn }.
+Type ∀α1  τ1 . . . . .∀αn  τn .τ is often abbreviated as
+∀α1  τ1 , . . . , αn  τn .τ . Existential types have similar
+abbreviation. The upper bound Topc is often omitted.
+
+most recently successful parent tag, or storing a display of
+super classes [10]. It also explains array casting.
+
+2.6 Arrays
+Covariant array types require runtime “store checks” each
+time an object is stored into an array. If array a has type
+array(B), to store an object of type B in a, we have to
+check whether the object has the “actual” element type of
+a because a might be an array of B’s subclasses.
+LILC uses existential types and invariant array types to
+express source-level array types. LILC type ARRAY (B) =
+∃α  B. {tag : Tag(α), table : array(∃β  α. β)} represents
+source type array(B). The outer existential type binds the
+“actual” element type of the array, and the inner one binds
+the “actual” type of each element. The tag indicates the array element type. The source-level array subtyping is transferred to subtyping on existential types in LILC . If C is a
+subclass of B, then ARRAY (C) ≤ ARRAY (B).
+To store an object in an array, LILC programs must explicitly check whether the object matches the element type
+of the array. The cast routine in Figure 3 will suﬃce. The
+checks are inserted automatically by the translation from
+source programs, and can be eliminated if the type system
+can prove that the elimination is safe.
+LILC relies on runtime checks for array-bounds checking.
+For simplicity, it does not reason about integer constraints.
+
+3.
+
+3.2 Values and Expressions
+
+SYNTAX OF LILC
+v
+hv
+
+LILC extends the polymorphic lambda calculus with class
+names, subclassing, subclassing-based quantiﬁcation and imperative features. Figures 4, 5 and 6 show the syntax. The
+notation • represents empty lists.
+
+e
+
+3.1 Kinds and Types
+Ω | Ωc
+int | C | Tag(τ ) | α | array(τ )
+| ∀α  τ . τ  | ∃α  τ . τ  | (τ1 , . . . , τn ) → τ
+| {l1φ1 : τ1 , . . . , lnφn : τn } | {{l1φ1 : τ1 , . . . , lnφn : τn }}
+tvs ::= • | α  τ, tvs
+φ
+::= I | M
+κ
+τ
+
+::=
+::=
+
+n | ( | C(v) | tag(C) | pack τ as α  τu in (v : τ  )
+τ
+{li = vi }n
+i=1 | [v0 , . . . , vn−1 ]
+| ﬁx g tvs (x1 : τ1 , . . . , xn : τn ) : τ = em
+::= x | n | ( | tag(C) | C(e) | c2r(e) | error[τ ]
+| new[τ ]{li = ei }n
+i=1 | e.l | e1 .li := e2 in e3
+| new[e0 , . . . , en−1 ]τ | e1 [e2 ] | e1 [e2 ] := e3 in e4
+| x : τ = e1 in e2 | x := e1 in e2
+| e[τ1 , . . . , τm ](e1 , . . . , en )
+| pack τ as α  τu in (e : τ  )
+| (α, x) = open(e1 ) in e2
+| ifParent(e) then bind (α, x) in e1 else e2
+| ifEqTagτ (et1 , et2 ) then e1 else e2
+
+::=
+::=
+
+Figure 5: Values and Expressions
+
+Figure 4: Kinds and Types
+
+LILC has the following word-size values: integer literal n,
+label ( (a pointer to a value on the heap), C(v) representing
+an object of C coerced from a record labeled by v, runtime
+tag tag(C) for class C and packed word-size values.
+Large values—records, arrays and functions—are allocated
+on the heap. Function “ﬁx g tvs (x1 : τ1 , . . . , xn : τn ) : τ =
+em ” declares a function g with type variables tvs, formals
+x1 : τ1 , . . . , xn : τn , return type τ and function body em .
+The body em can call g recursively.
+
+LILC uses a special kind Ωc to classify class names: only
+class names and type variables that will be instantiated with
+class names have kind Ωc . Topc is a special class name that
+is a super class of all classes, like System.Object in Microsoft
+CLI. Kind Ωc guarantees that certain operations, such as
+“” and “Tag”, are applied properly. Kind Ω is used for
+other types. Kind Ωc is a subkind of Ω.
+
+41
+
+able and an upper or lower bound of the type variable. The
+bound is a class name or another type variable introduced
+previously in ∆. The typing rule for expression “ifParent”
+introduces type variables with lower bounds (Figure 10).
+A heap environment Σ maps labels to types. A type environment Γ maps variables to types. An entry x :M τ in Γ
+means that variable x is mutable. Substitution τ /α means
+replacing α with τ .
+
+Most expressions in LILC are standard. The notation
+“:=” stands for assignment and “e[e ]” stands for array element access. Expression “new[τ ]{l1 = e1 , . . . , ln = en }”
+creates a record of type τ . Expression “new[e0 , . . . , en−1 ]τ ”
+creates an array of τ . The let expression “x : τ = e in e ”
+speciﬁes the type of the new variable x. The pack expression “pack τ as α  τu in (e : τ  )” hides type τ with a type
+variable α bounded by τu .
+Expression “C(e)” coerces a record e to an object of C,
+and “c2r(e)” coerces an object e to a record.
+Expression “ifParent(e) then bind (α, x) in e1 else e2 ” tests
+whether tag e has a parent tag. If so, a new value variable
+x is introduced to represent the parent tag and a new type
+variable α is bound to the type x indicates, and the control
+transfers to e1 . Otherwise, the control transfers to e2 .
+Expression “ifEqTagτ (et1 , et2 ) then e1 else e2 ” is a conditional branch for tag comparison. If two tags et1 and et2 are
+the same, e1 is evaluated. Otherwise e2 is evaluated. The
+expression speciﬁes the result type τ for the whole expression to simplify type checking.
+Expression “error[τ ]” represents runtime errors, such as
+cast failures. Type τ means that a value of type τ is expected
+if no errors happen. Future versions of LILC will replace
+error expressions with exception handling.
+
+4.1.1 Helper Functions
+We ﬁrst explain three important helper functions that the
+type checker uses.
+The ﬁrst function addT his(τthis , τ ) adds τthis , the type
+for the “this” pointer, to a function type τ .
+addT his(τthis , ∀ tvs (τ1 , . . . , τn ) → τ )
+= ∀ tvs(τthis , τ1 , . . . , τn ) → τ
+Suppose a class C has ﬁelds f1 : s1 , . . . , fn : sn and methods m1 : t1 , . . . , mk : tk . Function R(C) returns an exact
+record type that represents the object layout of C. Function
+ApproxR(α, C) returns a normal record type that approximates R(α) for some type variable α  C.
+R(C) = {{vtable : {{tag : Tag(C),
+m1 : addT his(∃γ  C. γ, t1 ), . . . ,
+mk : addT his(∃γ  C. γ, tk )}},
+f1M : s1 , . . . , fnM : sn }}
+
+3.3 Classes and Programs
+f ield
+method
+class
+H
+V
+prog
+
+::=
+::=
+::=
+::=
+::=
+::=
+
+f :τ
+m : ∀ tvs (τ1 , . . . , τn ) → τ
+−−−→ −−−−−→
+C : B{f ield, method}
+• | H, ( ❀ hv
+• | V, x = v
+−−−→
+(class; H; V ; e)
+
+ApproxR(α, C) = {vtable : {tag : Tag(α),
+m1 : addT his(∃γ  α. γ, t1 ),
+...,
+mk : addT his(∃γ  α. γ, tk )},
+f1M : s1 , . . . , fnM : sn }
+ApproxR(α, Topc) = {vtable : {tag : Tag(α)}}
+In ApproxR(α, C), the tag has type Tag(α) and the “this”
+pointer has type ∃γ  α. γ. ApproxR(α, Topc) contains
+only a vtable and the vtable contains only the tag of α.
+Structural record subtyping guarantees that the approximation of ApproxR is valid. Suppose an object o has type
+∃α  Point. α. It might be an object of Point or any subclass of Point. The layout of o can be approximated by:
+
+Figure 6: Classes and Programs
+A ﬁeld declaration “f : τ ” declares a ﬁeld f of type τ .
+Type τ contains no free type variables. A method declaration “m : ∀ tvs (τ1 , . . . , τn ) → τ ” declares a method m with
+type variables tvs, formal types τ1 , . . . , τn and return type
+τ . Types τ1 , . . . , τn and τ can contain only type variables in
+tvs. Method declarations do not have explicit “this” types.
+A class declaration has a class name, a parent class, a
+→
+collection of ﬁeld declarations and method declarations (−
+ρ
+means a list of items in ρ). Class declarations contain only
+the signatures of their methods, not any implementations.
+Method bodies are translated to functions on the heap, and
+they are called through function pointers inside vtables.
+Finally a program has a set of class declarations, a heap H
+that maps labels to heap values, a set of variable-value bindings V , and a main expression. Method implementations
+and vtables are static data on the heap and are generated
+during the translation from the source language.
+
+4.
+
+ApproxR(α, Point) =
+{vtable : {tag : Tag(α),
+distance : (∃γ  α. γ) → int},
+xM : int }
+If o is actually an object of Point2D, its layout is:
+R(Point2D) =
+{{vtable : {{tag : T ag(Point2D),
+distance : (∃γ  Point2D. γ) → int}},
+xM : int, y M : int}}
+Structural record subtyping in LILC guarantees that
+R(Point2D) ≤ ApproxR(α, Point)[Point2D/α] holds.
+The two helper functions R(C) and ApproxR(α, C) need
+full knowledge of what layout the compiler chooses for objects. Therefore, the layout information is part of the type
+system. However, only three typing rules use the helper
+functions. The rest of the type system is independent of the
+layout strategy. The soundness of the type system only requires that: (1) ApproxR(α, C) ≤ ApproxR(α, B) if C  B;
+(2) R(C) ≤ ApproxR(α, B)[C/α] if C  B (Section C.3 in
+
+LILC SEMANTICS
+
+4.1 Static Semantics
+LILC maintains a class declaration table Θ that maps class
+names to declarations. The class declaration part of a program can serve as such a table.
+A kind environment ∆ tracks type variables in scope and
+their bounds. Each entry in ∆ introduces a new type vari-
+
+42
+
+C ∈ domain(Θ)
+
+Θ; ∆  τ : Ωc
+
+m≥n
+
+Θ; •  C : Ωc
+
+Θ; ∆  Tag(τ ) : Ω
+
+n
+i
+Θ; ∆  {li i : τi }m
+i=1 ≤ {li : τi }i=1
+
+Θ; •  Topc : Ωc
+
+φ
+
+
+
+α  τ ∈ ∆ or α  τ ∈ ∆
+Θ; ∆  α : Ωc
+
+∀1 ≤ i ≤ m,
+
+φ
+
+Θ; ∆  τi ≤ τi
+τi = τi
+
+φ
+
+if φi = I
+if φi = M
+
+φ
+
+Θ; ∆  τ : Ωc
+Θ; ∆, α  τ  τ  : Ω
+
+Θ; ∆  τ : Ωc
+Θ; ∆, α  τ  τ  : Ω
+
+ m
+i
+Θ; ∆  {li i : τi }m
+i=1 ≤ {li : τi }i=1
+
+Θ; ∆  ∀α  τ . τ  : Ω
+
+Θ; ∆  ∃α  τ . τ  : Ω
+
+φi
+m
+Θ; ∆  {{liφi : τi }}m
+i=1 ≤ {li : τi }i=1
+
+Θ; ∆  ti ≤ si ∀1 ≤ i ≤ n Θ; ∆  s ≤ t
+Θ; ∆  (s1 , . . . , sn ) → s ≤ (t1 , . . . , tn ) → t
+
+Figure 7: Selected Kinding Rules
+Θ(C) = C : B{. . .}
+Θ; ∆  C  B
+ατ ∈∆
+Θ; ∆  α  τ
+
+Θ; ∆  τ : Ωc
+Θ; ∆  τ  Topc
+
+ατ ∈∆
+Θ; ∆  τ  α
+
+Θ; ∆  u1  u2 Θ; ∆, α  Topc  τ1 ≤ τ2
+Θ; ∆  (∃α  u1 . τ1 ) ≤ (∃α  u2 . τ2 )
+
+Θ; ∆  τ : Ωc
+Θ; ∆  τ  τ
+
+Θ; ∆  u2  u1 Θ; ∆, α  Topc  τ1 ≤ τ2
+Θ; ∆  (∀α  u1 . τ1 ) ≤ (∀α  u2 . τ2 )
+
+Θ; ∆  τ1  τ2
+Θ; ∆  τ2  τ3
+Θ; ∆  τ1  τ3
+
+Θ; ∆  τ ≤ τ
+
+Θ; ∆  τ1 ≤ τ2 Θ; ∆  τ2 ≤ τ3
+Θ; ∆  τ1 ≤ τ3
+
+Figure 8: Subclassing Rules
+Figure 9: Subtyping Rules
+the appendix of the technical report). The type system is
+parameterized by the compiler layout strategies.
+
+tag et2 can be a tag for type τγ , either a class name or a
+type variable introduced before γ. The checker uses γ = τγ
+to reﬁne the type of the true branch e1 , because γ = τγ
+must hold if the true branch is taken. The false branch has
+no type reﬁnement.
+As usual, a subsumption rule says: if τ1 ≤ τ2 and e has
+type τ1 , then e has type τ2 . No similar rules exist for subclassing because of the exact class notions.
+We elaborate the downcast function in Figure 3 a bit here
+to explain the usage of “ifEqTag”. To cast an object obj
+of type β to a class α, the loop function compares a tag tγ
+in the tag chain of obj with the tag of the target class. tγ
+identiﬁes γ and β  γ. If the two tags are equal, then the
+cast succeeds: obj is packed to have type ∃δ  γ. δ, which
+is ∃δ  α. δ because γ = α. Otherwise, the parent tag of tγ
+is fetched and loop is called recursively. The cast fails if no
+such parent tag exists. The downcast function Downcast
+calls loop with the target tag tα , the object obj and the tag
+in obj’s vtable (of type Tag(β)).
+The typing judgment Θ; Σ hv : τ means under environments Θ and Σ, heap value hv has type τ (Figure 11).
+
+4.1.2 Types
+The kinding judgment Θ; ∆
+τ : κ means that under
+environments Θ and ∆, type τ has kind κ. All rules are
+standard except for the kind Ωc . Figure 7 shows some kinding rules. The rest are in the technical report.
+The subclassing judgment Θ; ∆ τ1  τ2 means that under environments Θ and ∆, τ1 is a subclass of τ2 (Figure 8).
+The subtyping judgment Θ; ∆ τ1 ≤ τ2 means that under
+environments Θ and ∆, τ1 is a subtype of τ2 (Figure 9).
+Subtyping between quantiﬁed types is similar to Castagna
+and Pierce’s ∀ − top rule [9], where the checker ignores the
+bounds of type variables (relax it to Topc) when checking subtyping between the body types. Contrary to LILC ,
+Castagna and Pierce’s bounded quantiﬁcation was based on
+subtyping, and did not have the minimal type property [8].
+
+4.1.3 Expressions
+The typing judgment Θ; ∆; Σ; Γ e : τ means that under environments Θ, ∆, Σ and Γ, expression e has type τ .
+Figure 10 shows all expression typing rules.
+Only records of type R(C) can be coerced to objects of
+C. Coercing an object of C to a record results in a record
+of type R(C). Coercing an object of α to a record results in
+a record of type ApproxR(α, C) if α  C.
+In a call expression “e[τ1 , . . . , τm ](e1 , . . . , en )”, e must have
+a function type ∀tvs(s1 , . . . , sn ) → s. The type arguments
+τ1 , . . . , τm must satisfy the constraints tvs speciﬁes. The
+value arguments e1 , . . . , en have types s1 , . . . sn respectively,
+after the type variables in tvs are replaced with τ1 , . . . , τm .
+In “ifParent(e) then bind (α, x) in e1 else e2 ”, tag e has
+type Tag(τ ) for some type τ . If e has a parent tag, a new
+type variable α is introduced for the super class of τ and a
+new value variable x (of type Tag(α)) is introduced for the
+parent tag.
+In “ifEqTagτ (et1 , et2 ) then e1 else e2 ”, if both et1 and et2
+are tags for concrete class names, the type checker only
+checks the branch to be taken. Otherwise, the ﬁrst tag et1
+must have type Tag(γ) for some type variable γ. The second
+
+Θ; •; Σ; •  vi : τ ∀0 ≤ i ≤ n − 1
+hv array
+Θ; Σ  [v0 , . . . , vn−1 ]τ : array(τ )
+Θ; •; Σ; •  vi : τi ∀1 ≤ i ≤ n
+φ
+
+n
+i
+Θ; Σ  {li = vi }n
+i=1 : {{li : τi }}i=1
+
+hv record
+
+τf = ∀ tvs (τ1 , . . . , τn ) → τ
+Θ; tvs; Σ; g : τf , x1 : τ1 , . . . , xn : τn  em : τ
+Θ; Σ  ﬁx gtvs(x1 : τ1 , . . . , xn : τn ) : τ = em : τf
+
+hv fun
+
+Figure 11: Heap Value Typing Rules
+
+4.1.4 Class Declarations and Programs
+A well-formed class contains all the members inherited
+from its parent, which is solely an implementation strategy
+to simplify looking up members. LILC requires that the
+
+43
+
+var
+
+Θ; ∆; Σ; Γ  x : Γ(x)
+Θ; ∆; Σ; Γ   : Σ()
+
+Θ; ∆; Σ; Γ  n : int
+
+Θ; ∆  τ : Ω
+error
+Θ; ∆; Σ; Γ  error[τ ] : τ
+
+int
+
+C ∈ domain(Θ)
+
+label
+
+Θ; ∆; Σ; Γ  e : C
+c2r c
+Θ; ∆; Σ; Γ  c2r(e) : R(C)
+φn
+τ = {{l1φ1 : τ1 , . . . , ln
+: τn }}
+Θ; ∆; Σ; Γ  ei : τi ∀1 ≤ i ≤ n
+
+Θ; ∆; Σ; Γ  new[τ ]{l1 = e1 , . . . , ln = en } : τ
+
+Θ; ∆; Σ; Γ  e : R(C)
+
+tag
+
+Θ; ∆; Σ; Γ  tag(C) : Tag(C)
+
+Θ; ∆; Σ; Γ  C(e) : C
+
+object
+
+Θ; ∆; Σ; Γ  e : α Θ; ∆  α  C
+c2r tv
+Θ; ∆; Σ; Γ  c2r(e) : ApproxR(α, C)
+φn
+: τn }
+Θ; ∆; Σ; Γ  e : {l1φ1 : τ1 , . . . , ln
+
+record
+
+1≤i≤n
+
+Θ; ∆; Σ; Γ  e.li : τi
+
+φn
+: τn }
+Θ; ∆; Σ; Γ  e1 : {l1φ1 : τ1 , . . . , liM : τi , . . . , ln
+
+Θ; ∆; Σ; Γ  e2 : τi
+
+Θ; ∆; Σ; Γ  e3 : τ
+
+Θ; ∆; Σ; Γ  e1 .li := e2 in e3 : τ
+Θ; ∆; Σ; Γ  ei : τ ∀0 ≤ i ≤ n − 1
+array
+Θ; ∆; Σ; Γ  new[e0 , . . . , en−1 ]τ : array(τ )
+Θ; ∆; Σ; Γ  e1 : array(τ )
+
+Θ; ∆; Σ; Γ  e1 : array(τ )
+
+Θ; ∆; Σ; Γ  e2 : int
+
+Θ; ∆; Σ; Γ, x :M τ  e2 : τ 
+: τ
+
+Θ; ∆; Σ; Γ  x : τ = e1 in e2
+
+let
+
+Θ; ∆; Σ; Γ  e : ∀tvs(τ1 , . . . , τn ) → τ
+tvs = α1  u1 , . . . , αm  um σ = t1 , . . . , tm /tvs
+Θ; ∆  ti  ui [σ] ∀1 ≤ i ≤ m
+Θ; ∆; Σ; Γ  ei : τi [σ] ∀1 ≤ i ≤ n
+Θ; ∆; Σ; Γ  e[t1 , . . . , tm ](e1 , . . . , en ) : τ [σ]
+Θ; ∆  τ  τu
+
+Θ; ∆; Σ; Γ  e4 : τ 
+
+Θ; ∆; Σ; Γ  e3 : τ
+
+Θ; ∆; Σ; Γ  e1 [e2 ] := e3 in e4
+Θ; ∆; Σ; Γ  e1 : τ
+
+Θ; ∆; Σ; Γ  e2 : int
+
+Θ; ∆; Σ; Γ  e1 [e2 ] : τ
+: τ
+
+x :M τ ∈ Γ
+
+Θ; ∆; Σ; Γ  e1 : τ
+
+α∈
+/ domain(∆)
+
+Θ; ∆; Σ; Γ  e2 : τ 
+
+α∈
+/ domain(∆)
+
+Θ; ∆; Σ; Γ  e : τ  [τ /α]
+
+assign
+
+Θ; ∆, α  τ ; Σ; Γ, x : Tag(α)  e1 : τ 
+
+Θ; ∆; Σ; Γ  et2 : Tag(C2 )
+
+C1 = C2
+
+Θ; ∆; Σ; Γ  et2 : Tag(C2 )
+
+Θ; ∆; Σ; Γ  e2 : τ 
+
+: τ
+Θ; ∆; Σ; Γ  e1 : τ
+
+C1 = C2
+
+Θ; ∆; Σ; Γ  e2 : τ
+
+Θ; ∆; Σ; Γ  ifEqTagτ (et1 , et2 ) then e1 else e2 : τ
+Θ; ∆; Σ; Γ  et2 : Tag(τγ )
+Θ; ∆; Σ; Γ  et1 : Tag(γ)
+∆ = ∆1 , P (γ), ∆2 P (γ) = γ  u or P (γ) = γ  u Θ; ∆1  τγ : Ωc
+Θ; ∆; Σ; Γ  e1 : τ [γ/τγ ]
+Θ; ∆; Σ; Γ  e2 : τ
+Θ; ∆; Σ; Γ  ifEqTagτ (et1 , et2 ) then e1 else e2 : τ
+
+ifTag tv
+
+Figure 10: Expression Typing Rules
+
+44
+
+open
+
+pack
+
+Θ; ∆; Σ; Γ  ifEqTagτ (et1 , et2 ) then e1 else e2 : τ
+Θ; ∆; Σ; Γ  et1 : Tag(C1 )
+
+assignA
+
+Θ; ∆; Σ; Γ  (α, x) = open(e1 ) in e2 : τ 
+
+Θ; ∆; Σ; Γ  ifParent(e) then bind (α, x) in e1 else e2
+Θ; ∆; Σ; Γ  et1 : Tag(C1 )
+
+subscript
+
+Θ; ∆; Σ; Γ  e1 : ∃β  τu . τ
+α∈
+/ domain(∆)
+α∈
+/ f ree(τ  )
+Θ; ∆, α  τu ; Σ; Γ, x : τ [α/β]  e2 : τ 
+
+Θ; ∆; Σ; Γ  pack τ as α  τu in (e : τ  ) : ∃α  τu . τ 
+Θ; ∆; Σ; Γ  e : Tag(τ )
+
+assignR
+
+Θ; ∆; Σ; Γ  x := e1 in e2 : τ 
+
+call
+
+field
+
+ifParent
+
+ifTag eq
+
+ifTag neq
+
+Θ; ∆; Σ; Γ  e : τ1
+Θ; ∆  τ1 ≤ τ2
+Θ; ∆; Σ; Γ  e : τ2
+
+sub
+
+parent class be declared before the child class. Figure 12
+shows the rule for class declarations.
+
+expression in a program is not a value, the program can
+always go one more step to another well-formed program.
+
+Θ  Topc{}
+
+Theorem 3 (Decidability of Type Checking). It is
+decidable whether Θ; ∆; Σ; Γ e : τ holds.
+
+Θ  B : D{f1 : s1 , . . . , fp : sp , m1 : t1 , . . . , mq : tq }
+B declared before C in Θ
+D is optional
+p≤n q≤k
+Θ; •  si : Ω ∀p + 1 ≤ i ≤ n
+Θ; •  ti : Ω ∀q + 1 ≤ i ≤ k
+
+Proof sketch: by proving the minimal type property and
+decidability of subtyping. We designed a set of syntaxdirected subtyping rules (without the transitivity rule) of
+the form Θ; ∆  τ1 ≤ τ2 . We proved that the new rules
+terminate and that Θ; ∆ τ1 ≤ τ2 iﬀ Θ; ∆  τ1 ≤ τ2 .
+Similarly, we designed a set of syntax-directed expression
+typing rules (without the subsumption rule) of the form
+Θ; ∆; Σ; Γ  e : τ and proved that: (1) the new rules terminate; (2) if Θ; ∆; Σ; Γ  e : τ , then Θ; ∆; Σ; Γ e : τ ; (3) if
+Θ; ∆; Σ; Γ e : τ , then ∃τm such that Θ; ∆; Σ; Γ  e : τm
+and Θ; ∆ τm ≤ τ .
+
+Θ  C : B{f1 : s1 , . . . , fn : sn , m1 : t1 , . . . , mk : tk }
+
+Figure 12: Well-formedness of Class Declarations
+A program (Θ; H; V ; e) is well-formed with respect to a
+heap environment if its class declaration Θ is well-formed,
+the heap H respects the heap environment, the variablevalue binding V is well-formed and the main expression e
+is well-typed (see Figure 13). The main expression e has
+no free type variables, and refers only to labels in H and
+variables in V .
+
+Lemma 4 (Bounded Joins and Meets). Two types have
+a join (least upper bound) if they have a common upper
+bound. Similarly, two types have a meet (greatest lower
+bound) if they have a common lower bound. Both joins and
+meets are in terms of subtyping.
+
+domain(V ) = domain(Γ)
+Θ; •; Σ; •  V (x) : Γ(x) ∀x ∈ domain(V )
+Θ; Σ  V : Γ
+
+5. SOURCE LANGUAGE AND
+TRANSLATION TO LILC
+
+domain(H) = domain(Σ)
+Θ; Σ  H() : Σ() ∀ ∈ domain(H)
+ΘH:Σ
+Θ  classi ∀1 ≤ i ≤ m
+Θ = class1 , . . . , classm
+ΘH :Σ
+Θ; Σ  V : Γ
+Θ; •; Σ; Γ  e : τ
+
+τ
+e
+
+Σ  (Θ; H; V ; e) : τ
+
+Figure 13: Well-formedness of Programs
+
+4.2 Dynamic Semantics
+Figure 14 shows all the evaluation rules except for congruence rules. The programs in the ﬁrst column evaluate one
+step to the corresponding ones in the second column, if the
+side conditions in the third column hold. Judgment P → P 
+means that program P steps to P  .
+Expressions C(v) and c2r(v) coerce between objects and
+records. “ifParent(tag(C)) then bind (α, x) in e1 else e2 ” steps
+to e1 with α replaced with B and x assigned tag(B), if C
+extends some class B. Otherwise it steps to e2 . Expression
+“ifEqTagτ (tag(C1 ), tag(C2 )) then e1 else e2 ” steps to e1 if
+C1 = C2 , and to e2 otherwise. The evaluation of an error
+expression “error[τ ]” inﬁnitely loops.
+
+4.3 Properties of LILC
+We have proved the soundness of LILC , in the style of
+[34], and the decidability of type checking. Full proofs are
+in the technical report.
+Theorem 1 (Preservation). If Σ
+P  , then ∃Σ such that Σ P  : τ .
+
+P : τ and P →
+
+Theorem 2 (Progress). If Σ P : τ , then either the
+main expression in P is a value, or ∃P  such that P → P  .
+Proof sketch: by standard induction over the typing rules.
+Combining these two theorems, we can conclude that a
+well-formed LILC program never gets stuck: if the main
+
+45
+
+int | C | array(C)
+n | ( | x | x : τ = e1 in e2 | x := e1 in e2
+| new C{f1 = e1 , . . . , fn = en } | e.fi
+| e1 .fi := e2 in e3 | e.m(e1 , . . . , en )
+| new[e0 , . . . , en−1 ]τ | e1 [e2 ] := e3 in e4
+| e1 [e2 ] | cast[C](e) | cast[C[ ]](e)
+:= n | (
+:= C{f1 = v1 , . . . , fn = vn } | [v0 , . . . , vn−1 ]τ
+:= τ m(x1 : τ1 , . . . , xn : τn ) = e
+:= C extends B{f1 : τ1 , . . . , fn : τn ,
+mdecl1 , . . . , mdeclk }
+:= cdecl1 , . . . , cdecln in e
+
+:=
+:=
+
+v
+hv
+mdecl
+cdecl
+prog
+
+Figure 15: Syntax of the Source Language
+The source language is roughly Featherweight Java (FJ) [21]
+enhanced with assignments and one dimensional arrays of
+objects. Figure 15 shows the syntax. All local variables
+and record ﬁelds are mutable. Variables are renamed such
+that no two variables have the same name. A “new” expression is used to create objects instead of constructors as in
+FJ. Expression cast[C[ ]](e) represents casting expression e
+to an array of C. The semantics of the source language is
+standard and is shown in the technical report.
+The source-target translation performs several tasks, besides lowering types and expressions: (1) It collects members for each class, including those from super classes. (2)
+It lifts method deﬁnitions to global functions, after adding
+the “this” parameter. Therefore after translation, class declarations have only method signatures, not method bodies.
+(3) It creates vtables for classes.
+The translation can be optimized, for example, to eliminate pairs of pack and open. We do not focus on those
+optimizations at present.
+
+Original Program
+(H; V ; x)
+(H; V ; c2r(C(v)))
+(H; V ; new[τ ]{l1 = v1 , . . . , ln = vn })
+(H; V ; (.li )
+
+New Program
+(H; V ; V (x))
+(H; V ; v)
+(H  ; V ; ()
+(H; V ; vi )
+
+(H; V ; (.li := vi in e)
+(H; V ; new[v0 , . . . , vn−1 ]τ )
+(H; V ; ([i])
+(H; V ; ([i] := vi in e)
+(H; V ; x : τ = v in e)
+(H; V ; x := v  in e)
+(H; V ; ([τ1 , . . . , τm ](v1 , . . . , vn ))
+(H; V ; (α, x) = open(v) in e0 )
+(H; V ; ifParent(v) then bind (α, x) in e1 else e2 )
+(H; V ; ifParent(v) then bind (α, x) in e1 else e2 )
+(H; V ; ifEqTagτ (v1 , v2 ) then e1 else e2 )
+(H; V ; ifEqTagτ (v1 , v2 ) then e1 else e2 )
+(H; V ; error[τ ])
+
+Side Conditions
+
+H  = H, ( ❀ {li = vi }n
+/ domain(H)
+i=1 ( ∈
+H(()
+= {li = vi }n
+i=1 1 ≤ i ≤ n
+
+∀( = (, H  (( ) = H(( )
+H(() = {l1 = v1 , . . . , ln = vn }
+(H  ; V ; e)
+H  (() = {l1 = v1 , . . . , li = vi , . . . , ln = vn }
+
+
+(H ; V ; ()
+H = H, ( ❀ [v0 , . . . , vn−1 ]τ ( ∈
+/ domain(H)
+(H; V ; vi )
+H(()
+= [v0 , . . . , vn−1 ]τ and 0 ≤ i ≤ n − 1
+
+0 ≤ i < n ∀( = (, H  (( ) = H(( )
+H(() = [v0 , . . . , vn−1 ]τ
+(H  ; V ; e)
+H  (() = [v0 , . . . , vi , . . . , vn−1 ]τ
+
+
+(H; V ; e)
+V = V, x = v
+(H; V  ; e)
+V = V1 , x = v, V2 V  = V1 , x = v  , V2
+
+H(() = ﬁx g tvs (xi : τi )n
+i=1 : τ = em
+(H; V  ; em [0τ /tvs])
+V  = V, x1 = v1 , . . . , xn = vn , g = (
+(H; V  ; e0 [τ /α])
+v = pack τ as β  τu in (v  : τ  ) V  = V, x = v 
+
+(H; V ; e1 [B/α])
+v = tag(C) C extends B V  = V, x = tag(B)
+(H; V ; e2 )
+v = tag(C) C does not extend any class.
+(H; V ; e1 )
+v1 = tag(C1 ), v2 = tag(C2 ), C1 = C2
+(H; V ; e2 )
+v1 = tag(C1 ), v2 = tag(C2 ), C1 = C2
+(H; V ; error[τ ])
+
+Figure 14: Evaluation Rules
+translation is unique. The translation of the new expression
+“new C{fi = ei }n
+i=1 ” creates a record of vtableC (vtable
+of C) and ﬁelds f1 , . . . , fn and then coerces the record to
+an object. The translation of array store instructions inserts store checks: the object to be stored is ﬁrst cast to
+the target element type. The translation of array cast uses
+“Arraycast”, which is similar to “Downcast” and is deﬁned
+in the technical report.
+
+Type Translation Class names are translated to existential types. Covariant array types are translated to existential
+types that hide the actual element types.
+|int|
+=
+|C|
+=
+|array(C)| =
+
+int
+∃α  C. α
+∃α  C.{{tag : T ag(α),
+table : array(∃β  α. β)}}
+|(τ1 , . . . , τn ) → τ | = (|τ1 |, . . . , |τn |) → |τ |
+
+Theorem 5. The translation from the source language to
+P : τ holds in the source lanLILC preserves types. If
+|P | : |τ | holds in LILC , where Σ0 is the
+guage, then Σ0
+environment for the initial heap (H0 in the program translation rule).
+
+Class and Program Translation A method declaration is translated to a pair of a function label and a global
+function deﬁnition with an explicit “this”. Suppose class C
+implements a method m. The translation generates a new
+label lm and translates the method as follows:
+
+6. EXTENSIONS
+
+|τ m(x1 : τ1 , . . . , xn : τn ) = e, C| =
+(lm , ﬁx m (this : ∃α  C. α,
+x1 : |τ1 |, . . . , xn : |τn |) : |τ | = |e|)
+
+6.1 Interfaces
+The subclassing relation can extend to interfaces. If a
+class C implements an interface I, then C  I. An object
+of I has type ∃α  I. α.
+A standard implementation uses an itable to store a tag
+and function pointers for each interface a class implements,
+and compares the tag of each itable entry with the tag of
+the target interface at interface method invocation time2 .
+LILC can express the searching process with some extensions. The itable of class C can have an array type
+array(∃γ  C.{{tag : Tag(γ), methods : RI (γ, C)}}), because
+each entry in the itable represents a super interface of C.
+Each entry is a record of two ﬁelds: a tag and a method
+table. RI is an abstract type constructor for representing
+method tables. RI (I, C) is equivalent to a record type that
+
+A class declaration is translated to a triple: a class declaration in LILC , function deﬁnitions that correspond to
+method declarations and the vtable (see Figure 16). For
+convenience, we use vtableC to represent the label for C’s
+vtable. If S is a sequence of bindings, then S ⊕ b means
+“S, b” if S does not have the item bound in b. Otherwise,
+S ⊕ b means replacing with b the corresponding entry in S.
+“mtype(Θ, m, C)” means the type of method m in class C.
+A program is translated to a set of new class declarations,
+an initial heap that contains function deﬁnitions and vtables,
+and a new main expression.
+Θ = cdecl1 , . . . , cdecln
+|cdecli | = (newci , newmsi , vti ) ∀1 ≤ i ≤ n
+H0 = newms1 , . . . , newmsn , vt1 , . . . , vtn
+
+2
+Some strategies create new objects with specialized itables
+when objects are cast to interfaces. We do not think those
+approaches are practical, because they have diﬃculties with
+mutable ﬁelds and with casting the new objects to other
+types.
+
+|Θ in e| = (newc1 , . . . , newcn ; H0 ; •; |e|)
+Expression Translation Figure 17 shows the translation of expressions. Each new variable introduced during
+
+46
+
+|Topc| = (Topc{}, (), vtableTopc ❀ {tag = tag(Topc)})
+|B| = (B : D{f ieldsB , mtypesB }, mdef sB , vtableB ❀ {tag = tag(B), f psB })
+mdecli deﬁnes mi
+|mdecli , C| = (li , mbodyi ) ∀1 ≤ i ≤ k
+|C extends
+B{f1 : τ1 , . . . , fn : τn , mdecl1 , . . . , mdeclk }| =
+
+
+C : B{f ieldsB , f1 : |τ1 |, . . . , fn : |τn |, mtypesB ⊕ m1 : |mtype(Θ, m1 , C)| ⊕ . . . ⊕ mk : |mtype(Θ, mk , C)|},
+
+ (l1 ❀ mbody1 , . . . , lk ❀ mbodyk ),
+vtableC ❀ {tag = tag(C), f psB ⊕ m1 = l1 ⊕ . . . ⊕ mk = lk }
+Figure 16: Class Declaration Translation
+|n|
+|x|
+|x : τ = e1 in e2 |
+|x := e1 in e2 |
+|new C{fi = ei }n
+i=1 |
+|e.fi |
+|e1 .fi := e2 in e3 |
+|e.m(e1 , . . . , en )|
+|new[e0, . . . , en−1 ]C |
+
+=
+=
+=
+=
+=
+=
+=
+=
+=
+
+|e1 [e2 ]|
+|e1 [e2 ] := e3 in e4 |
+|cast[C](e)|
+|cast[C[ ]](e)|
+
+=
+=
+=
+=
+
+n
+x
+x : |τ | = |e1 | in |e2 |
+x := |e1 | in |e2 |
+pack C as α  C in (C(new[R(C)]{vtable = vtableC , (fi = |ei |)n
+i=1 }) : α)
+(α, x) = open(|e|) in c2r(x).fi
+(α, x) = open(|e1 |) in c2r(x).fi := |e2 | in |e3 |
+(α, x) = open(|e|) in c2r(x).vtable.m(pack α as β  α in (x : β), |e1 |, . . . |en |)
+pack C as α  C in
+({tag = tag(C), table = new[|e0 |, . . . , |en−1 |]|C| } : {{tag : T ag(α), table : array(∃β  α. β)}})
+(α, x) = open(|e1 |) in x.table[|e2 |]
+(α, x) = open(|e1 |) in (β, y) = open(|e3 |) in x.table[|e2 |] := Downcast[α, β](x.tag, y) in |e4 |
+(α, x) = open(|e|) in Downcast[C, α](tag(C), x)
+(α, x) = open(|e|) in Arraycast[C, α](tag(C), x)
+
+Figure 17: Translation of Expressions
+version has undecidable type checking [29, 18]3 . The interaction with constructs such as recursive types, intersection
+types and binary methods further complicates the type system [17, 28, 5, 3].
+The object calculi proposed by Abadi and Cardelli can
+be used to express class-based languages [1]. Object calculi
+use operations on objects as primitives, instead of those on
+records. They are not suitable for addressing low-level details used by the compiler, such as object layout and vtables.
+Some recent work aimed at eﬃcient encodings: Glew’s
+Fself [20], Crary’s OREI [13] and League et al.’s JFlint [24].
+All three calculi and LILC express abstract views of objects
+with type variables and express concrete views with record
+types, but they use diﬀerent mechanisms. To aid comparison, we use the LILC notation “ApproxR” in the explanation. LILC uses coercion “c2r” to coerce an object of type α
+to a record type ApproxR(α, C), if α  C. Fself combined
+F-bounds with equi-recursive types in a “self” constructor. An object of class C has type self α.ApproxR(C, α).
+When unfolded, the object has type α, and α is a subtype
+of ApproxR(α, C). OREI used intersection types ∃α.α ∩
+ApproxR(α, C) to express both views of objects of C. Either
+view can be projected by coercions. JFlint used existentially
+quantiﬁed row variables ∃tail.µself.ApproxR(self, C)+tail4
+to type objects of C. The row variable tail abstracts possible
+extensions in subclasses.
+Among the four eﬃcient calculi, only LILC can specify
+(subclassing) bounds on type variables. As a result, LILC
+can easily express covariant source array types with invariant array types, and with minor extensions it can model
+
+speciﬁes all methods in I. If the tag of interface γ is equal
+to the tag of target interface I, then RI (γ, C) can be reﬁned
+to RI (I, C) and methods can be fetched from it.
+
+6.2 Binary Methods
+A binary method takes a parameter that has the same
+“exact” type as the “this” pointer. A typical example is
+the equality operation. For example, “eq” in class Point
+compares two objects of exact class Point. The subclasses
+must override the “eq” method in the same spirit. The “eq”
+method in Point2D compares two objects of exact Point2D.
+With notions of “exact” types, LILC can express binary
+methods easily. It can use a special annotation on parameters to indicate that those parameters have the same type
+as “this”. The two parameters of a binary method in class
+C, “this” and the annotated parameter, will be given type
+C, not ∃α  C. α, because C’s subclasses have to override
+the binary method. For example, the “eq” method in Point
+will have type Point → Point → bool, and the “eq” method
+in Point2D will have type Point2D → Point2D → bool.
+
+7.
+
+RELATED WORK
+
+The type-theoretic foundations for object-oriented languages have been studied extensively [6, 30, 4, 31, 2, 1,
+15, 20, 13]. Most existing work focused on encoding classes
+and objects to some form of the typed lambda-calculus with
+records and functions. Many encodings use non-standard
+implementation techniques for object-oriented features. Some
+encodings introduce extra runtime overhead [2, 30, 4, 15].
+Two complexities involved in class and object encodings
+are recursion and inheritance. The recursive reference to
+class C in the deﬁnition of C itself is often expressed by recursive types. Bounded quantiﬁcation (based on subtyping)
+is introduced to express inheritance [7], but the full-scale
+
+3
+A restricted variant (Kernel F<: ) has decidable type checking, but it is not very expressive.
+4
+“+” is not a notation in League’s encoding. We use it to
+express concatenation.
+
+47
+
+9. REFERENCES
+
+displays of super classes (for casting) and itables. Also,
+LILC supports type cast implemented by walking through
+tag chains. JFlint used sum types and a one-armed case
+to represent cast. Each class must override a projection
+function that can cast an object to the class, which is nonstandard. In another paper, Glew proposed a mechanism
+to model hierarchical dispatch [19]. He introduced subtyping between tag types, which we think does not agree with
+the convention that a tag uniquely identiﬁes a class. Because of this subtyping, he had to use variance annotations
+on tag types because tag creation and tag comparisons need
+diﬀerent subtyping behaviors.
+Canning et al. separated inheritance and subtyping back
+in 1990 [12]. Their work gave a denotational semantics to
+inheritance. Objects were modeled as ﬁxed points of recursive records, and classes were ﬁxed points of F-bounded
+recursive functions, which made the encoding not as simple
+or as natural as LILC .
+Bruce used matching and match-bounded polymorphism to
+express inheritance [4]. The denotational semantics, which
+can be seen as an encoding, was based on F-bounded quantiﬁcation with ﬁxed points at both the term level and the
+type level. Matching is purely structural. No nominal subclassing relation is preserved.
+Xi et al. presented an object encoding as an application
+of guarded recursive datatype constructors [36]. Classes are
+tags on messages. Subclassing does not imply subtyping.
+Objects are interpreted as functions that can dispatch messages, which diﬀers from the standard implementation of
+objects as records. As a result, fetching ﬁelds and invoking
+methods inherited from super classes have extra overhead.
+Wright et al. compiled a subset of Java to a typed intermediate language [35]. They relied on runtime type checks
+to perform dynamic dispatch and type cast, and used unordered records to represent interfaces.
+Fisher et al. proposed an untyped calculus for compiling
+class-based object-oriented languages [16]. They aimed to
+support inheritance from unknown base classes. Therefore,
+they used dictionary lookups for ﬁeld and method access.
+Necula et al. developed a certifying compiler called SpecialJ for Java [11] as part of the Proof-Carrying Code framework [27]. The compiler translates Java bytecode to x86 assembly code with type annotation, and a safety proof that
+certiﬁes the code. The compiler handles a large subset of
+Java, including exceptions. The type system in SpecialJ uses
+only high-level abstractions such as classes and objects. Subclassing implies subtyping. SpecialJ does not have “exact”
+type notions. As a result, its type system is unsound—the
+unsafe dispatch shown in Section 2.3 would be well-typed in
+SpecialJ [23].
+
+8.
+
+[1] Martin Abadi and Luca Cardelli. A Theory of Objects.
+Springer, New York, 1996.
+[2] Martı́n Abadi, Luca Cardelli, and Ramesh
+Viswanathan. An interpretation of objects and object
+types. In ACM Symposium on Principles of
+Programming Languages, pages 396–409,
+St. Petersburg Beach, Florida, 1996.
+[3] Paolo Baldan, Giorgio Ghelli, and Alessandra
+Raﬀaeta. Basic theory of f-bounded quantiﬁcation.
+Information and Computation, 153(1):173–237, 1999.
+[4] Kim B. Bruce. A paradigmatic object-oriented
+programming language: Design, static typing and
+semantics. Journal of Functional Programming,
+4(2):127–206, 1994.
+[5] Peter Canning, William Cook, Walt Hill, Walter
+Olthoﬀ, and John C. Mitchell. F-bounded
+quantiﬁcation for object-oriented programming. In
+Fourth International Conference on Functional
+Programming Languages and Computer Architecture,
+pages 273–280, 1989.
+[6] Luca Cardelli. A semantics of multiple inheritance.
+Information and Computation, 76(2/3):138–164,
+February/March 1988.
+[7] Luca Cardelli and Peter Wegner. On understanding
+types, data abstraction, and polymorphism. ACM
+Computing Surveys, 17(4):471–522, 1985.
+[8] Giuseppe Castagna and Benjamin C. Pierce.
+Corrigendum: Decidable bounded quantiﬁcation.
+http://www.cis.upenn.edu/∼bcpierce/papers/fsubnewcorrigendum.ps.
+[9] Giuseppe Castagna and Benjamin C. Pierce.
+Decidable bounded quantiﬁcation. In 21st ACM
+Symposium on Principles of Programming Languages,
+pages 151–162. ACM Press, 1994.
+[10] Juan Chen and David Tarditi. A simple typed
+intermediate language for object-oriented languages.
+Technical Report MSR-TR-2004-68, Microsoft
+Corporation.
+ftp://ftp.research.microsoft.com/pub/tr/TR-200468.pdf.
+[11] Christopher Colby, Peter Lee, George C. Necula, Fred
+Blau, Ken Cline, and Mark Plesko. A certifying
+compiler for Java. In ACM SIGPLAN Conference on
+Programming Language Design and Implementation.
+ACM Press, June 2000.
+[12] William R. Cook, Walter Hill, and Peter S. Canning.
+Inheritance is not subtyping. In 17th ACM Symposium
+on Principles of Programming Languages, pages
+125–135. ACM Press, 1990.
+[13] Karl Crary. Simple, eﬃcient object encoding using
+intersection types. Technical report. CMU Technical
+Report CMU-CS-99-100.
+[14] Microsoft Corp. et al. Common Language
+Infrastructure. 2002.
+http://msdn.microsoft.com/net/ecma/.
+[15] Kathleen Fisher. Type Systems for Object-oriented
+Programming Languages. PhD thesis, Stanford
+University, 1996.
+[16] Kathleen Fisher, John H. Reppy, and Jon G. Riecke.
+A calculus for compiling and linking classes. In
+Proceedings of the 9th European Symposium on
+
+CONCLUSION
+
+This paper presents a simple typed intermediate language
+LILC for type-preserving compilation of object-oriented languages. By preserving lightweight class names and restricting bounded quantiﬁcation to subclassing, LILC reduces the
+encoding complexity signiﬁcantly, and it is able to faithfully
+model standard implementation techniques for self application, dynamic dispatch and type cast. It is sound and has
+decidable type checking. We believe LILC is more suitable
+as a starting point for practical compilers than traditional
+encodings.
+
+48
+
+Programming Languages and Systems, pages 135–149.
+Springer-Verlag, 2000.
+[17] Giorgio Ghelli. Recursive types are not conservative
+over F≤ . In Proceedings of the International
+Conference on Typed Lambda Calculi and
+Applications, pages 146–162. Springer-Verlag, 1993.
+[18] Giorgio Ghelli. Divergence of F< type checking.
+Theoretical Computer Science, 139(1–2):131–162,
+1995.
+[19] Neal Glew. Type dispatch for named hierarchical
+types. In ACM SIGPLAN International Conf. on
+Functional Programming, pages 172–182, 1999.
+[20] Neal Glew. An eﬃcient class and object encoding. In
+ACM SIGPLAN Conference on Object-Oriented
+Programming, Systems, Languages, and Applications,
+pages 311–324, 2000.
+[21] Atsushi Igarashi, Benjamin C. Pierce, and Philip
+Wadler. Featherweight Java: a minimal core calculus
+for Java and GJ. ACM Trans. on Programming
+Languages and Systems, 23(3):396–450, 2001.
+[22] S. Kamin. Inheritance in Smalltalk-80: a denotational
+deﬁnition. In 15th ACM Symposium on Principles of
+Programming Languages, pages 80–87. ACM Press,
+1988.
+[23] Christopher League. A Type-preserving Compiler
+Infrastructure. PhD thesis, Yale University, 2002.
+[24] Christopher League, Zhong Shao, and Valery Trifonov.
+Type-preserving compilation of Featherweight Java.
+ACM Trans. on Programming Languages and Systems,
+24(2), March 2002.
+[25] Tim Lindholm and Frank Yellin. The Java Virtual
+Machine Specification. Addison-Wesley, 1999.
+[26] Greg Morrisett, David Walker, Karl Crary, and Neal
+Glew. From System F to typed assembly language.
+ACM Trans. on Programming Languages and Systems,
+21(3):527–568, May 1999.
+[27] George Necula. Proof-Carrying Code. In ACM
+Symposium on Principles of Programming Languages,
+pages 106–119. ACM Press, 1997.
+
+[28] Benjamin C. Pierce. Intersection types and bounded
+polymorphism. In Typed Lambda Calculi and
+Applications, volume 664, pages 346–360.
+Springer-Verlag, 1993.
+[29] Benjamin C. Pierce. Bounded quantiﬁcation is
+undecidable. In Theoretical Aspects of Object-Oriented
+Programming: Types, Semantics, and Language
+Design, pages 427–459. The MIT Press, MA, 1994.
+[30] Benjamin C. Pierce and David N. Turner. Simple
+type-theoretic foundations for object-oriented
+programming. Journal of Functional Programming,
+4(2):207–247, 1994.
+[31] Didier Rémy. Programming objects with ml-art, an
+extension to ml with abstract and record types. In
+International Conference on Theoretical Aspects of
+Computer Software, pages 321–346. Springer-Verlag,
+1994.
+[32] Zhong Shao. An overview of the FLINT/ML compiler.
+In ACM SIGPLAN Workshop on Types in
+Compilation, June 1997.
+[33] D. Tarditi, G. Morrisett, P. Cheng, C. Stone,
+R. Harper, and P. Lee. TIL: A type-directed
+optimizing compiler for ML. In ACM SIGPLAN
+Conference on Programming Language Design and
+Implementation, pages 181–192, 1996.
+[34] Andrew K. Wright and Matthias Felleisen. A syntactic
+approach to type soundness. Information and
+Computation, 115(1):38–94, 1994.
+[35] Andrew K. Wright, Suresh Jagannathan, Cristian
+Ungureanu, and Aaron Hertzmann. Compiling Java to
+a typed lambda-calculus: A preliminary report. In
+Types in Compilation, pages 9–27, 1998.
+[36] Hongwei Xi, Chiyan Chen, and Gang Chen. Guarded
+recursive datatype constructors. In ACM SIGPLAN
+Symposium on Principles of Programming Languages,
+pages 224–235, New Orleans, January 2003.
+
+49
+
+

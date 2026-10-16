@@ -1,0 +1,2913 @@
+Semantic reasoning about the sea of nodes
+Delphine Demange, Yon Fernández de Retana, David Pichardie
+
+To cite this version:
+Delphine Demange, Yon Fernández de Retana, David Pichardie. Semantic reasoning about the sea
+of nodes. CC 2018 - 27th International Conference on Compiler Construction, Feb 2018, Vienna,
+Austria. pp.163-173, �10.1145/3178372.3179503�. �hal-01723236�
+
+HAL Id: hal-01723236
+https://inria.hal.science/hal-01723236v1
+Submitted on 5 Mar 2018
+
+HAL is a multi-disciplinary open access
+archive for the deposit and dissemination of scientific research documents, whether they are published or not. The documents may come from
+teaching and research institutions in France or
+abroad, or from public or private research centers.
+
+L’archive ouverte pluridisciplinaire HAL, est
+destinée au dépôt et à la diffusion de documents
+scientifiques de niveau recherche, publiés ou non,
+émanant des établissements d’enseignement et de
+recherche français ou étrangers, des laboratoires
+publics ou privés.
+
+Semantic Reasoning about the Sea of Nodes
+
+1
+2
+3
+
+56
+57
+58
+
+4
+
+Delphine Demange
+
+Yon Fernández de Retana
+
+David Pichardie
+
+59
+
+5
+
+Univ Rennes / Inria / CNRS / IRISA
+France
+
+Univ Rennes / Inria / CNRS / IRISA
+France
+
+Univ Rennes / Inria /CNRS / IRISA
+France
+
+60
+
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+
+62
+
+Abstract
+
+form have all their variables statically assigned exactly once.
+This apparently simple property makes program easier to
+analyze and optimize, as it makes unambiguous the link
+between the unique definition of a variable and its usage. In
+contrast, analyzing a non-SSA program requires to reason on
+all possible reaching definitions. SSA is now widely adopted
+in many modern compilers (e.g., GCC or LLVM) or code
+generators [13]. There, the SSA form is built on top of a
+control-flow-graph representation of the program, with basic
+blocks holding instruction lists.
+Another important milestone in optimization-dedicated
+program IR is the Sea of Nodes, introduced by Cliff Click in
+his PhD thesis [7]. This IR was first implemented in the Java
+HotSpot [14] compiler – where it remains an important building block. It has inspired a lot of variants, in particular in the
+LibFirm [4] library, and the IR of the Graal framework [12].
+In addition to be a SSA form, the salient property of the
+Sea of Nodes is that it makes program dependencies more
+explicit, while removing unnecessary constraints in the program control-flow graph. In particular, the total order between instructions of a basic block is relaxed. Instead, elementary instructions are linked to their immediate predecessors
+for data and control-flow dependencies. As an example, for
+a program fragment like if b then {x = −a; y = c + 1}, the
+assignment y = c + 1 will float in a graph node linked only
+to the definition of the variable c (data dependence) and
+to another node representing the evaluation of the boolean
+condition b to true (control-flow dependence). Here, the
+program ordering between the assignments to x and y is
+unnecessary, and hence simply erased in the IR. It is only
+later in the compiler back-end that instructions are scheduled:
+instructions are ascribed a specific basic block, and a total
+order on instructions is decided within each basic block. As
+pointed at by Braun et al. [4], having in the IR dependencies
+only is what renders some optimizations simply inherent to
+the program. Some other fast, combined optimizations [6]
+can also be performed that directly operate on the data and
+control dependencies.
+
+The Sea of Nodes intermediate representation was introduced
+by Cliff Click in the mid 90s as an enhanced Static Single Assignment (SSA) form. It improves on the initial SSA form by
+relaxing the total order on instructions in basic blocks into
+explicit data and control dependencies. This makes programs
+more flexible to optimize. This graph-based representation
+is now used in many industrial-strength compilers, such as
+HotSpot or Graal. While the SSA form is now well understood from a semantic perspective – even formally verified
+optimizing compilers use it in their middle-end – very few semantic studies have been conducted about the Sea of Nodes.
+This paper presents a simple but rigorous formal semantics for a Sea of Nodes form. It comprises a denotational
+component to express data computation, and an operational
+component to express control flow. We then prove a fundamental, dominance-based semantic property on Sea of
+Nodes programs which determines the regions of the graph
+where the values of nodes are preserved. Finally, we apply
+our results to prove the semantic correctness of a redundant
+zero-check elimination optimization. All the necessary semantic properties have been mechanically verified in the
+Coq proof assistant.
+CCS Concepts • Software and its engineering → Formal language definitions; Compilers; Formal software
+verification;
+
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49
+50
+51
+
+Keywords Intermediate Representation, Semantics, Sea of
+Nodes, SSA, Verified Compilation
+ACM Reference Format:
+Delphine Demange, Yon Fernández de Retana, and David Pichardie.
+2018. Semantic Reasoning about the Sea of Nodes. In Proceedings
+of 27th International Conference on Compiler Construction (CC’18).
+ACM, New York, NY, USA, 11 pages. https://doi.org/10.1145/3178372.
+3179503
+
+1
+
+Introduction
+
+Compiler designers seek for suitable program intermediate
+representations (IR) that will at the same time simplify the
+design of advanced program optimizations and also enable a
+very efficient implementation of these transformations.
+An important breakthrough in the IR landscape is the
+Static Single Assignment (SSA) form, introduced by Rosen,
+Wegman and Zadeck [19] in the late 80s. Programs in SSA
+
+54
+55
+
+63
+64
+65
+66
+67
+68
+69
+70
+71
+72
+73
+74
+75
+76
+77
+78
+79
+80
+81
+82
+83
+84
+85
+86
+87
+88
+89
+90
+91
+92
+93
+94
+95
+96
+97
+98
+99
+100
+
+SSA in Verified Compilers. During the last ten years, the
+formal verification of realistic compilation techniques has
+become reality, inspired and piloted by the advent of the
+CompCert compiler [17], a formally verified C compiler. The
+SSA representation is arrived more lately in this landscape
+with the independent efforts around CompCertSSA [1] and
+Vellvm [23, 24]. The CompCertSSA [1] project uses a complete, verified validator, for the generation of pruned-SSA,
+based on dominance frontiers [9]. The Vellvm project proves
+
+52
+53
+
+61
+
+CC’18, February 24–25, 2018, Vienna, Austria
+2018. ACM ISBN 978-1-4503-5644-2/18/02. . . $15.00
+https://doi.org/10.1145/3178372.3179503
+1
+
+101
+102
+103
+104
+105
+106
+107
+108
+109
+110
+
+CC’18, February 24–25, 2018, Vienna, Austria
+111
+112
+113
+114
+115
+116
+117
+118
+119
+120
+121
+122
+123
+124
+
+Delphine Demange, Yon Fernández de Retana, and David Pichardie
+
+in [23, 24] a simplified version of the LLVM SSA generation, based on register promotion. Recently, the generation
+algorithm proposed by Braun et al. [3] has been formalized in Isabelle/HOL [5]. Apart from the generation itself,
+some progress has also been made on the formalization of
+the useful invariants and properties of SSA that ease the
+reasoning when it comes to proving optimizations. For instance, [1, 11, 23] formalize the strictness semantic invariant,
+basic equational reasoning and dominance-region reasoning.
+These are semantic tools that allow proving formally the
+correctness of Sparse Conditional Constant Propagation and
+Common Subexpression Elimination based on Global-ValueNumbering [11], or Copy Propagation and micro memory
+optimizations [23].
+
+125
+126
+127
+128
+129
+130
+131
+132
+133
+134
+135
+136
+137
+138
+139
+140
+141
+142
+143
+144
+145
+146
+147
+148
+149
+150
+151
+152
+153
+154
+155
+156
+157
+158
+
+Sea of Nodes Execution Model. The Sea of Nodes representation has not yet been used in a compiler verification
+context. In [7], Click proposes a Petri net execution model
+for the control part of its representation. It is only informally
+described with prose, and has not been, to our knowledge,
+manipulated in correctness proofs.
+Most of the compiler verification literature advocates the
+use of operational semantics to ease the reasoning about
+compiler IRs and transformations in a proof assistant. The
+Petri net model from [7] does not suit this need, and we are
+not aware of any compiler optimization formalization that
+directly operates on a dependency graph a la Sea of Nodes.
+Interestingly, the earliest mechanized formalization of the
+SSA form, dating back to the work of Blech et al. [2], investigates how to reflect data-dependencies in the semantics of
+SSA. Through the use of either term graphs or relational sets,
+they respectively try to capture syntactic dependencies inside expressions, or the partial order defining an evaluation
+strategy for SSA basic blocks. This early work is an interesting outlook on data-dependencies, but it is limited to basic
+SSA only (with instructions bound to their basic blocks), and
+they deal in their proof with a simple code generation from
+a single basic block.
+In contrast, we want to explore the full-fledged Sea of
+Nodes from an optimizing compilation perspective. In particular, the “floating” nature of many nodes in the representation, while allowing for more flexibility for optimizations,
+raises several interesting questions. This includes designing a
+new semantics, necessarily different from the SSA semantics
+found in verified optimizing compilers, that should i) account for sharing between common subexpression graphs,
+and ii) reflect the floating nature of nodes. In turn, this new
+semantics calls for new semantic properties, and optimization proof techniques.
+
+161
+162
+163
+164
+165
+
+166
+
+2
+
+187
+
+Sea of Nodes Syntax and Semantics
+
+In this section, we give a syntax and semantics for a Sea of
+Nodes intermediate representation.
+2.1
+
+167
+168
+169
+170
+171
+172
+173
+174
+175
+176
+177
+178
+179
+180
+181
+182
+183
+184
+185
+186
+
+188
+189
+190
+191
+
+Syntax
+
+192
+
+We represent a Sea of Nodes function with a directed graph
+д. In this graph, nodes represent instructions or auxiliary
+helpers for the control flow. The edges represent dependencies between nodes: an edge from a node n to a node n ′ means
+that n ′ depends on n. Intuitively, evaluating n ′ is necessary
+for evaluating n. The node n is called an input or predecessor
+of n ′, and n ′ is called an output, or successor of n.
+Each node has a unique identifier in the graph, and is
+further defined by its kind (defined below), and the list of
+its input nodes. For a node with identifier n, if its kind is
+Node, and its inputs are n 1 and n 2 , we will use the following
+graphical representation:
+n1 : Node
+
+n2 : Node
+
+193
+194
+195
+196
+197
+198
+199
+200
+201
+202
+203
+204
+205
+206
+
+n: Node
+
+207
+208
+
+In the rest of the paper, to ease visual reading, we use different shades of gray to distinguish the kinds of nodes.
+
+209
+210
+
+Illustrative Example. Before we go further into the technical definition of the Sea of Nodes IR, let us illustrate it on
+a simple example. Figure 1 gives an example of a simple SSA
+program in a basic-block control-flow graph (Figure 1a), and
+its corresponding Sea of Nodes graph (Figure 1b).
+Let us focus on Figure 1a. The program consists of a loop
+incrementing an integer counter. The counter is initialized
+to 1 and incremented of 1 at each iteration, until it reaches
+the value 5. Note that the program is in SSA form. Indeed,
+
+159
+160
+
+of program analyses and optimizations. More precisely, we
+make the following contributions:
+• We define a semantics for a Sea of Nodes form (Section 2). First, the evaluation of data nodes uses an
+intuitive denotational semantics, that closely matches
+the natural interpretation of data nodes as expressions.
+Second, the main execution propagates from one region of the graph to the next according to a small-step,
+operational semantics, as a natural extension of the
+CompCertSSA [1] or Vellvm [23] semantics.
+• We prove a fundamental, semantic property on Sea of
+Nodes graphs (Section 3): during program execution,
+the value given to a data node x keeps valid in all
+regions that are dominated by x.
+• We illustrate this property by proving the semantic
+correctness of a fast redundant zero-check elimination
+algorithm that directly operates on the dominator tree
+of the Sea of Nodes program (Section 4).
+Our formal development within the Coq proof assistant is
+available at http://www.irisa.fr/celtique/ext/sea-of-nodes/.
+
+Contributions. In this work, we propose a formal semantics
+for a Sea of Nodes form, that could serve as a basis for its integration in a verified compiler infrastructure. This requires
+identifying the important semantic properties that this IR
+provides, and that justify formally the semantic correctness
+2
+
+211
+212
+213
+214
+215
+216
+217
+218
+219
+220
+
+Semantic Reasoning about the Sea of Nodes
+221
+
+t
+
+222
+223
+224
+
+x
+v
+r
+B7UrV
+
+225
+226
+227
+228
+
+CC’18, February 24–25, 2018, Vienna, Austria
+each of the basic blocks in the pseudo-code program. Now,
+in order to transit from one region node to another, Sea
+of Nodes resorts on control nodes (p and p ′ nodes in the
+example). Control nodes mark the “end” of a region, similarly
+to branching instructions found at the end of a basic block.
+Another point to note is that node ϕ has region r ′ as an
+input: we need this dependency edge to define the value
+computed by ϕ. As for the SSA form, predecessors of region nodes as well as data node inputs of Phi nodes are
+supposed to be ordered, and their rank is used to trigger the
+evaluation of the right Phi node input. In figures, for clarity,
+predecessors index appears as label on dependency edges
+(see Figure 1b). The dotted arrow from node p ′ to node r ′
+abstracts an auxiliary control node, namely a projection node,
+that we explain in the next paragraph.
+Apart from Phi nodes, data nodes do not depend, at least
+directly, on a region node (see e.g., data nodes x and y), and
+are hence considered as "floating" in the graph. In particular,
+no constraint says whether node x has to be evaluated before
+or after node y, unlike the pseudo-code version could have
+led us to think.
+
+1
+
+S?B(t, x)
++t
+5
+(v == x)
+
+2Hb2
+
+i?2M
+...
+
+229
+230
+
+(a) Program control-flow graph
+
+231
+
+r: Region
+
+232
+233
+
+p: Jmp
+
+234
+235
+236
+237
+238
+239
+240
+241
+242
+243
+
+1
+
+0
+0
+r : Region
+
+φ: Phi
+
+p0 : If
+
+y: Cst5
+
+...
+
+w: Eq
+
+1
+
+0
+
+x: Cst1
+
+z: Add
+
+246
+
+Formal Definition of Nodes Table 1 gathers the formal
+definition of a Sea of Nodes graph. A graph is a (partial)
+map from node identifiers, and each node carries, in its very
+syntax, the identifiers of its input nodes.
+In the table, and in the rest of the paper, we rely on notational conventions to express the kind of a node in its identifiers (e.g., data nodes range over x, y, z . . . , region nodes
+range over r , r ′ . . . ).
+Data nodes represent instructions that compute a numerical value. These include:
+
+Figure 1. Example of an SSA program and its corresponding
+Sea of Nodes graph.
+
+247
+248
+249
+250
+251
+252
+253
+254
+255
+256
+257
+258
+259
+260
+261
+262
+263
+264
+265
+266
+267
+268
+269
+270
+271
+272
+273
+274
+275
+
+277
+278
+279
+280
+281
+282
+283
+284
+285
+286
+287
+288
+289
+290
+291
+292
+293
+294
+295
+296
+297
+
+(b) Sea of Nodes graph. We indicate the indices of predecessors of
+phi-nodes and region nodes on arrow labels.
+
+244
+245
+
+276
+
+each variable is assigned at most once. To ensure this single
+assignment property at control-flow join points, we recall
+that, in SSA, for a junction point with m predecessors, a
+phi-instruction x ← Phi(x 1 , x 2 , . . . , xm ) selects at run-time,
+according to the control-flow path executed, the right definition to use among all definitions x i reaching that junction
+point. The corresponding x k is then assigned to x. In the
+program example, the control-flow join point is at the loop
+header, and the phi-instruction ϕ ← Phi(x,z) is used to
+select the right definition of the counter (among x and z).
+Hence, when entering the loop body for the first time, x will
+be selected. Starting from the second iteration of the loop, z
+will be selected. To define the semantics of phi-instructions,
+one must consider, in one way or the other, that predecessors of a juntion point are ordered, so as to select the right
+argument of the phi-instruction.
+Let us now describe Figure 1b, and highlight important
+aspects of the Sea of Nodes form. There are nodes for both
+data computations (light-grey nodes in Figure 1b) and for
+control-flow execution (dark-grey nodes in Figure 1b).
+As an example of data nodes, z corresponds to the pseudocode z ← ϕ + x, its inputs are nodes ϕ and x. Similarly, w is a
+data node corresponding to the pseudo-code w ← (y == z).
+Nodes related to control-flow execution are more involved.
+Region nodes are analogous to basic-blocks in SSA. In the
+example graph, there are two such nodes, r and r ′, one for
+
+CstN corresponds to a constant N . This node does not
+depend on a region node (it is floating).
+binop(x1 , x2 ) corresponds to binary arithmetic operations. It has two data input nodes x1 and x2 . We consider only arithmetic operations that do not raise exceptions (such as division by zero). These nodes do not
+depend, at least immediately, on a region node.
+Phi(r, x1 , . . . , xm ) corresponds to a phi-instruction. It
+depends on a region node r, and on m input data nodes
+x1 , . . . , xm . The dependence on r is intrinsic to SSA: the
+value of a Phi node is determined by the predecessor
+of r that lead there.
+We turn now our attention to the description of nodes
+related to the control-flow of the program.
+Region(p1 , . . . , pm ) a region node with m predecessors
+as input. Region predecessors are control nodes (see
+below). Only one region in the graph has no input: it
+is the entry point of the graph.
+There are three kinds of control nodes (Jmp, If, Return).
+For each region node, there is exactly one control node that
+depends on it. Such a node marks the exit of the region and
+3
+
+298
+299
+300
+301
+302
+303
+304
+305
+306
+307
+308
+309
+310
+311
+312
+313
+314
+315
+316
+317
+318
+319
+320
+321
+322
+323
+324
+325
+326
+327
+328
+329
+330
+
+CC’18, February 24–25, 2018, Vienna, Austria
+331
+
+Delphine Demange, Yon Fernández de Retana, and David Pichardie
+
+Table 1. Sea of Nodes: graph, node syntax, and notations
+
+r: Region
+
+332
+333
+334
+335
+
+g∈
+id =
+
+336
+337
+
+node ::=
+
+338
+339
+340
+341
+
+data ::=
+
+342
+343
+344
+
+binop ::=
+
+345
+346
+347
+348
+
+phi ::=
+region ::=
+control ::=
+
+349
+350
+351
+352
+353
+
+jump ::=
+cond ::=
+branch ::=
+
+354
+355
+356
+357
+358
+359
+360
+361
+362
+
+id
+
+Graph
+id ,→ node
+N
+Nodes
+data
+region
+control
+branch
+CstN
+binop
+phi
+Add(x,y)
+Eq(x,y)
+Phi(r , x 1 , . . . , xm )
+Region(p1 , . . . , pm )
+jump
+cond
+Return(r , x )
+Jmp(r )
+If (r , x )
+IfT(if)
+IfF(if)
+Notations
+∋ x, y, z, w
+∋ϕ
+∋r
+∋c
+∋ if
+∋p
+∋ n, n ′
+
+367
+368
+369
+370
+371
+372
+373
+374
+375
+376
+377
+378
+379
+380
+381
+382
+383
+384
+385
+
+388
+
+c: If
+
+graph
+node identifier
+
+389
+390
+
+p1 : IfF
+
+p2 : IfT
+
+r0 : Region
+
+Figure 2. Conditional and Projections Nodes
+
+391
+392
+393
+394
+395
+396
+
+numerical constant
+binary operation
+
+projection nodes where previously omitted in Figure 1 for
+clarity.
+
+addition
+boolean equality test
+ϕ-node
+region
+
+IfF(if ), IfT(if )
+Projection node depending on an If node if. An IfF
+node corresponds to the entry of the branch taken in
+the case where the If condition is false, and the IfT
+node corresponds to the case where it is true.
+
+397
+398
+399
+400
+401
+402
+403
+404
+
+Let us illustrate this feature with Figure 2. The figure shows
+two regions r and r ′. The control node depending on r is an
+If node. This node has two projection successors: IfF and IfT
+nodes. The evaluation of node x determines which projection
+will be evaluated. If this evaluation gives a true value, then
+the IfT node is evaluated, and as a result execution will move
+from region r to region r ′.
+
+return
+jump
+conditional
+then
+else
+for data
+for phi
+for region
+for control
+for cond
+for jump or branch
+for node
+
+Well-formedness conditions. The syntactic definitions we
+give in Table 1 do not reflect all the syntactic constraints that
+a Sea of Nodes graph should satisfy to have a well-defined
+semantics. We list now these well-formedness conditions.
+
+405
+406
+407
+408
+409
+410
+411
+412
+413
+414
+415
+416
+
+SSA-constraints In standard SSA form, the arity of the ϕ
+operators found at entry of a basic block must be equal
+to the number of incoming edges to this block. In
+Sea of Nodes, as shown in Figure 1b, this constraint
+is now expressed by the fact that for each ϕ node
+Phi(r , x 1 , . . . , xm ) that depends on a region node r , the
+number of predecessors of r is equal to m, the number
+of ϕ’s input data nodes.
+Determinism Each region exits must be unambiguous: for
+each control node c, there must exist a unique successor region r ′ that depends on c. For a conditional
+control node if, this condition is chained in the following way: there exists exactly one IfT branch node
+and one IfF branch node that depend on if and both of
+them have unique successor regions.
+Well-founded data dependencies The sub-graph of data
+dependencies between non-Phi data nodes must be
+acyclic. Cycles would prevent the evaluation of data
+node values.
+Strictness The classical SSA strictness propery must still
+hold here: each variable use must be dominated by
+the unique definition of that variable. In Sea of Nodes,
+the meaning of use, dominated and definition must be
+
+364
+
+366
+
+387
+
+x: · · ·
+
+363
+
+365
+
+386
+
+correspond to the branching instructions traditionally found
+at the end of a basic block.
+Jmp(r) Control node depending on a region r and corresponding to a jump at the end of r to another region.
+If(r, x) Control node depending on a region r and corresponding to a conditional branch with condition x.
+Return(r, x) Control node depending on a region r. It
+terminates the execution of the function, returning the
+value of input data node x.
+There are also two auxiliary branch nodes for then and else
+branches of an If node, the so-called projection nodes [8],
+whose purpose is to distinguish the two possible outcomes
+of the boolean condition of the If node. This is a syntactical
+method for handling the If result, which is intuitively multivalue, with one value for the then branch, and one for the
+else branch. It makes explicit the control dependence of the
+two If branches and it is useful for optimisations that want
+to analyse differently the then branch from the else branch.
+As proposed by Click [8], we do not attach this information
+by labeling outgoing edges, but with two extra nodes. This
+4
+
+417
+418
+419
+420
+421
+422
+423
+424
+425
+426
+427
+428
+429
+430
+431
+432
+433
+434
+435
+436
+437
+438
+439
+440
+
+Semantic Reasoning about the Sea of Nodes
+
+CC’18, February 24–25, 2018, Vienna, Austria
+
+adapted but the property remains crucial to ensure that
+each data node can be given a value during execution.
+
+441
+442
+
+edges of non-Phi data nodes, is a directed acyclic graph (dag),
+where constants and ϕ-nodes are leaves, and binop nodes
+play the role of internal nodes. As shown in Figure 1b, the
+sub-graph rooted in w is composed of all light-grey nodes.
+This dag structure exactly matches the classic expression representation, but with sub-tree sharing. The ϕ-nodes should
+be seen as the variables of such an expression.
+Thanks to the data dependency well-foundedness constraint we explained in Section 2.1, we can recursively compute the value JxKρ of a data node x, using the values of
+ϕ-nodes in the current environment ρ.
+
+443
+444
+445
+446
+447
+448
+449
+450
+451
+452
+453
+454
+455
+
+Extensions In this paper, we do not model function calls.
+Their treatment is routine, and could be done as in any other
+intermediate representation. We hence only consider programs with one single function.
+In the paper, we also omit for clarity operations related to
+memory, although the Coq development handles them. Sea
+of Nodes requires to handle memory loads and stores with an
+SSA discipline. We hence introduce a specific memory value
+which represents the different versions of the memory during
+execution and explictly assigns SSA variables that represent
+the current value of the memory after each load and store.
+These two extra instructions do not alter the results we
+present in this paper.
+
+
+
+N
+
+
+
+
+JxKρ =  ρ (x )
+
+
+ op
+ binop (Jx 1 Kρ , Jx 2 Kρ )
+
+456
+457
+
+2.2
+
+For example, for the node w of Figure 1b we obtain:
+
+Semantics
+
+458
+459
+460
+461
+462
+463
+464
+465
+466
+467
+468
+469
+470
+471
+472
+473
+474
+
+JwKρ = (5 == ρ (ϕ) + 1)
+
+We now give a semantics to our Sea of Nodes IR. We use a
+denotational semantics to evaluate data nodes, while we use
+a small-step semantics for propagating execution from one
+region node to another. We fix a Sea of Nodes function with
+graph д, and all nodes are nodes of this graph д.
+
+The data dependency well-foundedness ensures the termination of the computation of JxKρ , but we also need to
+ensure that, for all ϕ belonging to x’s expression-dag, ρ (ϕ)
+is defined. This is where the strictness assumption comes
+into play: during a function execution, in every region where
+we will need to evaluate JxKρ , the regions where all these
+ϕ nodes belong will already have been reached. Therefore,
+those ϕ nodes will be defined in ρ.
+
+Environment. The denotational evaluation of data nodes
+makes use of an environment ρ, a partial mapping from
+ϕ-node to values. Indeed, ϕ-nodes are the only data nodes
+whose value depends directly on the control-flow, and as
+such they require special treatment. Other data nodes (constants and binary operations) values do not need to be stored
+in the environment ρ.
+The small-step semantics updates the environment each
+time it reaches a junction point: for each ϕ-node of the target
+region, its value is updated, in a spirit similar to that of the
+CompCertSSA [1] semantics.
+
+Operational semantics for region evaluation. We now
+describe the execution of a Sea of Nodes function with graph
+д using an operational semantics −
+→step . The relation takes
+the form σ −
+→step σ ′, which corresponds to evaluating a
+region, and moving execution from one state to another.
+The environment ρ in a state Exec(r ′, ρ) must be updated
+when reaching a region r with more than one predecessors
+(junction point with a list of ϕ-instructions). This update uses
+a parallel evaluation semantics, and affects all the ϕ-nodes
+that depends on region r .
+Formally, we write p, r , ρ →ϕ ρ ′ the judgment that specifies how an environment ρ is updated into a new environment ρ ′ when the execution reaches region r , coming from
+predecessor p of r . The judgment is defined by the following
+rule:
+
+475
+476
+477
+478
+479
+480
+481
+482
+483
+484
+485
+486
+487
+488
+489
+490
+491
+492
+493
+494
+495
+
+if д(x ) = CstN
+if д(x ) = Phi(. . .)
+if д(x ) = binop(x 1 , x 2 )
+
+Notations. In the rest of the section, we refer to a numerical
+value returned by an instruction corresponding to a data
+node by v. The special values false and true are aliases for
+0 and 1.
+Execution states of a function, written σ , are of the form
+Start (initial state), Exec(r , ρ) (intermediate execution state),
+or Ret(v) (return state), where:
+• r represents the current region node
+• ρ is a partial mapping from ϕ-nodes to values
+• v is the return value of the function
+We use the following notation too:
+opbinop (v 1 , v 2 ): underlying function of a binop node. For
+example, if the node is an Add, this function is the
+binary arithmetic operator +.
+
+PHIS
+
+philist(r ) = [ϕ 1 , . . . , ϕm ]
+index(p, r ) = k
+∀i = 1, . . . , m, ntharg(ϕ i , k ) = x i
+Jx i Kρ = vi
+p, r , ρ →ϕ ρ[ϕ i 7→ vi for all i]
+
+If n is an input of n ′ in the graph, we write index(n, n ′ ) the
+index of n among the list of inputs of the node n ′. We write
+ntharg(ϕ, k ) the k-th input data node of a Phi node ϕ, and
+philist(r ) the list of Phi nodes that directly depend on r (i.e.,
+r is their first input).
+The rule reads as follows: we update each Phi node that
+depends on r with the value computed for their k-th input
+
+Data node denotational semantics. The evaluation of data
+nodes closely matches the natural interpretation of data
+nodes as expressions in Sea of Nodes. Indeed the sub-graph
+rooted in a data node x, and composed of data-dependency
+5
+
+496
+497
+498
+499
+500
+501
+502
+503
+504
+505
+506
+507
+508
+509
+510
+511
+512
+513
+514
+515
+516
+517
+518
+519
+520
+521
+522
+523
+524
+525
+526
+527
+528
+529
+530
+531
+532
+533
+534
+535
+536
+537
+538
+539
+540
+541
+542
+543
+544
+545
+546
+547
+548
+549
+550
+
+CC’18, February 24–25, 2018, Vienna, Austria
+551
+552
+553
+554
+555
+556
+557
+558
+559
+560
+561
+562
+563
+564
+565
+566
+567
+568
+569
+570
+571
+572
+573
+574
+
+Delphine Demange, Yon Fernández de Retana, and David Pichardie
+
+data node, where k is the index of the predecessor p among
+the inputs of region r .
+In the example of Figure 1, this rule is used to successively
+update the environment at the loop header. When execution
+arrives from p to r ′ initially, we have index(p, r ′ ) = 0, so
+environment is updated so that ρ 0 (ϕ) = JxKρ = 1. Then,
+while JwKρ i = false, execution loops from p ′ to r ′. Because
+in this case index(p ′, r ′ ) = 1, we successively get for the
+next three iterations: first ρ 1 (ϕ) = JzKρ 0 = 2, then ρ 2 (ϕ) =
+JzKρ 1 = 3 and finally ρ 3 (ϕ) = JzKρ 2 = 4.
+Updating the values of ϕ nodes when reaching the region
+where they belong is a design choice that allows for a noninstrumented state: if environments were updated at the
+beginning of a region evaluation, it would be necessary to
+keep track of the region’s predecessor in execution states.
+We now describe in detail the different rules for the operational semantics −
+→step . We write entry(д) to refer to the
+entry point of the graph д. To alleviate notations, we simply
+write r , ρ for execution states of the form Exec(r , ρ), as it
+does not incur any possible confusion.
+The first rule, START, corresponds to the start of execution
+of the function, and initializes the state: the starting region is
+entry(д) and the starting environment is the partial function
+ρ empty , whose domain is empty.
+
+575
+
+r: Region
+
+START
+577
+
+c: Jump
+
+580
+581
+582
+583
+584
+585
+586
+
+r, ρ −
+→step r , ρ
+
+590
+
+JMP
+
+x: · · ·
+c: If
+...
+
+593
+594
+595
+596
+597
+598
+599
+600
+601
+602
+603
+604
+605
+
+φ2 : Phi
+
+611
+
+610
+
+612
+
+0
+
+613
+
+615
+
+JxKρ = true
+...
+
+p: IfT
+
+617
+618
+619
+620
+
+p, r0 , ρ →φ ρ0
+
+r0 : Region
+
+621
+
+φ1 : Phi
+
+...
+
+φ2 : Phi
+
+...
+...
+
+r, ρ −
+→step r0 , ρ0
+
+622
+623
+624
+625
+
+...
+
+626
+627
+
+Figure 4. IFT Rule Illustration
+
+628
+629
+
+than If node, as the predecessor of the next region.
+
+IFF
+
+IFT
+
+д(if ) = If (r, x )
+JxKρ = false
+д(p) = IfF(if ) д(r ′ ) = Region(. . . , p, . . .)
+p, r ′, ρ →ϕ ρ ′
+r, ρ −
+→step
+
+r ′, ρ ′
+
+д(if ) = If (r , x )
+JxKρ = true
+д(p) = IfT(if ) д(r ′ ) = Region(. . . , p, . . .)
+p, r ′, ρ →ϕ ρ ′
+
+r, ρ −
+→step r ′, ρ ′
+Figure 4 illustrates the rule IFT. The figure shows two region
+nodes r and r ′. The first has an If as control node. The node
+x evaluates to true, so the IfT branch is evaluated. Then
+environment is updated for ϕ-nodes depending on r ′.
+Finally, there is the RET rule, applicable when the control
+node of the current region is a Return. It corresponds to
+a function return, and the value of the input data node is
+returned as part of the state.
+
+д(r ′ ) = Region(. . . , c, . . .)
+
+c, r ′, ρ →ϕ ρ ′
+
+r, ρ −
+→step r ′, ρ ′
+
+591
+592
+
+609
+
+616
+
+r: Region
+
+Start −
+→step r 0 , ρ empty
+
+д(c) = Jmp(r )
+
+φ1 : Phi
+
+614
+
+587
+
+589
+
+608
+
+Figure 3. JMP Rule Illustration
+
+Next, we present rules for intermediate execution states.
+The common pattern of these rules is the following: i) evaluate the control node of the current region ii) determine
+the successor region iii) update the environment ρ on the ϕ
+nodes of that successor region.
+In the JMP rule, the control node of r is a Jmp node. In
+this case, the step simply goes to the successor region r ′ –
+remember it is uniquely determined, according to our wellformedness conditions.
+
+588
+
+r0 : Region
+
+0
+
+578
+579
+
+607
+
+c, r0 , ρ →φ ρ0
+
+entry(д) = r 0
+
+576
+
+606
+
+The environment update can be applied because we know
+from which precedecessor of r ′ execution comes, in this
+case from c (second premise). This pattern for updating the
+environment is found in every rule for control nodes with
+successors, i.e., it doesn’t apply for Return nodes.
+The JMP rule is illustrated in Figure 3. The figure shows
+two region nodes r and r ′. Region r has a Jmp as control
+node, that induces evaluation of r ′. Then environment is
+updated for ϕ-nodes depending on r ′.
+The IFF and IFT rules apply when the control node of the
+current region is an If node with projection nodes IfF and
+IfT. Both rules are similar to the JMP rule, except that the
+environment update considers the projection node, rather
+
+д(c) = Return(r , x )
+RET
+
+JxKρ = v
+
+r, ρ −
+→step Ret(v)
+
+Function execution. We have a single START rule, and a
+rule RET for function return. The execution of a function is
+thus of the form Start −
+→step · · · −
+→step Ret(v).
+In this paper, to alleviate the presentation, we use the
+return value as the unique observable behavior of a terminating execution of a function. The proofs presented here
+can naturally be extended to lists of observable events, as
+would be produced by e.g., a Print instruction.
+6
+
+630
+631
+632
+633
+634
+635
+636
+637
+638
+639
+640
+641
+642
+643
+644
+645
+646
+647
+648
+649
+650
+651
+652
+653
+654
+655
+656
+657
+658
+659
+660
+
+Semantic Reasoning about the Sea of Nodes
+661
+662
+663
+664
+665
+666
+667
+668
+669
+670
+671
+672
+673
+674
+
+3
+
+CC’18, February 24–25, 2018, Vienna, Austria
+
+Validity Domains for Values
+
+Proof sketch. We prove by induction on the execution path
+from Exec(r 0 , ρ 0 ) to Exec(rm , ρm ), that for all ϕ ∈ phideps(x ),
+ρ 0 (ϕ) = ρm (ϕ). The main argument involves noticing that
+in applications of the PHIS rule along the execution path,
+no ϕ ∈ phideps(x ) is involved, thanks to the hypothesis.
+Lemma 3.1 allows to conclude the proof.
+□
+
+Many compiler optimizations, e.g., GVN [19], constant propagation, or redundant null-pointer checks elimination [16]
+require reasoning, statically, about the possible values that
+variables or expressions may have at certain places in the
+program. In practice, such optimizations rely on the controlflow structure of programs, using notions like dominance,
+in order to ease the description of where, in the program, a
+particular value is valid, or preserved.
+In this section we give, in terms of dominance, a fundamental property that is useful for such reasonings in the
+context of a Sea of Nodes IR. In Section 4, we illustrate how
+this property allows to prove the semantics preservation of
+a redundant zero-check elimination.
+3.1
+
+679
+
+Value Preservation Property
+
+We now give the conditions under which the value of a data
+node is preserved along an execution path. We fix a Sea of
+Nodes function with graph д from now on.
+
+Definition 3.3 (CFG). We call CFG of a Sea of Nodes graph
+д, the directed graph whose nodes are region nodes, and
+where there is an edge from node r to node r ′ if the control
+node depending on r is:
+• a Jmp node whose output is r ′,
+• or an If with an output projection node that has r ′ as
+output.
+
+680
+681
+682
+683
+
+Phi dependencies of a data node. We use the notation
+phideps(x ) to refer to the set of all ϕ-nodes appearing in
+the expression associated to x. More formally:
+
+684
+685
+686
+687
+688
+689
+690
+691
+692
+693
+694
+695
+696
+697
+698
+699
+700
+701
+702
+703
+704
+705
+706
+707
+
+
+∅
+if д(x ) = CstN
+
+
+
+
+
+
+{x
+}
+if
+д(x ) = Phi(. . .)
+phideps(x ) = 
+
+
+phideps(x 1 ) ∪ phideps(x 2 )
+
+
+
+
+if д(x ) = binop(x 1 , x 2 )
+
+In the example graph of Figure 1, we have phideps(x ) = ∅,
+phideps(y) = ∅, phideps(z) = {ϕ}, and phideps(w ) = {ϕ}.
+The following lemma states that the value of a data node
+only depends on the value of the Phi nodes it depends on.
+Lemma 3.1. Let x be a data node of a graph д. Let ρ and
+ρ ′ be two environments. If for all ϕ ∈ phideps(x ) we have
+ρ (ϕ) = ρ ′ (ϕ), then JxKρ = JxKρ ′ .
+
+Proof. First we note that the hypothesis, thanks to wellformedness of data dependencies, ensures that JxKρ is defined, because all ρ (ϕ) for ϕ ∈ phideps(x ) are defined. The
+proof is done by induction on the definition of JxKρ : the base
+case of induction is ensured by the fact that both evaluations
+match on ϕ-nodes.
+□
+The next lemma states that the value of a data node x is
+preserved as long as execution does not move to a region
+whose corresponds ϕ nodes belong to phideps(x ).
+
+708
+709
+710
+
+Lemma 3.2. Let
+Exec(r 0 , ρ 0 ) · · · −
+→step Exec(rm , ρm )
+
+711
+712
+713
+714
+715
+
+be an execution path. Let x be a data node such that JxKρ 0
+is defined. Assume that, for all ϕ ∈ phideps(x ), and for all
+i = 1 . . . m, ϕ < philist(r i ). Then JxKρ 0 = JxKρm .
+
+Dominance-Based Formulation
+
+Dominance is a useful notion to describe control-flow properties when proving the correctness of some optimizations, in
+particular those involving elimination of redundant computations or run-time checks. In this section we define such a
+notion for our Sea of Nodes representation, and reformulate
+Lemma 3.2 in terms of dominance, so that it is easier to apply
+in proofs of optimizations.
+First, we give an analogue of the standard basic-block CFG
+on Sea of Nodes.
+
+677
+678
+
+717
+718
+719
+720
+721
+722
+
+3.2
+
+675
+676
+
+716
+
+7
+
+723
+724
+725
+726
+727
+728
+729
+730
+731
+732
+733
+734
+735
+736
+737
+738
+739
+740
+
+This allows to define on the Sea of Nodes CFG an analogue
+to the standard dominance relation as follows:
+
+741
+
+Definition 3.4 (Dominance). A region node r dominates a
+region node r ′ if every path in the CFG from the entry point
+of д to r ′ passes through r . The dominance is strict if r , r ′.
+
+743
+
+This dominance relation applies to region nodes only : it
+is defined at a coarser level than what is done in traditional
+basic-block CFG. Below, we extend this notion so that it
+handles data nodes as well. Informally, for a data node to
+dominate a region node r , all of its ϕ dependencies should
+belong to regions that dominate r . Formally:
+
+747
+
+Definition 3.5. (Data node dominance) A data node x dominates a region node r if, for all ϕ and r ϕ′ such as ϕ ∈ phideps(x )
+and д(ϕ) = Phi(r ϕ′ , . . .), we have that r ϕ′ dominates r . The
+dominance is strict if r ϕ′ , r for all such ϕ.
+
+753
+
+Dominance and evaluability. In the literature on SSA formalization, the so-called equational lemma from [1] is of
+particular importance. It states that the equation defining
+a variable x is valid at the points dominated by the definition point of x. Here, in a Sea of Nodes function, data nodes
+(excluding Phi nodes) have no real definition point – they
+float. Yet, this particular property, the equational lemma, is
+in fact baked in the data node evaluation semantics: data
+node values are always valid, so to say. They only need to be
+defined. The following lemma allows to characterize, using
+dominance, the regions in a Sea of Nodes graph where a data
+node is indeed defined.
+
+758
+
+742
+
+744
+745
+746
+
+748
+749
+750
+751
+752
+
+754
+755
+756
+757
+
+759
+760
+761
+762
+763
+764
+765
+766
+767
+768
+769
+770
+
+CC’18, February 24–25, 2018, Vienna, Austria
+771
+772
+773
+774
+775
+776
+777
+778
+779
+780
+781
+782
+783
+784
+785
+786
+787
+
+Delphine Demange, Yon Fernández de Retana, and David Pichardie
+
+Lemma 3.6. Let Exec(r , ρ) be a reachable state. Let x be a
+data node such that x dominates r . Then JxKρ is defined.
+
+scope program optimizations (and impacts the program execution running time). Redundant checks elimination allows
+to mitigate this issue.
+In this section, we illustrate how to justify formally the semantic correctness of a redundant zero-check elimination on
+the Sea of Nodes form, using the results of previous sections.
+
+Proof sketch. Let π be an execution path from state Start to
+state Exec(r , ρ).
+We prove first the property for a node ϕ with д(ϕ) =
+Phi(r ′, . . .). The fact that ϕ dominates r means in this case
+that r ′ dominates r . Hence, there exists ρ ′ such that a state
+Exec(r ′, ρ ′ ) appears in π . As a result, our semantics for ϕnode evaluation when coming to region r ′ ensures that ρ ′ (ϕ)
+is defined, and since the environment updating semantics
+only extends the domain of environments during execution,
+ρ (ϕ) is also defined.
+Now, for the other forms of data node x, it is true that for
+every ϕ ∈ phideps(x ), ρ (ϕ) is defined, because, by definition,
+such a ϕ dominates r too. We conclude the proof with wellfoundedness of data node dependencies.
+□
+
+790
+
+Language Extension: ZeroCheck Nodes
+
+We extend our Sea of Nodes form with a new control node,
+ZeroCheck(r, x). It executes like a jump to its successor,
+unless its input data node x evaluates to zero. In this case
+the execution goes to an error state Ret(fail). Here, fail
+is a new special value, introduced to model failure during
+program execution.
+This gives the following two semantic rules:
+
+ZCHK1
+
+Note that this specific lemma is not strictly necessary for
+the other semantics proofs of the paper, and has not been
+mechanically verified.
+
+д(c) = ZeroCheck(r , x ) д(r ′ ) = Region(. . . , c, . . .)
+c, r ′, ρ →ϕ ρ ′
+JxKρ = v , 0
+r, ρ −
+→step
+
+ZCHK2
+793
+794
+
+Application to value preservation. We obtain the following corollary of Lemma 3.2 for value preservation in terms
+of dominance.
+Theorem 3.7. Let
+
+797
+
+800
+801
+802
+803
+804
+805
+
+4.2
+
+be an execution path. Let x be a data node such that JxKρ 0
+is defined. If, for all i = 1 . . . m, x strictly dominates r i , then
+JxKρ 0 = JxKρm .
+
+Proof sketch. Because x strictly dominates r i , we know that
+for all ϕ ∈ phideps(x ), we have ϕ < philist(r i ). We can
+therefore apply Lemma 3.2.
+□
+
+806
+807
+808
+809
+810
+811
+812
+813
+814
+815
+816
+817
+818
+
+This theorem states that, as long as execution remains in
+a particular area of the graph, the area dominated by x, the
+value of x remains unmodified. As an example, an application
+of this result to prove semantics preservation of a redundant
+zero-check transformation can be found in the next section.
+Theorem 3.7 is a little less general than Lemma 3.2 because
+it is restricted to execution path where each region is under
+the dominance of a given data node x, while executions in
+Lemma 3.2 can continue outside the dominance zone of x, as
+long as they do not reach ϕ-nodes in conflict with phideps(x ).
+But we believe the dominance characterization used in this
+theorem is closer to compiler designer intuition.
+
+821
+822
+823
+824
+825
+
+4
+
+Criteria for Redundancy
+
+828
+829
+830
+831
+
+Languages with rich and precise exception mechanisms often require the injection in the compiler IR of numerous
+explicit checks – for null-pointers typically, to guarantee a
+safe execution of the program. This dramatically reduces the
+
+835
+836
+837
+838
+839
+840
+841
+842
+843
+844
+845
+846
+847
+848
+849
+850
+851
+852
+853
+854
+
+Definition 4.1. A region r has a redundant ZeroCheck if
+the following holds: r is a region node whose control node is
+a ZeroCheck(r , x ), and there exists a region node r ′ strictly
+dominating r whose control node is a ZeroCheck(r ′, x ).
+
+860
+
+856
+857
+858
+859
+
+861
+862
+863
+864
+865
+866
+867
+868
+869
+870
+871
+872
+
+Corollary 4.2. Let Exec(r ′, ρ ′ ) be a reachable execution state.
+
+873
+
+Let r be a region node whose control node is a ZeroCheck(r, x ).
+If r strictly dominates r ′, then JxKρ ′ , 0.
+
+874
+
+Proof sketch. By hypothesis, there exists an execution path
+π to state Exec(r ′, ρ ′ ). Because r dominates r ′, there exists a
+state in π whose region is r . Let us consider the most recent
+8
+
+834
+
+855
+
+Value preservation applied to zero-checks. The results of
+the previous section on validity domains for values can be
+used to justify the intuition behind our criteria. We have the
+following corollary of Theorem 3.7:
+
+Redundant Zero-Check Elimination
+
+833
+
+Deciding whether a ZeroCheck is redundant or not is equivalent to deciding if an arbitrary data node never evaluates
+to zero, which is undecidable in general.
+Therefore, we need an approximation. Here, we use the
+following structural criteria for redundancy:
+
+For example, in Figure 5, the criteria is satisfied for r 3 :
+indeed, it is strictly dominated by r 1 , and both region nodes
+have a ZeroCheck control node whose input data node is x.
+
+819
+820
+
+r, ρ −
+→step Ret(fail)
+
+Exec(r 0 , ρ 0 ) · · · −
+→step Exec(rm , ρm )
+
+798
+799
+
+JxKρ = 0
+
+Figure 5 gives an example of Sea of Nodes graph with two
+ZeroCheck nodes c 1 and c 3 . This example graph has a loop
+and three conditionals. We use it in this section to illustrate
+the presentation.
+
+795
+796
+
+r ′, ρ ′
+
+д(c) = ZeroCheck(r , x )
+
+791
+792
+
+827
+
+832
+
+4.1
+
+788
+789
+
+826
+
+875
+876
+877
+878
+879
+880
+
+Semantic Reasoning about the Sea of Nodes
+
+CC’18, February 24–25, 2018, Vienna, Austria
+
+r0 : Region
+
+881
+
+4.3
+
+882
+
+c0 : If
+
+883
+884
+
+The algorithm we consider here is a recursive variant of the
+one found in the Go compiler [18, 20]. It is based on a single
+traversal of the dominator tree. We just adapted it to fit our
+IR. In particular, the dominator tree encodes the dominance
+relation between region nodes of a Sea of Nodes graph. We
+define it precisely now.
+
+...
+
+p0 : IfF
+
+p1 : IfT
+
+885
+
+r1 : Region
+
+886
+
+φ: Phi
+
+...
+
+x: Add
+
+...
+
+887
+
+c1 : ZeroCheck
+
+888
+
+Definition 4.3 (Immediate Dominator). A region node r
+is an immediate dominator of a region node r ′ if r , r ′, r
+dominates r ′, and r does not dominate any other dominator
+of r ′.
+
+889
+
+r2 : Region
+
+890
+891
+
+c2 : If
+
+...
+
+892
+
+p2 : IfF
+
+893
+
+For example, in Figure 5, node r 2 is an immediate dominator of node r 3 , but r 1 is not, because r 1 dominates r 2 .
+A standard property states that there is at most one immediate dominator for every node. This is the basis for ensuring
+that the dominance relation among the nodes of a graph can
+be encoded in a tree structure.
+
+p3 : IfT
+
+894
+
+r3 : Region
+
+895
+896
+
+c3 : ZeroCheck
+
+897
+898
+
+r4 : Region
+
+899
+900
+
+...
+
+901
+902
+
+Definition 4.4 (Dominator tree). The dominator tree of the
+CFG of a Sea of Nodes graph is a tree where nodes are the
+region nodes, and where the children of a node are the region
+nodes it immediately dominates.
+
+c4 : If
+
+p4 : IfF
+
+Redundant Zero-Check Detection Algorithm
+
+p5 : IfT
+
+r5 : Region
+
+905
+906
+
+c5 : Return
+
+...
+
+907
+908
+
+Figure 5. Dominance and Redundant ZeroCheck Illustration
+
+909
+910
+
+912
+
+state, in π , whose region node is r . Namely, we can consider
+the end π ′ of π :
+
+913
+
+Exec(r , ρ) · · · −
+→step Exec(r , ρ )
+
+911
+
+914
+915
+916
+917
+918
+919
+920
+921
+922
+923
+924
+925
+926
+927
+928
+929
+930
+931
+932
+933
+934
+935
+
+937
+938
+939
+940
+941
+942
+943
+944
+945
+946
+947
+948
+949
+950
+951
+952
+953
+954
+955
+956
+957
+958
+
+903
+904
+
+936
+
+′
+
+′
+
+such that for every other state Exec(r ′′, ρ ′′ ) after Exec(r , ρ)
+in π ′, r ′′ , r . The following fact holds: for every such r ′′, r
+dominates r ′′. Indeed, any path π1 from the entry point to
+r ′′ can be extended to a path π1 · π2 from the entry point to
+r ′, where π2 is a suffix of π ′. Since r dominates r ′, r belongs
+to π 1 · π2 , but r does not belong to π ′ (neither to π2 ), so r
+belongs to π 1 . It proves that r dominates r ′′.
+Moreover, well-formedness properties ensure that a node
+dominates its usages, so in particular x dominates r . Hence,
+x dominates strictly any such r ′′ (dominance is a transitive
+relation). Because there is a ZeroCheck at r and execution
+does not end there, ZCHK1 was applied, so JxKρ , 0. By
+Theorem 3.7, we have JxKρ = JxKρ ′ . Therefore, JxKρ ′ , 0. □
+
+This corollary gives hypotheses, in terms of dominance
+and reachability, under which we know a node evaluates to
+a non-zero value for a particular environment. If r ′ has a
+ZeroCheck as control node, the configuration is exactly that
+of our redundancy criteria: the ZeroCheck of r ′ is redundant. This corollary is indeed key to prove formal semantics
+preservation (subsection 4.4).
+9
+
+The algorithm we consider is given in Figure 6. In a nutshell, the algorithm performs a single depth-first traversal
+of the dominator tree (domtree(д)), maintaining two maps
+from nodes to booleans. The first one, nonZero, keeps track
+of whether data nodes are non-zero (true) or may evaluate to
+zero (false). The second map, redundantZC, flags, for each
+region nodes, whether they have a redundant ZeroCheck
+control node.
+Both maps are initialized to emptymap(node, bool), i.e.,
+all nodes are mapped to false. Then, during the tree traversal, each time a region with a ZeroCheck control node is encountered, the ZeroCheck node is flagged as being non-zero
+in the dominator subtree (i.e., the region nodes it dominates).
+In the algorithm, this is done with a three-step process. First,
+we save the current value of nonZero[x] (Line 7). Second,
+we set nonZero[x] to true (Line 9) and explore the subtree
+(Line 11). Finally, we restore the old value of nonZero[x]
+once subtrees have been traversed (Line 12). When traversing the subtree, any ZeroCheck node on the same data node
+will in turn be flagged as redundant (Line 8).
+For example, in the case of Figure 5, when processing node
+r 1 , a ZeroCheck(r 1 , x ) node c 1 is found with input x. The
+algorithm then recalls this information when processing the
+nodes dominated by r 1 , that is r 2 and r 3 . While processing r 3 ,
+the algorithm finds a ZeroCheck(r 3 , x ) node c 3 with the same
+input x, it knows it is redundant according to our criteria.
+We prove that the algorithm in Figure 6 indeed computes
+our redundancy criteria for region nodes.
+
+959
+
+Lemma 4.5. Let redundantZC = Analyse(д) and r such as
+redundantZC[r ] = true. Then r has a redundant ZeroCheck
+in the sense of Definition 4.1.
+
+987
+
+960
+961
+962
+963
+964
+965
+966
+967
+968
+969
+970
+971
+972
+973
+974
+975
+976
+977
+978
+979
+980
+981
+982
+983
+984
+985
+986
+
+988
+989
+990
+
+CC’18, February 24–25, 2018, Vienna, Austria
+991
+
+1
+
+992
+
+2
+
+993
+
+3
+
+994
+
+4
+5
+
+995
+6
+
+996
+7
+
+997
+8
+
+998
+9
+
+999
+10
+
+1000
+
+11
+
+1001
+
+12
+
+1002
+
+13
+
+1003
+
+14
+
+1004
+
+15
+
+1005
+
+16
+17
+
+1006
+1007
+
+Delphine Demange, Yon Fernández de Retana, and David Pichardie
+Proof sketch. The only subtle case is the case where σ =
+Exec(r , ρ) and the control node of r in д is a ZeroCheck(r , x )
+that has been optimized into a Jmp(r ) in д ′.
+If it was optimized, then it must be that redundantZC[r ] =
+true. Lemma 4.5 ensures that there exists r ′ strictly dominating r whose control node is a ZeroCheck(r ′, x ).
+Suppose σ −
+→stepд σ ′. We know that σ is a reachable state,
+so we can apply Corollary 4.2. Hence, JxKρ = v with v , 0,
+and the ZeroCheck passes (the applicable rule is ZCHK1),
+and д ′ can match the step anyway by executing its Jmp node
+(which has the same successor).
+Now, if σ −
+→stepд′ σ ′ through the Jmp node, we match this
+step in д with rule ZCHK1, which we know is applicable (by
+Corollary 4.2, because σ is reachable in д).
+□
+
+Analyse(g):
+sdom ← domtree(g)
+nonZero ← emptymap(node, bool)
+redundantZC ← emptymap(node, bool)
+DepthFirst(r):
+if control(g, r) matches ZeroCheck(r, x):
+nz ← nonZero[x]
+redundantZC[r] ← nz
+nonZero[x] ← true
+for r' in sdom.successors(r):
+DepthFirst(r')
+nonZero[x] ← nz
+else:
+for r' in sdom.successors(r):
+DepthFirst(r')
+DepthFirst(entry(g))
+return redundantZC
+
+5
+
+1011
+1012
+1013
+1014
+
+The reciprocal of the previous lemma holds too: if a region
+node with a ZeroCheck control node satisfies our dominancebased redundancy criteria, then the analysis detects it. For instance, on the graph in Figure 5, we obtain redundantZC[r 3 ] =
+true. More formally:
+
+1015
+1016
+1017
+
+Lemma 4.6. Let redundantZC = Analyse(д). If r has a redundant ZeroCheck, then redundantZC[r ] = true.
+
+1018
+1019
+1020
+1021
+1022
+1023
+1024
+1025
+1026
+1027
+1028
+1029
+1030
+1031
+1032
+1033
+1034
+1035
+1036
+1037
+1038
+1039
+1040
+1041
+1042
+1043
+1044
+1045
+
+4.4
+
+Conclusion and Future Work
+
+In this paper, we have proposed a formal semantics for a Sea
+of Nodes representation. The salient aspects of the semantics are twofold. First, it doesn’t bind data computation to
+a particular region node. Rather, data nodes (and their dependencies) are evaluated on demand, using a denotational
+semantics in an environment that keep tracks of the current
+values of phi-nodes. Second, the control-flow execution of
+a Sea of Nodes is defined operationally, using a small-step
+semantics between region nodes. During the course of our
+formalization work, we relied on a prototype interpreter
+reflecting the semantic rules so as to make sure that our
+formalization was indeed executable.
+On top of this semantics, we proved a fundamental property of validity domain for value information of nodes in
+an area of the graph in terms of dominance. We used this
+property to prove the semantics preservation of a redundant
+zero-check elimination algorithm. We think that the same
+property, and similar reasoning would allow to prove the
+semantics correctness of other optimizations, such as Global
+Value Numbering, which require to justify that some nodes
+have the same value at two different places.
+Our Coq development also includes a formalization of
+a Simple Constant Propagation algorithm. The simulation
+argument is similar to the one of the ZeroCheck elimination,
+but does not involve fundamental properties from a Sea of
+Nodes point of view (e.g., dominance).
+An important question not studied in this paper is the
+generation of the Sea of Nodes form. Click et al. [8] propose
+an incremental algorithm for building the SSA form while
+doing parse-time optimizations. As a first step towards its
+formal verification, an easier approach would be to rely on
+previous works on SSA generation [1, 22], and to generate
+the Sea of Nodes from a basic-block based SSA: the transformation would just need to remove superfluous control-flow
+dependences, keeping only relevant data and control dependences.
+
+1009
+1010
+
+1047
+1048
+1049
+1050
+1051
+1052
+1053
+1054
+1055
+1056
+1057
+1058
+1059
+1060
+1061
+
+Figure 6. Redundant ZeroCheck Detection
+
+1008
+
+1046
+
+ZeroCheck Elimination: Semantic Correctness
+
+Let redundantZC = Analyse(д). The redundant ZeroCheck
+Elimination optimization proceeds by replacing, in the graph
+д, every ZeroCheck(r , x ) for which redundantZC[r] = true
+with a simple Jmp(r ) node. We write д ′ the graph resulting
+from this transformation. In the case of Figure 5, the analysis
+gives us that redundantZC[r 3 ] = true, so д ′ is obtained from
+д by changing the node c 3 by Jmp(r 3 ).
+We prove that this transformation is correct semantically.
+Namely, that the initial and transformed graphs have the
+same semantics. We write −
+→stepд to mean that the step is
+done in within a graph д. The theorem we prove is as follows.
+Theorem 4.7. We have Start · · · −
+→stepд Ret(v) if, and only
+if, Start · · · −
+→stepд′ Ret(v).
+We prove the above theorem by establishing a simulation relation between the two graphs. In the case of the
+Redundant ZeroCheck Elimination, the link between both
+execution states is strong: both states are simply equal at
+each step of the execution.
+Given a state σ , the predicate reachableд (σ ) means that
+there exists an execution path from Start to σ in д.
+Lemma 4.8. Let σ be state such that reachableд (σ ). For all
+σ ′, we have
+σ−
+→stepд σ ′ if, and only if, σ −
+→stepд′ σ ′
+10
+
+1062
+1063
+1064
+1065
+1066
+1067
+1068
+1069
+1070
+1071
+1072
+1073
+1074
+1075
+1076
+1077
+1078
+1079
+1080
+1081
+1082
+1083
+1084
+1085
+1086
+1087
+1088
+1089
+1090
+1091
+1092
+1093
+1094
+1095
+1096
+1097
+1098
+1099
+1100
+
+Semantic Reasoning about the Sea of Nodes
+1101
+1102
+1103
+1104
+1105
+1106
+1107
+1108
+1109
+1110
+1111
+1112
+1113
+1114
+1115
+1116
+1117
+1118
+1119
+1120
+1121
+1122
+1123
+1124
+1125
+1126
+1127
+1128
+1129
+1130
+
+CC’18, February 24–25, 2018, Vienna, Austria
+
+Another interesting topic is the transformation out of the
+Sea of Nodes form, towards an IR closer to assembly. A possible approach to tackle this difficult problem is to split it
+into three phases. The first phase is Global Code Motion [6].
+In order to actually generate code, it is necessary to ascribe a
+region to every data node. Our Sea of Nodes representation
+semantics is not a sequential one: non-ϕ data nodes do not
+depend on a particular region node, and are evaluated with
+a denotational semantics. This raises an interesting question,
+because in order to prove that Global Code Motion is correct,
+we would need to prove equivalence between our semantics, and a basic-block based semantics. The second phase
+schedules instructions within basic-blocks. Blech et al. [2]
+give a basic-block based semantics to instruction evaluation
+that explicitly integrates dependencies and scheduling into
+their semantics. Their work allows for a transition between
+a semantics using only necessary data dependencies within a
+basic-block and a semantics using extra dependencies corresponding to a complete scheduling of the basic-block. Their
+work could possibly be used for this second part. In the third
+phase, it would remain to implement ϕ-nodes, i.e., destructing the SSA form. Here, we could possibly make use of some
+previous work done within the CompCertSSA project [10].
+We are confident the work presented here is a solid base to attack these future works, and paves the way to an intregration
+of Sea of Nodes in formally verified compilers.
+More generally, it would be worth investigating whether
+the results presented here could be applied to other similar
+intermediate representations [21], such as the Value State
+Dependent Graph [15].
+
+Form. In Proc. of CC’13 (LNCS), Vol. 7791. Springer, 102–122.
+[4] M. Braun, S. Buchwald, and A. Zwinkau. 2011. Firm—A Graph-Based
+Intermediate Representation. Technical Report 35. Karlsruhe Institute of
+Technology. http://digbib.ubka.uni-karlsruhe.de/volltexte/1000025470
+[5] S. Buchwald, D. Lohner, and S. Ullrich. 2016. Verified Construction of
+Static Single Assignment Form. In Proc. of CC’16. ACM, 67–76.
+[6] C. Click. 1995. Global Code Motion / Global Value Numbering. In Proc.
+of PLDI’95. 246–257.
+[7] C. Click and K. D. Cooper. 1995. Combining Analyses, Combining
+Optimizations. ACM TOPLAS 17, 2 (1995), 181–196.
+[8] C. Click and M. Paleczny. 1995. A Simple Graph-Based Intermediate
+Representation. In Proc. of IR’95. 35–49.
+[9] R. Cytron, J. Ferrante, B.K. Rosen, M.N. Wegman, and F.K. Zadeck.
+1991. Efficiently computing static single assignment form and the
+control dependence graph. ACM TOPLAS 13, 4 (1991), 451–490.
+[10] D. Demange and Y. Fernandez de Retana. 2016. Mechanizing Conventional SSA for a Verified Destruction with Coalescing. In Proc. of CC’16
+(CC 2016). 77–87.
+[11] D. Demange, L. Stefanesco, and D. Pichardie. 2015. Verifying Fast
+and Sparse SSA-based Optimizations in Coq. In Proc. of CC’15 (LNCS),
+Vol. 9031. 233–252.
+[12] G. Duboscq, T. Würthinger, L. Stadler, C. Wimmer, D. Simon, and H.
+Mössenböck. 2013. An Intermediate Representation for Speculative
+Optimizations in a Dynamic Compiler. In Proc. of VMIL’13. ACM, 1–10.
+[13] B. Dupont de Dinechin. 2014. Using the SSA-Form in a Code Generator.
+In Proc. of CC’14 (LNCS), Vol. 8409. Springer, 1–17.
+[14] HotSpot 1999. Homepage of the project. http://openjdk.java.net/
+groups/hotspot.
+[15] N. Johnson and A. Mycroft. 2003. Combined Code Motion and Register
+Allocation Using the Value State Dependence Graph. In Proc. of CC’03
+(CC 2003). Springer-Verlag, 1–16.
+[16] M. Kawahito, H. Komatsu, and T. Nakatani. 2000. Effective Null Pointer
+Check Elimination Utilizing Hardware Trap. In Proc. of ASPLOS’00.
+139–149.
+[17] X. Leroy. 2009. A Formally Verified Compiler Back-end. JAR 43, 4
+(2009), 363–446.
+[18] Nilcheck elimination in Go 2017.
+Source code.
+https:
+//github.com/golang/go/blob/release-branch.go1.9/src/cmd/compile/
+internal/ssa/nilcheck.go.
+[19] B. K. Rosen, M. N. Wegman, and F. Kenneth Zadeck. 1988. Global Value
+Numbers and Redundant Computations. In Proc. of POPL’88. 12–27.
+[20] The Go programming language 2012. Homepage of the project. https:
+//golang.org/.
+[21] The
+SSA
+Book
+2015.
+Latest
+release.
+http://ssabook.gforge.inria.fr/latest/book.pdf.
+[22] J. Zhao. 2013. Formalizing an SSA-based compiler for verified advanced
+program transformations. Ph.D. Dissertation. University of Pennsylvania. Advisor(s) Zdancewic, Steve.
+[23] J. Zhao, S. Nagarakatte, M. Martin, and S. Zdancewic. 2013. Formal
+verification of SSA-based optimizations for LLVM. In Proc. of PLDI’13.
+ACM, 175–186.
+[24] J. Zhao, S. Zdancewic, S. Nagarakatte, and M. Martin. 2012. Formalizing the LLVM Intermediate Representation for Verified Program
+Transformation. In Proc. of POPL’12. ACM, 427–440.
+
+1131
+1132
+1133
+1134
+1135
+
+Acknowledgments
+This material is based upon work supported by the Agence
+Nationale de la Recherche under Grant No. ANR-14-CE280004.
+
+1136
+1137
+1138
+1139
+1140
+1141
+1142
+1143
+1144
+1145
+
+References
+[1] G. Barthe, D. Demange, and D. Pichardie. 2014. Formal Verification of
+an SSA-Based Middle-End for CompCert. ACM TOPLAS 36, 1 (2014),
+1–35.
+[2] J.O. Blech, S. Glesner, J. Leitner, and S. Mülling. 2005. Optimizing
+Code Generation from SSA Form: A Comparison Between Two Formal
+Correctness Proofs in Isabelle/HOL. In Proc. of COCV’05 (ENTCS).
+Elsevier, 33–51.
+[3] M. Braun, S. Buchwald, S. Hack, R. Leißa, C. Mallon, and A. Zwinkau.
+2013. Simple and Efficient Construction of Static Single Assignment
+
+1156
+1157
+1158
+1159
+1160
+1161
+1162
+1163
+1164
+1165
+1166
+1167
+1168
+1169
+1170
+1171
+1172
+1173
+1174
+1175
+1176
+1177
+1178
+1179
+1180
+1181
+1182
+1183
+1184
+1185
+1186
+1187
+1188
+1189
+1190
+1191
+1192
+1193
+1194
+1195
+1196
+1197
+1198
+1199
+1200
+
+1146
+
+1201
+
+1147
+
+1202
+
+1148
+
+1203
+
+1149
+
+1204
+
+1150
+
+1205
+
+1151
+
+1206
+
+1152
+
+1207
+
+1153
+
+1208
+1209
+
+1154
+1155
+
+11
+
+1210
+
+

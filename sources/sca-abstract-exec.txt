@@ -1,0 +1,1037 @@
+SOFTWARE-PRACTICE
+
+AND EXPERIENCE, VOL. 20(12), 1241-1258 (DECEMBER 1990)
+
+Abstract Execution : A Technique for
+Efficiently Tracing Programs
+JAMES R. LARUS
+
+Computer Sciences Department, I ‘nicersity of 11~iscorisir1Jladisor1,
+1210 West Drrytorr
+Street, ,2lcldkoiz, li7 53706, L’.S.A.
+
+SUMMARY
+Many areas of computer performance analysis require detailed traces of events that occur during
+a program’s execution. Collecting traces is expensive. The additional code required to record
+events greatly slows a program’s execution. In addition, the resulting trace files can grow
+unmanageably large. This paper describes a technique called abstract execution that alleviates
+both problems.
+Abstract execution records a small set of events during the traced program’s execution. These
+events serve as input to an abstract version of the program that generates a full trace by reexecuting selected portions of the original program. This process greatly reduces both the cost
+of tracing the original program and the size of the trace files. The cost of regenerating a trace
+is insignificant in comparison to the cost of applications that use it.
+This paper also describes a system called AE that implements Abstract Execution. The paper
+contains measurements that demonstrate that AE can efficiently trace large programs.
+KEY WORDS
+
+Compilers
+
+Exccution profiling
+
+Run-time performance cvaluation
+
+Optimization
+
+Datd compression
+
+C
+
+INTRODUCTION
+Many areas of computer performance analysis require detailed traces of events that
+occur during a program’s execution. A few obvious examples include cache memory
+simulation, which requires a list of memory locations accessed by a program, performance analysis, which requires a count of each basic block’s execution frequency,2 and
+program parallelism analysis, which requires a trace of addresses and notification upon
+loop entry and iteration.3 Traditionally, collecting this information is expensive. T h e
+mechanism that records events severely slows a program’s execution. This slowdown
+not only makes large, long-running programs difficult to characterize, but it also affects
+the behaviour and measurements of real-time and parallel programs. Equally serious
+is the cost of storing and manipulating huge trace files. A 10 million instructions per
+second (MIPS) computer produces 40-60 megabytes of trace data in a second of
+execution. Clever compression schemes can reduce the volume of data by an order of
+m a g n i t ~ d e ,but
+~ the size of trace files is a major limitation on measuring long-running
+programs.
+This report describes a new technique, called abstract execution, that greatly alleviates both problems. T h e technique-which
+has been implemented in a system called
+
+’
+
+0038-O644/90/121241-1 8$09.00
+
+0 1990 by John Wiley & Sons, Ltd.
+
+Received 14 February 1990
+Revised 21 May 1990
+
+1242
+
+J. R . LARUS
+
+AE-records a small subset of the events produced by a program. When a full trace
+is needed, the system re-executes small portions of the program-using
+the traced
+events as a guide-to generate a full trace. Abstract execution adds only 50-80 per
+cent to the traced program’s execution time and compresses the trace data by 2-3
+orders of magnitude.
+
+EXAIIPLE O F ABSTRACT E X E C U T I O N
+T h e example in this section illustrates major aspects of abstract execution. T h e example
+is self-contained and can be read as a quick summary of the rest of the paper. Consider
+the C program in Figure 1. I t sets each element in a 100 X 100 array to the sum of
+its co-ordinates, so when it finishes a[i,j] = i + j for 0 5 i,j < 100. We want to produce a
+full address trace that lists the memory address of each executed instruction and of
+each location read or written by an instruction.
+We produce this trace by compiling the program with a modified version of the
+G K U C compiler. This compiler instruments the compiled code to record important
+events and produces a schetna file that describes how to interpret the trace data to
+recreate a full address trace. T o understand this process, we first need to examine the
+assembly code produced by the compiler (Figure 2). This code is for the MIPS R2000
+processor and omits, for clarity, the procedure entry and exit code that saves and
+restores registers.
+Figure 3 contains the schema for this program. X schenia delimits every function
+and basic block in a program. T h e schema fully describes instructions that contribute
+to the calculation of a memory address for a load or store instruction. These instructions’
+values can either be recorded during execution in the trace file (unknown-defn) or
+recalculated when the schenia is interpreted (compute-defn). Placeholders
+(uneventfulinst) represent instructions that do not contribute to the flow of control or
+
+rain ( )
+
+c
+
+int i;
+for (i = 0 ; i < 100; i = i + 1)
+sub (aCi1, 1);
+
+3
+sub ( x , i)
+i n t XI] ;
+int i ;
+
+i
+int j ;
+
+ABSTRACT EXECUTION
+
+1243
+
+main:
+# prologue omitted
+ori R 1 6 , RO, 0
+ori R 1 9 , RO, 99
+bgt R 1 6 , R 2 , L 6
+la R 1 8 , sub
+la R 1 7 , a
+L5:
+
+addiu R 2 9 , R 2 9 , -16
+addu R4. RO, R 1 7
+addu R5, RO. R 1 6
+jal R 3 1 . R 1 8
+addiu R 2 9 , R 2 9 , 16
+addiu R 1 7 , R l 7 , 400
+addiu R 1 6 , R 1 6 , 1
+ori R 2 , RO, 100
+ble
+R 1 6 , R 2 , L5
+L6:
+
+#epilogue omitted
+
+sub:
+# prologue omitted
+addu R 2 , RO, R4
+addu R 6 , RO. R5
+ori R 3 , RO, 0
+ori R 6 , RO, 99
+bgt R3, R 5 , L 1 2
+ori R 5 , RO, 100
+L11:
+
+addu R 2 , R 6 , R3
+sv
+R2. O ( R 4 )
+addiu R 4 , R4. 4
+addiu R3, R3, 1
+ble
+R3, R 5 , L 1 1
+L12:
+# epilogue omitted
+Figure 2. Compiled code for the program in Figure 1. Details of register saving and r e s t o h g and procedure
+call linknge are omitted for claiity. RO alwuys contains the constant 0. ori is a n or-immediate operation,
+which loads a constant into a register. la is a loud-address operation. addiu is an add-immediate unsigned
+operation nnd addu is an udd unsigned operation. jal is jump-and-link, a proceduw call. ble is n branch
+on less-than-egual operation. sw is a stwe woi-d operation
+
+to addrnss calculations. These instructions compute and use values. T h e program’s
+flow of control is dynamically recorded at conditional branches, where it cannot be
+predicted from the schema.
+Several aspects of the schema are worth noting. First, the array reference in main
+does not produce an event since no load or store instruction in that routine uses the
+
+1244
+
+J . R. LARUS
+
+start-gfunction lain 4
+
+... prologue omitted
+start-block 0
+uneventful-inst 3 3
+end-block-cjump 0 1 3
+start-block-target 1
+uneventful-inst I I
+compute-defn-2 R18 110 + 1Ssub
+uneventful-inst 2 2
+end-block-next-target 1 %loop-entry(? 0 )
+start-block-target 2
+uneventful-inst 3 3
+call-inst sub
+uneventful-inst 5 6
+end-block-cjuap 2 3 2 Xloop-erit(3 0 ) %loop-back(2 0 )
+start-block-target 3
+end-block 3
+
+... epilogue omitted . . .
+end-function main
+
+start-gfunction sub 4
+
+. . . prologue omitted . . .
+start-block 0
+uneventful-inst 5 6
+end-block-cjump 0 1 3
+start-block-target 1
+uneventful-inst 1 I
+end-block-next-target 1 %loop-entry(2 0 )
+start-block-target 2
+uneventful-inst 1 1
+ntora-innt tB4 + 110 Xstruct-reflglobal-ref
+compute-defn-2 R4 SR4 + S14
+uneventful-inst 2 2
+end-block-cjuap 2 3 2 Xloop-exit(3 0 ) Xloop-back(2 0 )
+start-block-targat 3
+end-block 3
+
+... epilogue omitted ...
+end-function sub
+
+Figure 3. The schema ptoduced f i t - the sample ptvgt-am. compute-defn operators define a w l u e that cnii
+be computed zchen the schema is irrtetpreted. uneventful-inst do not conipibute to the cnlwlation of an
+address. The two numbers following this command are the number of consecutive instmctions and their
+execution cost
+
+ABSTRACT EXECUTION
+
+1245
+
+address. In the routine sub, this address appears as a parameter and is recorded as an
+unknown-defn since it is used in a store instruction. Secondly, certain assembly
+instructions (e.g. load address: la) are recognized by AE as assembler macro instructions that expand to multi-instruction sequences.
+Another compiler (aec) translates a schema into a C program that reads the trace file
+produced by the instrumented program and uses it to generate a full address trace.
+For example, the schema for the sub function translates into the code in Figure 4.
+Executing the sample program produces a 11,006 byte trace file (on a MIPS R2000
+processor). T h e full address trace contains 73,134 addresses (62,724 instructions and
+10,410 memory references) and consumes 365,670 bytes (5 bytes per address including
+a byte for the reference type). AE compressed the trace 33 times. By compacting the
+trace file with the Unix compress utility (to 633 bytes), we can increase the spacesaving ratio to 578 times.
+ABSTRACT EXECUTION
+Abstract execution is a general technique for tracing incidents during a program's
+execution. Assume that we want to notice and record occurrences of a set of events E
+during the execution of program P with input I (see Figure 5). Abstract execution
+derives a program P' that generates the set of events E , but is simpler and faster than
+directly recording all events during program P's execution. T h e set of significant events
+SE recorded in the original program P drives program P'. SE should be smaller than
+E , so the tracing does not disrupt the original program and the trace file is small.
+This formulation allows a continuum of interpretation programs. At one extreme,
+we execute an instrumented version of the original program and record events directly,
+so SE contains all events in E and P' just reads this file. At the other extreme, P records
+nothing and the regeneration program is an instrumented version of the original
+program, so P' = P. These extremes are the approaches taken by previous tracing
+systems. In general, we want a point between the extremes so the size of SE is much
+less than the size of E and the cost of running P' is less than the cost of directly
+measuring P.
+These goals conflict. T h e principal way to reduce the size of SE is to shift computations to the regeneration program P' instead of recording values in program P. P' can
+perform a computation that depends only on values that are statically determinable
+from program P. Reproducing these computations increases the cost of P ' , but decreases
+the size of SE.* T h e alternative is to save the result of P's computation in SE and read
+the value in P'. This approach may reduce the cost of P ' , but it increases the size of
+SE. In practice, the cost of P' is less important than the size of the trace file, so AE
+defers computations to the regeneration program.
+It might seem as if P' needs to recompute most of the original program. In fact, AE
+only recalculates the instructions in the program slice for each event of interest. A
+program slice with respect to an instruction I is the set of instructions in the program
+that directly or indirectly affect the value produced by I.',' For example, to produce
+an address trace, we are only interested in instructions that contribute to addresses
+used in load or store instructions and can ignore the other instructions that produce
+
+*However, reading a value from the trace file has a non-trivial cost, so a simple recalculation may be cheaper.
+
+1246
+
+J . R. LARUS
+
+int --ae-rain()
+
+I
+register
+
+int R16, R17. R18, R19, R20, R21, R22, R23, R29, R30;
+
+Pc=0x400190;
+FUNCTION-ENTRY (Ox400190 ,'lrain") ;
+
+/* Start of block 0 */
+LO: PC = Ox4001bO;
+BLOCK-ENTRY (PC) ;
+ISSUE-INST(4, 4) ;
+svitch(ae-get-byte0)
+case 3: goto L3;
+case 1: goto L1;
+default: ae-cjump-erro
+;
+.
+.
+1 /* End of block 0 * /
+
+/* Start of block 1 */
+Li: PC = 0 x 4 0 0 1 ~ 0 ;
+BLOCK-ENTRY (PC) ;
+ISSUE-INST(2, 2) ;
+R18 = O+Ox400290;
+ISSUE-INST(2. 2);
+ae-eat-byte0 ;
+LOOP-START(0); /* End of block 1 */
+
+/* Start of block 2 */
+L2: PC = Ox4001dO;
+BLOCK-ENTRY(PC);
+ISSUE-INST(4. 4) ;
+--ae-subO ;
+PC = Ox4001e0+4;
+ISSUE-INST(6, 6) ;
+svitch(ae-get-byte)
+
+c
+case 2: LOOP-CONT(0); goto L2;
+case 3: LOOP-END(0); goto L3;
+default: ae-cjump-err();
+1 /* End of block 2 */
+
+/* Start of block 3 */
+L3: PC = Ox4001f8;
+BLOCK-ENTRY(PC) ; /* End of block 3 */
+~CTION~EXIT(0x400190.
+"rain") ;
+
+1
+Figure 4. Poriioii of ihc regeiierntioii code for ihe schetiin iri ihe pi.ee~iocrs,figcir-e.The schmrcc for- the main
+funciion translutrs itiio the C' code ribo.r.p, tchich Reirerates n frill adiit-ess trace .fi-otrz ihe l m t e infvinicitbn
+recorded by the Jirirciioii
+
+1247
+
+ABSTRACT EXECUTION
+Recorded
+During
+
+Significant Events
+
+SE
+
+Derived by AE
+
+(5
+I
+
+Regenerated Events
+
+Events
+
+I2igwe 5. Process of abstract execution. Insteud of directly instrumenting u progI-uni I’ to t-ecotrl ri set q/
+elcients E, abstruct execution rnorhfies P to collect a smuller set of significant erents SE und rleri7,es a
+p~-ogrumP’ thut uses SE to genetate the desired ereiits
+
+or use the values that are loaded and stored. P’ also needs to know whether an instruction
+in a slice executed, so AE also traces the program’s flow of control. An instruction in
+a slice can either be re-executed by the regeneration program or its value can be
+recorded in the trace file. T h e choice depends on the complexity and cost of the
+recalculation and is discussed below.
+Abstract execution offers two advantages over other techniques of program tracing.
+First, since SE is smaller than E , it reduces the amount of data that must be stored.
+Previous systems attempted to reduce the size of files by compacting them with a data
+compression algorithm. As we will see, these techniques do not reduce a trace as well
+as AE and they can be applied to the SE file to increase AE’s advantage. Second,
+abstract execution reduces the cost of tracing P. This reduction is valuable in its own
+right if P is long-running or if tracing affects the program’s behaviour. However, it
+may appear as if this reduction is illusory since the cost of P plus the cost of P‘ can be
+larger than the cost of directly tracing P-ignoring system overhead required to write
+larger files. AE’s advantage is that P‘ can run many times, thereby amortizing the cost
+of one run of P over many uses of the data. In addition, P‘ is smaller and simpler than
+the original program and uses a bounded amount of memory, so it is better suited to
+being linked with a program that consumes the trace.
+Abstract execution is a general technique that can record any type of event during
+a program’s execution. In this discussion, we will assume that the events of interest
+are the memory addresses of the executed instructions and the referenced data, in other
+words, a full address trace. This is a common application of program tracing and,
+because of the volume of data, a demanding test of a tracing technique. We will also
+show that other types of events can easily be incorporated into the framework.
+
+1248
+
+J . R. LARUS
+
+D E T A I L S OF AE
+Figure 6 depicts the overall structure of the AE profiling system. Its first part is a
+modified version of gcc-the G N U C compiler.' In addition to compiling a program
+(foo.c), this version of the compiler produces a schema file (foo.sma) and inserts code
+into the executable program to record significant events. T h e compiled program is
+linked with the start-up code (aecrt0.o). When the program runs, it produces a trace
+file (ae.out) that contains the significant events. T h e process is similar to the Unix prof
+or gprof profiling systems.x
+T o produce a full trace from the significant events, XE translates the program's
+schema into a C program that interprets the significant event trace file to generate a
+full trace. T h e schema compiler (aec) translates schema files into a C program. This
+program can be compiled and linked with a program that uses the trace data. Alternatively, the full trace can be written to a file or Unix pipe to supply input to an existing
+program.
+T h e regeneration program is specific to the program compiled by gcc. When the
+original program is compiled again, gcc produces a new schema file, which must be
+translated again by aec. However, a regeneration program correctly interprets any
+ae out file produced bv the instrumented program, so it may be used to analyse many
+different executions of the instrumented program.
+T h e rest of this section provides details about A E . T h e first part describes the
+changes to gcc to accommodate AE. T h e second part describes aec and the translation
+process.
+
+It--"-""""
+
+Figure 6. Ozeiriezc of.V:' systeiii. The -AE Pug to the G.Vl. ( ' coiiipilei- (gcc) c(iuscs it to iiistiwiteiit the
+compiled progi-ani aiid produce n scheiiici file (foo sma). The scheiim .file describes how to iiiteipwt the tmce
+file (ae.out) piaditred by iziiiiitiig the iiisti~inieiitedpi-vgmiii. The s c h e i m c.oinpilei- (aec) ti-mislates a srhenici
+znto a c' program (foo sma.c) that i t w d s the trace file a i d pinriiires n full progt-wn trace. This progi-ani is
+linked zcith an applicatioii program (consume c) that uses the tmce iiifoi7mtioti
+
+1249
+
+ABSTRACT EXECUTION
+
+Changes to gcc
+T h e code added to gcc to implement AE was carefully designed to require minimal
+changes to the compiler. This requirement was desirable and necessary because gcc is
+an evolving program that is developed and maintained by other people. As new versions
+emerge, AE can be quickly ‘snapped’ into place so that it always runs in the latest
+version of this compiler. Machine-specific information used by AE is collected into a
+single file in a manner similar to gcc.
+T o understand where AE fits into gcc, we must briefly examine this compiler. Figure
+7 illustrates the organization of gcc. This program is a well-engineered, conventional
+compiler that has been retargeted to a wide variety of computers. Its parser translates
+a program into an intermediate form called R T L , which is a register-transfer level
+representation of the program. This code is similar to the instruction set of a simple
+load/store computer that has an infinite supply of registers and a very orthogonal
+instruction set. All optimizations-such
+as strength reduction, dead code elimination
+and many others-modify
+the R T L instructions.
+In the final stage, peephole optimization tries to combine an R T L instruction with
+its successors. Then, code generation translates an R T L instruction into one or more
+instructions for the target machine. gcc only represents a program as R T L code. It
+never creates a machine language representation of the program, except in the output
+file.
+AE interfaces to this process in three places. First, immediately before the program
+is put through the peephole optimizer and translated into assembly code, AE analyses
+the entire R T L code sequence to find basic block boundaries, loops and the instructions
+that must be instrumented. Secondly, after each RTL, instruction is run through the
+peephole optimizer, but before it is translated to machine instructions, AE produces
+tracing code that must run before the instruction, e.g. to record the address of a load
+instruction. AE also examines the assembly code to count the number of machine
+instructions produced by gcc for an R T L instruction. This division of labour reflects
+the constraints of gcc. AE needs to analyse the entire body of fully optimized code, so
+
+RTL code
+
+..................................................................
+
+i........
+
+:
+
+AE Addltkrrs to gcc
+
+Figure 7 . Organization of gcc and A E ’ s additions to it. gcc’s iiitenial wpreseiitatioir of a pioginrir is
+register-transfer code (RTL). ;Ifter applying a ran’ety of optinzizutiotis, gcc perfonits peephole optinilzutioii
+on this code and theti produces assembly instructions. t K ewaniines the R T L code ininiediutelj’ befotr
+peephole optimization (but, after all other optiniization) atid watches as it is translated to lilachiire
+instructions
+
+1250
+
+J . R . LARUS
+
+it must run immediately before peephole optimization, which produces non-standard
+R T L code. But r\E must also ivatch the assembly code to create a schema that
+accurately reflects the program.
+
+Analj-sis
+
+AE heavily analyses the RTI, program produced by gcc. Its first analysis-reaching
+definition dataflow analysis-has
+two roles. First, it identifies the basic blocks in a
+function. Although gcc also finds blocks, optimizations that modify the flow of control
+typically corrupt this information. I n addition, gcc only analyses control flow when it
+optimizes a program. Therefore, basic block information is unavailable for programs
+compiled without the -0 flag. A\E avoids both problems by recomputing the program's
+control-flow graph.
+Reaching definitions andysis identifies the assignments to a register whose values
+reach a use of the register.'' This analysis determines which instructions produce a
+value used in a memory address calculation. :lE \vorks backivards from a load or store
+instruction to find other instructions that contributed to the memory address. Assume
+that L\E wants to determine the \.slue in RI. Definitions reaching a use of R 1 can be
+divided into three categories."
+1. Ens), insttxctiotis of the form mov R 1 , (constant). These instructions move a
+constant, e.g. 0, 1, or the address of a global symbol, into a register.
+2. Hard instnictiotis of the form add RI, R2, R3. T o calculate the value of R I , AE
+must know the contents of R 2 and R3, Lvhich requires a recursive application of
+this analysis.
+3. Impossible insttxctions of the form load RI, 4(R2) or call f, which produces a result
+in R1. LIE cannot predict the value in RI, so it adds tracing code to the program
+to record the value.
+Only impossible instructions require additional code to record a significant event. T h e
+first two types of instructions result in a compute-defn, which recalculates the value
+when the full trace is generated.
+a further optimization on machines with few
+registers, in which most variables reside on the stack, *4E could treat stack locations
+corresponding to variables as registers so it does not need to trace values as they are
+loaded into a hardware register. T h i s optimization is possible because AE is part of a
+compiler and is aware of the stack-frame layout.
+T h e regeneration program also needs to know the control flow in the original
+program. T h e minimal information necessary to recreate the flow is a record of which
+branch was taken in every conditional junip.7 T h e program's control-flow graph
+identifies the instructions that are targets of conditions branches. Before a target
+instruction is written to the output file, AE adds code to record the instruction's basic
+block number in the trace file. T h e block numbers are local to a function. T h e flow
+jumps and computational
+of control between all other instructions-unconditional
+instructions-is
+apparent from the schema file.
+In addition to reaching definition analysis, AE analyses the control-flow graph to
+*Sote that all R'I'L iiistructiom opcratr on registers since this code niodcls a loadistiire architccture.
+t I f AE knew the \-alues coniparcd in a conditional statement, it could omit the control-flow event. Although thcsc
+quantities could be recorded i n a nianncr similar to addresses, their Ialues arc i n a ditfrrent domain than addresses.
+Recomputing theni might require performing niost of the original program's computation.
+
+ABSTRACT EXECUTION
+
+125 1
+
+find the loops in a program. This information identifies when a loop starts, finishes
+and begins a new iteration. gcc also marks a rough outline of the loops in the RTI,
+code. Although these markings suffice for gcc, they are inadequate for AE since they
+do not identify all edges exiting a loop or adequately distinguish the beginnings of
+nested loops.
+AE uses a more refined analysis technique to identify control-flow edges that enter
+a loop, exit a loop and begin a new iteration of a loop in a three-step process." T h e
+first step identifies loop back-edges and the blocks that head a loop by finding the
+control-flow edges whose destination dominates their source. It then uses a greedy
+algorithm to find all blocks within the loop. Finally, AE examines the edges from these
+blocks to find the exit and backedges for the loop.
+
+Schema generatioti and instrumentation
+T h e other part of AE examines each instruction after it has passed through peephole
+optimization, but before it is translated to machine code. This part produces one or
+more schema instructions that describe the instruction and various annotations that
+identify whether the instruction is the beginning or end of a program structure such
+as a basic block or program loop. Since an R T L instruction may translate to more
+than one machine instruction, AE watches the assembly code to determine the number
+of uneventful-insts produced for an R T L instruction.
+AE also adds assembly code to the output file to record significant events. These
+sequences are written directly to the assembly output file, either immediately before
+or after an instruction. Currently, there are two types of significant events. T h e first
+records the number of a basic block that is the target of a conditional branch. This
+quantity is typically a byte, but it can be a half word in functions containing more
+than 256 blocks. T h e other type of event records the value produced by an impossible
+instruction. This quantity is a full word. On a MIPS R2000, the instruction sequence
+to record a significant event is six instructions for the first event in a basic block (which
+checks for sufficient buffer space) and three instructions for all subsequent events in
+the block. On computers without the ability to do unaligned stores (e.g. SPARC), a
+full word must be stored one byte at a time.
+In computers with complex instruction sets, several R T L instructions can be combined into a single machine instruction. This optimization also occurs on a smaller
+scale in RISC computers in the peephole optimizer. Combining R T L instructions
+causes problems if AE needs to insert tracing code between the instructions. In this
+case, AE duplicates the instructions before the tracing code.
+RISC computers typically require reorganization of assembly code to fill delay slots
+after branches and memory loads. On MIPS computers, the assembler reorganizes the
+code, and compilers are unaware of hardware peculiarities. By contrast, on SPARC
+processors, gcc attempts to fill delay slots. This reorganization complicates AE since
+the assembly and R T L instructions appear in different orders. However, gcc's reorganization is local and predictable, so AE can compute the relation between the two
+instruction sequences.
+AEC
+
+T h e other half of AE is a compiler (aec) that translates a schema into a C program
+that generates a full address trace from the limited information in the file of significant
+
+1252
+
+J . R . LARUS
+
+events. This translation is simple, so we will only outline it and describe a few
+interesting aspects.
+aec takes as input the executable file and the schema file from each constituent C
+file. T h e executable file contains relocation information sufficient to determine the
+memory address of static objects such as functions and global variables. aec can use
+either an executable containing tracing code or both a traced and an untraced executable.
+T h e latter is more accurate since the regenerated addresses correspond to the untraced
+program, but it is less convenient. For many applications, the additional accuracy is
+unnecessary since the placement of functions and data is arbitrary.
+aec translates a schema file into a C file containing regeneration code. T h e C file
+begins with a collection of boiler-plate macro definitions, which make the translated
+code smaller and easier to read. It then defines a global variable for every register that
+is not saved on a per-function basis. For example, if register 10 is a standard register,
+the program declares int R10, so subsequent references to R10 refer to this location.
+T h e rest of the file contains a sequence of function definitions derived from each
+function’s schema. Each function defines a local variable corresponding to every register
+that is saved and restored on a function-by-function basis. T h e body of the function
+is composed of
+ISSUEANST (n, c). T h e macro ISSUE-INST indicates that n instructions with a
+cost of c cycles are executed at the current PC.
+READ-MEMORY (a, s, g), WRITELMEMORY (a, s. 9). These macros indicate
+that the location at address a is read or modified. T h e flag s indicates that the
+object being read or ivritten is either a structure or an array. T h e flag g
+indicates that the object is statically allocated.
+LOOP-START (n), LOOP-CONT (n), LOOP-END (n). These macros indicate the
+invocation, iteration, or completion of loop n .
+FUNCTION-ENTRY (pc, n), FUNCTION-EXIT (pc, n). These macros indicate the
+start or completion of the function at address pc whose name is n.
+BLOCKENTRY (pc). This macro indicates the start of the basic block at address
+PC.
+
+LINE-NUMBER (I. f). T h i s macro indicates the beginning of code from line I
+in file f.
+
+Function calls. Calls in Lvhich the callee is statically known translate into
+direct invocations of the appropriate schema routine. For example, a call on
+foo translates to a call on the schema routine -ae-foo. Calls in which the callee
+is unknown require a significant event during execution to record the callee’s
+address. T h e regeneration program uses a table of function addresses to map
+this address to the appropriate schema routine.
+Branches. tinconditional jumps translate directly into unconditional jumps in
+the schema program. Conditional branches read the trace file to find which
+target block was reached and then jump to the appropriate point in the schema
+program.
+Computation. T h e translated schema directly executes compute-defn to compute values. These computations use the ‘registers’ in the schema program.
+unknown-defn’s correspond to impossible instructions and read their value
+from the trace file.
+T h e set of events seen by a trace-consuming program is controlled by compile-time
+
+ABSTRACT EXECUTION
+
+1253
+
+flags. T h e default set is the instruction and memory references. Other types of events
+can easily be added to this set.
+An interesting complication is C’s setjmpAongjmp facility, which introduces nonlocal, dynamic gotos. AE follows this control flow by tracing the address of the first
+argument to these functions, which is the jump buffer used to store the program’s
+state, and by recording calls on these functions in the schema. T h e regeneration
+program maintains a table that maps from these addresses to actual jump buffers in
+the regeneration program. When the traced program executes a setjmp, the regeneration
+program also executes a setjmp and associates its jump buffer with the one in the trace
+program. When the traced program does a longjmp, the regeneration program uses this
+table to jump to the appropriate location.
+T h e interface to AE is the routine ae-recreate (file, func). file is the name of the trace
+file containing the significant events. func is a function that the regeneration program
+invokes on every event in the trace. func is passed two or three arguments. T h e first
+is a value indicating the type of event. T h e second is the address of the event. T h e
+optional third argument is auxiliary data. ae-recreate returns when the trace is completely produced.
+T h e regeneration program does not dynamically allocate memory since it does not
+record values. Its only memory usage is the program stack. T h e maximum depth (in
+frames) of this stack is the same as the original program.
+It is not necessary to profile all pieces of a program (for example system libraries).
+AE produces dummy routines for all functions in the executable for which it cannot
+find a schema. However, it is a serious mistake to omit the schema for a file compiled
+with AE profiling, since the routines in the file produce significant events that confuse
+the recreation program. Also, if untraced code invokes a traced routine, the significant
+event file will be corrupted since the regeneration program cannot follow the control
+flow. T h i s problem typically arises in library routines that accept a user-defined function
+as an argument, for example qsort. A solution is to compile these routines along with
+the rest of the program. Interrupts also cause a similar problem, but they do not have
+a simple solution.
+APPLICATIONS
+AE has been used in several applications. One is memory-system analysis, which feeds
+the sequence of memory addresses referenced by a program to a simulator that predicts
+the performance of either a memory cache or virtual memory system. AE’s main
+advantage in this application is the large compression of the trace file. Previously,
+memory address traces were compressed by computing the difference between successively-accessed addresses-which
+uncovers underlying regularity in access patternsand feeding the result to a compression program such as the Unix compress utility.4
+This process typically reduces the volume of a full address trace by a factor of 10 and
+an instruction trace by a factor of 200. T h e next section demonstrates that AE can
+greatly exceed this compression. T h e additional compaction enables longer (and hence
+more realistic) traces to be analysed, stored and exchanged.
+Another application is a parallelism analyser, which examines the executions of
+program loops to find the possibility of parallel overlap.> T h i s system, called pp, uses
+a full address trace in addition to events that indicate the beginning, end and iteration
+of a loop. pp records the last read and modification of most memory locations. I t uses
+
+1254
+
+J . R. LARUS
+
+this information to detect loop-carried data dependences. These conflicts partially
+serialize a loop’s execution and necessitate delays in initiating iterations. pp computes
+and reports the potential speed improvement offered by parallel execution of the
+program as well as data about the characteristics of loops and data dependences.
+In this application, XE’s main advantage is again the large compression of trace files.
+However, another advantage is the ease of identifying higher-level program constructs
+in the trace. Some features, such as loops, can be found by analysing an assembly
+language program. Ho\ve\.er, other features, such as the type of object referenced by
+a memory access, cannot be recovered froni an assembly program. *AE annotates
+memory references with the information necessar!. to distinguish conflicts over variables, arrays and pointer-linked structures.
+
+PER F 0R l I :I N C E
+Three aspects of AE’s performance are important : the additional time required to trace
+the original program, the size of the trace file and the time required to regenerate a
+full address trace. T h e other costs, such as additional overhead in gcc and the size of
+the schema files, are insignificant. A l l measurements \\ere run on a DECstation 3100
+(a 14 31IPS computer that contains a I I I P S R2000 processor) Lvith 24 megabytes of
+main memory and a local disk. .\I1 programs \yere compiled kvith optimization.
+T h e test programs are given in Table 1.
+Table I 1 shows their execution times \vith and \vithout profiling. Time was measured
+with the time command. ‘Program time’ is the execution time for the unprofiled version
+of a program. ‘Profiling time’ is the difference betxveen the execution times of the
+profiled and unprofiled programs.
+T h e user time under ‘Profiling time’ is the oyerhead t o record block numbers and
+memory addresses in a buffer. T h e system time is the cost of \vriting this data to the
+Table 1
+Program
+
+.Ip p I ica t i c ) i i
+
+1,ines
+o f code
+
+pdp
+compress
+POlVd
+
+Con nec t ion ism simulator
+Lriir utility
+Polydoniinoes ganie
+Gaussian elimination
+
+4800
+1510
+528
+1220
+
+sgefa
+
+Table I 1
+Program
+
+Profiling
+time
+
+Program
+tlnle
+
+(user + system)
+
+Protiling/
+program
+tinic
+
+~~~~
+
+pdp
+compress
+Pol@
+sgefa
+
+1.911 + 0.0s
+
+1.4rr + 0.4s
+3.91r + 0.2s
+I . l r r + 1.6s
+
+1.8rr + 7.4s
+l.lrr + 3 . L
+3.111 + 12.4s
+0.42r +- 1 .xs
+
+4.8
+
+2.4
+3.8
+0.8
+
+1255
+
+ABSTRACT EXECUTION
+
+disk. T h e programs’ input data was chosen to produce reasonable duration executions
+whose trace files did not exceed the capacity of the local disk.
+As can be seen from the table, the overhead of profiling ranged from 0.8-4.8 times
+the cost of executing the program. Most of this cost (31-80 per cent) is the time to
+write trace files to disk. This cost reflects the design of the Unix file system and the
+speed of the local disk. Considering only user time, the overhead of profiling is alwavs
+less than the cost of the program. T h e variation in the overhead is due to differences
+in the program’s memory referencing behaviour. Schemas can describe the access
+pattern in programs such as sgefa that examine memory in a predictable pattern. By
+contrast, programs such as pdp and polyd that follow pointers need to record more
+events in the trace file.
+Table I11 shows the characteristics of the trace files. ae.out is the significant event
+trace file written by the traced program. ae.0ut.Z is the compressed version of this file.”
+T h e next two columns list the number of instruccions and memory references in the
+regenerated trace.
+Table I V contains the ratio of the size of the full trace (at five bytes per address) to
+the size of the significant event file, uncompressed and compressed.
+T h e significant event file is 10-40 times smaller than the full address trace. However,
+when the event file is compressed by the Unix compress utility, this ratio increases to
+50-500 times. T h i s ratio demonstrates the compression easily achievable with XE. T h e
+program pdp has the lowest compression ratio because its memory reference pattern
+was very irregular and had to be recorded at execution time. O n the other hand, sgefa
+has the largest ratio since it traversed arrays in a regular pattern that was easily
+reproduced by the schema program.
+
+Table I l l
+Program
+
+pdp
+compress
+POW
+
+sgefa
+
+ae out
+(bytes)
+
+ae out Z
+(bytes)
+
+Number of
+instructions
+
+h u m h e r of
+references
+
+11,993,0 15
+5,443,398
+19,877,248
+1,948,662
+
+849,461
+1,992,613
+2,581,780
+149,707
+
+17,113,853
+15,280,263
+43,631,341
+11,610,512
+
+6,946,64 1
+4,950,64 1
+9,3 18,059
+3,527,339
+
+Table I V
+Program
+
+Size traceisize event
+ae out
+ae out Z
+
+PdP
+compress
+
+10.0
+18.6
+13.3
+38.8
+
+POW
+
+sgefa
+
+141.6
+50.8
+102.6
+505.6
+
+*It is possible to directly write a compressed trace file. This change w-odd grtatly increase the trace time. flowever,
+it will permit longer traces to be recorded.
+
+1256
+
+J . R . LARUS
+
+T h e next table shows the time to regenerate the address trace. T h e regeneration
+code was compiled without optimization. This test passed the generated events and
+addresses to a dummy routine that contained a case statement that discriminated on
+the type of event and then discarded the data. A typical application would dispatch
+from this case statement to semantic routines that process each type of event.
+T h e regeneration programs executed 19-60 times slower than the original, untraced
+programs. Even though the regeneration program did not reproduce the full computation, this slowdonn is to be expected since the program read a large file and invoked
+a function at virtually every instruction executed by the original program.
+T h e test programs generated and consumed 2 14,000-296,000 addresses per second
+of CPU time. By profiling a test program, we find that over half of the time is spent
+in the dummy routine that consumes the addresses, rather than in the code that
+produces them. Even in the worst case, XE produces addresses much faster than an
+application can consume them. For example, memory simulators generally process tens
+of thousands of addresses per second. This means that the additional time to generate
+addresses is insignificant for these programs.
+T h e benefits of XE's space-saving optimization cannot be directly measured since
+thev cannot be disabled. However, they can be indirectly measured. For example, in
+compress, if the basic blocks were recorded as addresses instead of block numbers, the
+trace file would have been 2.3 times larger. AE's analysis also appears effective, since
+781,348 addresses were recorded during execution, and they were sufficient to regenerate 4,950,641 data references.
+
+R E L.AT E D
+
+0R K
+
+Other researchers have built systems for collecting memory address traces. An early
+technique examined every instruction before it executed to determine its memory
+accesses. Because this approach trapped each instruction and did a process context
+switch to the analyser, it slowed program execution by two or three orders of magnitude.
+A faster approach modified the VAX's microcode to record the addresses that it
+produced. T h e A T U h I system still slowed programs by a factor of 20."' However, it
+did not require program modifications or recompilation and could trace all processes
+running on a computer.
+T h e TRAPEDS s! stem modifies a program's assembly language files to insert calls
+on a profiling routine in every basic block." T h e profiling routine for a block computes
+the instruction and data addresses for the block and passes them directly to the address
+trace-consuming program. These profiling routines are similar to the regeneration code
+produced by XE. T h e overhead of this process (Lvithout writing files) is roughly 30
+
+Table i'
+Name
+
+Regeneration time
+
+;\ddresseslseeond
+
+PdP
+
+8 9 . 3 ~+ 13.4,
+6 3 . 7 ~+ 6.03
+223.8ri + 22.75
+49.0u + 2.1s
+
+234,279
+290,257
+213,805
+296,241
+
+compress
+polvd
+sgefa
+
+ABSTRACT EXECUTION
+
+1257
+
+times the program’s execution cost.
+Borg’s system for tracing programs on the DEC ‘Titan inspired this effort.l2 This
+system uses a modified linker to insert tracing code in a compiled program. This code
+records the execution of a basic block, the number of instructions in the block, and
+the addresses of referenced memory locations. Currently, the system saves space by
+not recording the interleaving of memory references among instruction addresses.
+Tracing slows program execution 8-12 times and produces such a large volume of data
+that analysis is generally conducted on-line by interrupting the program and running
+an analysis process. Because of extensive operation system modifications, this system
+can trace all processes and the kernel running on a machine.
+Independently, but slightly earlier than this work, the MPtrace system developed
+some of the same ideas as AE.l3 It, like AE, does not choose the extreme alternatives
+of storing a full trace or rerunning the fully-traced program to regenerate the trace. It
+reduces the volume of trace data by recording control flow among superblocks (a basic
+block with a single entry, but multiple exits) and by recognizing special cases of loads
+and stores (e.g. a load off the frame pointer). Their system reads and modifies the
+assembly code produced by the Sequent C and Fortran compilers.
+MPtrace does not produce schenias, although it regenerates some addresses from
+data collected during execution. T h e special cases recognized by RilPtrace do not
+include all cases recognized by AE. For example, superblocks record events for unconditional jumps that AE infers from the schema file. In addition, RilPtrace records
+memory addresses at their uses-not their definitions-and only performs local analysis
+to determine that a value is unchanged, so it records more addresses than necessary.
+It also stores the address of basic blocks, not their numbers, which significantly
+increases the volume of trace data. T h e execution time overhead of their system is
+worse than AE. Programs executed 1.6-2-3 times slower without file I 0 and 10 times
+slower when writing a trace file. They do not report on the compression of the data
+file.
+T h e important difference between these systems and AE is that AE is based on a
+compiler and uses a formal method to describe the distinction between tracing and
+regeneration. gcc has a higher-level perspective on a program than an assembly language
+post-processor and can record semantic information, such as the type of statement
+making a memory reference, that is unavailable to these programs. Schemas provide
+an economical way to convey static information to the regeneration program. This
+information expands the semantic information produced by the regeneration program
+and permits optimizations, such as using block numbers instead of addresses.
+STATUS
+
+AE currently runs on the MIPS R2000/R3000 and SPARC processors. AE is available
+by anonymous ftp from prirnost.cs.wisc.edu in the file -ftp/pub/ae.tar.Z. This file is a
+compressed tar file containing additions to gcc. AE also requires a copy of gcc,
+which is available from many places including prep.ai.mit.edu. AE is copyrighted and
+distributed under the terms of the G N U General Public License.
+CONCLUSION
+Abstract execution is a powerful and general technique for tracing the execution of
+programs. By reducing the quantity of data collected during a program’s execution, it
+
+1258
+
+J . R . IARUS
+
+reduces the effect of profiling on the program’s behaviour and the \:olume of data that
+must be stored. RIissing information can easily be regenerated by re-executing small
+portions of the program using the traced events as a guide. This division shifts some
+of the profiling costs to the program that uses the data, which is typically an expensive
+computation that is not ad\rersely affected by a small amount of additional work.
+A E is not without disadvantages. It requires a modified compiler, Lvhich limits the
+programs that can be traced. Other systems operate on assembly language, which
+increases their range but reduces the detail of the information that they collect. AE
+only traces a single process. Collecting a single trace of multiple processes appears to
+require either extensi\.e modifications to the operating system or hardware support.
+However, AE’s adsantages of fast, simple tracing, large tile compression and the ability
+to include semantic information make it a powerful tool.
+AE is a simple, portable system for tracing events in C programs. It uses abstract
+execution to greatly reduce the cost of profiling these programs in detail. XI;: currently
+in detail. However, the
+traces a program’s memory reference pattern and control^ f l o ~
+general framekvork is very flexible and can easily be expanded to include other types
+of information that can be inferred by a compiler or recorded during execution.
+ACKNOWLEDGEAIENTS
+
+hIark Hill, David Keppel, Rick Kessler, Robert Setzer, David M’ood and Ben Zorn
+improved this paper with their comments. Eric Koldinger ansivered many detailed
+questions about hIPtrace. Finallv, Richard Stallman pro\-ided a superb tool for programming language research in gcc.
+KEFEREXCES
+1. .Alan J . Smith, ‘Cache nieniories’, .A(’.\l (’oiiiprttiiig S i t i ~ ~ c ~ j .14,
+. ~ ,( 3 ) , 473-530 (1982).
+2. hIIPS Computer Systems, I n c . , IUSC’oirrpilci- L ~ r i i g r t q v sl J i ~ ~ ~ , ~ i - t i i i r’si i r c ~
+Grtitle, Deceniber 1988.
+3. James R. Larus, ‘Estimating the potential parallelism in programs’, 11bi-kshop oti Imigziages and
+Compilers ,/or POI-allel C’onzputiiig, RIIT Press, to appear, 1990.
+4. .I. Dain Samples, ‘RIache: no-loss trace compaction’, IJ/TJwc’tiiii,o.i c!f t/w I i t l c i i i t r l ; o n t r / (’oirf&reiice oti
+.Ifeastii-enietrtairti .M~lc4iir,gf!f C iimprttci Systrwrs, $lay 1989, pp. 80-97.
+5 . Susan Horwitz, Thornas Reps and David Rinkley, ‘Interprocedural slicing using depeiidcnce graphs’,
+.A(’.\l Ti-airs. ~ i . ( ~ ~ ~ i . ~ i i i i i r i i
+Ltiir,qirtiges
+i~~
+trirti .Sj.steiirs, 12, ( I ) , 2GO0 ( 1090).
+6. hIark \Veiser, ‘Program slicing’, lfi,Xb,’ 7‘iziir.s. .So/tzccii-c> h ’ i r g i i i w i i i i g , SE-10, (4), 352-357 (1984).
+7. Richard hI. Stallnian, ‘Using and porting GNL‘ CC’, Free SoftLvare Foundation, September 1989.
+8. Susan I,. Graham, Peter B . Kessler and 3Iarshall K.\lcKusick, ‘.An execution profiler for modular
+programs’, .S?/tzcnir,-E’i-~Ic.tit.~ ciirrf I::\priic>irc c’, 13, 67 1-085 ( 1083).
+9. .Alfred 1’. Aho, Ravi Sethi and Jcffre!- I). I~llmari,(’oiirpilci-st E’i-iiic~iplc,s, 7’c.c.hiriqrtc.s c i i i t l Tools,
+.Addition-\\.esley, 1985.
+10. Annat .Agar\val, Richard I,. Sites and 3lark I Ionvitz, ‘.ATc.SI: a I I ~ U technique for capturing address
+traces using microcode’, Pi-occwiiiigs of tlie /.ltli . I i i r i r r t i l I i i t e i ircrtioiicil Sjwipasiirtir o i r (’oiiipurei.-li-chitectrire,June 1986, pp. 119-127.
+11. Craig B. Stunkel and \V. Kent Fuchs, “I’R.4PEDS: producing traces for multicornputcrs \ ia execution
+oii .\Iemrtiiii,y ciirti Jlorledriven simulation’, I’i-oceerlirrgs of the 1989 .A( ’.I1 .SI(J’.\IF;TRI( ‘.S (’(ii!fk/~irce
+ling qf (’oiiipiitei- Sj,steiirs, )lay 1989, pp. i(L-73.
+12. Anita Borg, R . E. Kessler and David I\.. \Vall, ‘Generation arid anal!-sis of very long address traces’,
+Pi-ocueciiiigs vf the 17th .4iiiriinl Iirtenititiorinl .Sj~rriposirtiii o i l (hriiprrtei- .li-chitec.trtie, Ria! 1990.
+13. Susan J. Eggcrs, David R. Keppel, Eric J . Koldinger and Henry 31. IJc\,y, ‘Trchrliqucs for efficient
+inline tracing on a shared-memory niultiprocessor’, Procwdrirgs (!f tfw IYOU \(:I\ .SIC;.III:TW(’S
+Coitjiereircc o i i .\leasioiiig tiirti .Ilocieliir~qo/ <’oriipritei. .Sj,sttwi.s, May 1990, pp. 37-47.
+
+

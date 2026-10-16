@@ -1,0 +1,666 @@
+The Zephyr Compiler Infrastructure
+Andrew Appel Jack Davidson Norman Ramsey
+Princeton University
+University of Virginia
+http://www.cs.virginia.edu/zephyr
+
+November 6, 1998
+
+1 Introduction and overview
+
+existing C++ front ends and code generators.
+
+High-quality compilers for a range of modern lan- The National Compiler Infrastructure can pay
+guages are essential for conducting experimental re- both economic and intellectual dividends. It should
+search in computer architecture, programming lan- reduce signi cantly the costs of doing computer sysguages, and programming environments. For exam- tems research, in terms of time, barrier to entry, and
+ple, compilers are required to run benchmarks for direct monetary outlay. It should also encourage
+evaluating new ideas in architecture and code opti- more researchers to attack computer systems probmization, and compilers for new languages need op- lems and thus increase the rate at which new research
+timizers, code generators, and runtime systems for results appear.
+existing platforms.
+The National Compiler Infrastructure includes
+Building compilers is often a bottleneck; compiler SUIF|the Stanford University Intermediate Format
+construction is labor-intensive. Often, nearly com- (Wilson et al. 1994)|and the emerging Zephyr optiplete compilers must be constructed even if the es- mizer and program-generation tools. Figure 1 shows
+sential components are relatively small parts of the the big picture. The SUIF infrastructure is built
+whole. To evaluate a new architecture, for instance, around the SUIF representation. This representarequires a code generator for that architecture and tion provides a common format in which programs in
+perhaps an architecture-dependent optimizer. Writ- di erent languages can be expressed, and it supports
+ing toy compilers for toy languages is insucient: \high-level" optimizations, including automatic parThe research community demands measurements us- allelization and object-oriented optimization.
+ing established benchmarks, like the SPEC benchmarks (SPEC 1996), which are written in real pro- The Zephyr infrastructure is built around the Very
+gramming languages.
+Portable Optimizer (VPO), which supports \lowThe National Compiler Infrastructure project seeks level" optimizations on programs expressed at the
+to make it much easier to perform realistic experi- level of machine instructions. Rather than focus on
+ments by making it much easier to build high-quality one compiler, the Zephyr infrastructure focuses on
+compilers. The goal is to make it possible to build strategies that can be used to build many di erent
+complete compilation systems from pieces, replacing compilers. This document explains the main strateor modifying only those pieces that are relevant to the gies behind Zephyr: a compilation strategy, a retarclient researchers. For example, researchers study- geting strategy, and an integration strategy. We are
+ing global optimization algorithms for C++ would putting these strategies into practice by connecting
+replace or add only their optimizers and would use SUIF to a native code generator for the SPARC.
+1
+
+SUIF
+Infrastructure
+DEC
+FORTRAN
+
+IBM C++
+VisualAge
+
+EDG C++
+
+Interprocedural
+analysis
+Parallelization
+and locality
+opts
+Object-oriented
+opts
+Scheduling
+Register
+Allocation
+
+Zephyr
+Infrastructure
+Java
+
+SML/NJ
+
+EDG C++
+
+SUIF-to-VPO
+Bridge
+
+SUIF
+
+Ada95
+
+Instruction selection
+Register allocation
+Code motion
+Memory access
+coalescing
+Induction variable
+elimination
+CSE
+Loop unrolling
+Inlining
+
+VPO
+
+Mach
+SUIF
+
+Alpha
+
+X86
+
+Alpha
+
+Sparc
+
+lcc
+
+MIPS
+
+X86
+
+Optional Item
+
+Figure 1: Overview of the National Compiler Infrastructure
+
+2 Zephyr compilation strategy
+
+ The compiler writer chooses an intermediate
+
+representation for the front end to target.
+Freedom to choose intermediate representations
+is an important element of compiler research;
+for example, the recent trend toward typed
+intermediate languages could not have been
+predicted ve years ago. The Zephyr tools
+enable freedom of intermediate representations
+by integrating with any tree-like
+representation. Zephyr includes an Abstract
+Syntax Description Language (ASDL) for
+de ning tree-like representations. The ASDL
+generator, asdlGen, helps compiler writers
+build and interconnect tools using tree-like
+representations.
+ The Zephyr infrastructure gives the compiler
+writer a guide for connecting the intermediate
+representation to the optimizer and for making
+a complete back end.
+
+The Zephyr compilation strategy is to assemble compilers from parts.
+ The compiler writer supplies the front end.
+This front end can use any of the wide variety
+of lexer generators, parser generators, and
+attribute-grammar evaluators that are
+commonly used to build front ends, and it can
+be written in any programming language.
+ The Zephyr toolset supplies several parts:
+{ A machine-independent optimizer, VPO,
+{ Back-end components for use in the
+machine-dependent parts of the compiler,
+and
+{ Glue for connecting the compiler
+components.
+2
+
+ Zephyr compilers are easily retargeted to new
+
+As examples, here are assembly-language and RTL
+representations of several SPARC instructions:
+add %o1,1,%o2
+$r[10] := $r[9] + 1
+add %o4,%o5,%o2 $r[10] := $r[12] + $r[13]
+ld [%sp-12],%i0 $r[24] := $m[$r[sp ] + sx (?12)]
+call p
+nPC := p j $r[15] := PC
+One property distinguishing Zephyr RTLs from
+other RTL formalisms is that Zephyr RTLs have a
+semantics that is independent of any machine. More
+precisely, the denotation of an RTL expression e,
+which may be written E [ e] , is a function from states
+to values, and the denotation function E is indepen2.1 The VPO optimizer
+dent of the target machine. Similarly, the denotation
+The Very Portable Optimizer (VPO) is a crucial el- of an RTL r, written C [ r] , is a function from states
+ement of the Zephyr infrastructure. Inserting VPO to states, and C is independent of the target machine.
+in a compiler means that preceding stages can generate very nave code, letting VPO ensure that the
+nal code is of high quality. VPO generates code VPO optimization invariants To be optimizable
+that is competetive with gcc and with manufactur- by VPO, a program must be expressed as a set of
+ers' compilers|sometimes better, sometimes worse. procedures, and each procedure must be expressed as
+a control- ow graph in which the individual elements
+The two characteristic properties of VPO are
+are Zephyr RTLs. Such a program has a well-de ned
+ All optimizations are expressed as
+semantics, which is drawn from the RTL semantics.
+machine-independent transformations, but
+Given any such program, VPO repeatedly improves
+it until no more improvement is possible:
+ All optimizations are performed on machine
+instructions
+repeat
+apply code-improving transformation
+This apparent paradox is resolved by VPO's repreuntil
+reached xed point or used all registers
+sentation of programs: control- ow graphs containing register-transfer lists (RTLs).
+Each transformation maintains the following two invariants:
+Register-transfer lists A register-transfer list is
+a simultaneous composition of a list of e ects. Each Semantic invariant S The observable behavior of
+e ect is conditional on a guard ; when the guard is
+the program is unchanged (according to the RTL
+true, the e ect computes the value of an expression
+semantics).
+and stores the result in a location. Most guards are
+trivial (i.e., true). Nontrivial guards are typically Machine invariant M Every RTL in the program
+used to express conditional branching and predicated
+is equivalent to some single instruction on the
+execution.
+target machine.
+An RTL expression may fetch a value from a location, may be a constant expression, or may apply an VPO uses a recognizer to maintain the machine inRTL operator to a list of expressions. RTL operators variant; transformations that violate M are undone
+are pure functions that express the computational automatically. Therefore any semantics-preserving
+work of instructions; they include integer arithmetic, transformation may be added to VPO. It is up to the
+oating-point arithmetic, bitwise operations, and so compiler writer to guarantee preservation of the seon.
+mantic invariant S .
+machines. The machine-dependent components
+are not written by hand; they are generated
+from compact speci cations of the target
+machine. These speci cations describe machine
+properties only, so they can be reused with
+many di erent compilers. The optimizer is
+written by hand, but it is independent of the
+target machine, so it need not be modi ed to
+support new targets.
+
+3
+
+Each semantics-preserving, code-improving trans- of a value in a location is replaced by the expresformation is
+sion previously stored in that location. This transformation is e ectively peephole optimization, and
+ machine-level, because it operates on a
+it implements the technique of instruction selecrepresentation that is isomorphic to machine
+tion by peephole optimization that is described in
+instructions, and it is
+Davidson and Fraser (1984) and also used in gcc.
+ machine-independent, because the only
+obligation of the compiler writer is to preserve 2.2 VPO-based compilers
+the machine-independent semantics.
+From this brief description, it might appear as if VPO
+Even an optimization written to exploit an unusual solves the code-generation problem: just write your
+feature of a single machine must be expressed in the program in RTL, and VPO will produce good mamachine-independent framework. If a new machine chine code. The truth is that RTL is not a uniincorporates the same feature, VPO automatically versal intermediate representation, even though it is
+exploits it.
+machine-independent. The limitation that is easy to
+Many standard optimizations are easily expressed overlook is that RTLs passed to VPO must satisfy
+as transformations of ow graphs containing RTLs. the machine invariant M . VPO is guaranteed to preOptimizations already implemented in VPO include serve M , but some other part of the compiler must
+establish M .
+ code motion,
+Figure 2 shows a compiler that uses VPO. The
+front end emits the intermediate representation of the
+ common-subexpression elimination,
+compiler writer's choice|perhaps RTLs, or perhaps
+ strength reduction,
+some other representation. The code expander turns
+this
+intermediate representation into RTLs that sat induction-variable elimination,
+isfy the machine invariant M . From there, VPO can
+produce high-quality assembly language.
+ loop unrolling,
+The major machine-dependent components of a
+ inlining, and
+VPO-based compiler are shown in sans-serif bold
+in Figure 2. (Typical front ends do not have
+ memory-access coalescing.
+machine-dependent components, although they often
+use a small amount of machine-dependent informaPreserving the machine invariant M VPO uses tion, e.g., the sizes and alignment requirements of
+a gatekeeper to preserve the machine invariant M . basic types.) The next section presents a strategy for
+The gatekeeper is invoked after each code-improving retargeting Zephyr compilers by creating such comtransformation. It presents each changed RTL to ponents for new machines.
+the recognizer, which tells the gatekeeper whether
+the new RTL is equivalent to some single instruction on the target machine. If all changed RTLs are
+equivalent to machine instructions, the invariant is
+maintained, and the gatekeeper permits the trans- 3.1 Machine-description languages
+formation. If not, the invariant is violated, and the
+gatekeeper rolls back the transformation, which re- As far as is possible, Zephyr compilers are retarturns the program to a state satisfying the machine geted by component generators that create machineinvariant.
+dependent compiler parts from descriptions of maOne of the most important transformations in chine properties. Zephyr provides a family of ComVPO is simple forward substitution, in which a use puter Systems Description Languages (CSDL) in
+
+3 Zephyr retargeting strategy
+
+4
+
+Front End
+IR (possibly RTL)
+
+8
+>>
+Code Expander
+>>
+>>
+RTL satisfying M
+Code <
+Generator >
+>> VPO
+RTL satisfying M
+>>
+>: recognizer
+
+Optimizations
+
+asm emitter
+Assembly language
+Figure 2: VPO-based compiler
+
+which to write such descriptions. We use a family
+an array of mutable cells, and spaces can be
+of languages, rather than a single language, in order
+used to model not only memory and
+to limit each language in the family to a description
+general-purpose registers, but also the program
+of a single machine property, or perhaps a group of
+counter, condition codes, special-purpose
+closely related property. This strategy has several
+registers, and in general any state that could
+advantages:
+change during the execution of a program.
+ If a CSDL description refers to a machine's
+ The design of individual description languages
+instructions, it shares a model of those
+can be tailored to the needs of the property to
+instructions with all other CSDL descriptions.
+be described, making descriptions easier to
+This
+simple model is equivalent to an algebraic
+write.
+datatype, or if you prefer, a grammar in which
+ Descriptions of single properties are easier to
+each production is named, the start symbol is
+understand and more likely to be reused than
+instruction, there may be other nonterminals
+are monolithic \kitchen sink" descriptions.
+like e ective address or operand, and there are
+terminals like register number, constant, and
+ Because descriptions depend only on the target
+absolute address.
+machine, not on a particular compiler,
+intermediate form, or optimizer, they can be
+CSDL descriptions are declarative. They describe
+used to build other tools, not just compilers.
+properties of machines, but they don't tell the comWhat makes the CSDL languages a family, and not piler what to do with the machine. Decoupling the
+simply an unrelated collection, is that they all have descriptions from the compiler means descriptions
+the same view of two critical aspects of machines: can be reused with multiple compilers, as well as with
+other tools. Unlike typical parser generators or codestate and instructions. More precisely:
+generator generators, CSDL does not have \semantic
+ If a CSDL description refers to a machine's
+actions." CSDL descriptions can therefore be anastate, it treats that state as a collection of
+lyzed and checked for consistency in a way that is
+CSDL storage spaces. Each space behaves like impossible for arbitrary code.
+5
+
+Machine descriptions in the compiler literature Many descriptions called \machine descrip-
+
+ The Calling Conventions Language speci es
+
+how parameters are passed and results are
+returned between procedures
+(Bailey and Davidson 1995).1 It can be used to
+generate an automaton from which compilers
+can derive calling sequences, including
+procedure prologs and epilogs.
+
+tions" in the literature are actually descriptions of
+particular compiler components.
+
+ The \machine descriptions" used in lcc
+
+describe not the target instruction set, but a
+mapping of lcc's intermediate code onto the
+target instruction set
+(Fraser and Hanson 1995). The descriptions are
+further complicated by \semantic actions,"
+which typically emit assembly language, but
+which sometimes execute arbitrary C code.
+These complexities make it impossible to reuse
+the descriptions for any purpose other than
+building lcc.
+
+ The PipeLine Unifying Notation: Graphs and
+
+Expressions (PLUNGE) is a graphical notation
+for specifying the pipeline structure of a
+processor, complete with function units and
+control and data path networks. Function units
+can be labelled with operations, and paths can
+be labelled with latencies and widths. The
+PLUNGE tool will accept a graph and a
+description of an instruction set, and will seek
+to nd an implementation of the instruction set
+on the pipeline. If successful, it will emit
+resource vectors for use in instruction
+schedulers; otherwise it will identify
+inconsistencies or gaps in the pipeline
+implementation.
+
+ The \machine descriptions" used with version 1
+of VPO (Benitez and Davidson 1988) are
+actually RTL recognizers. They do not depend
+on a compiler's intermediate code, but as in the
+case of lcc, one must understand arbitrary
+C code to understand what RTLs are
+recognized.
+
+By using these CSDL descriptions in combination,
+we should be able to generate the machine-dependent
+components of VPO. The remaining retargeting task
+is writing a code expander.
+
+ The \machine descriptions" used in the GNU
+
+C compiler (Stallman 1992) mix information
+about the representation, e ects, and pipeline
+requirements of instructions, as well as
+information about the compiler's intermediate
+code and even C code to be included in the
+compiler itself.
+
+3.2 Writing a code expander
+
+In a Zephyr compiler, the code expander maps the
+compiler's intermediate representation onto correct
+CSDL languages The CSDL family currently has machine code. A new code expander must be writfour members in various stages of maturity.
+ten for each combination of intermediate representaand target platform. The key to writing code
+ The Speci cation Language for Encoding and tion
+expanders
+is to exploit VPO's ability to improve exDecoding (SLED) speci es the
+tremely
+na
+ve code. We recommend that compiler
+assembly-language and binary representations writers create
+new code expanders using one of two
+of instructions (Ramsey and Fernandez 1997). strategies: modify
+expander for another machine,
+It can be used to generate assembly-language or port an existing an
+code
+generator from another comemitters.
+piler.
+ -RTL speci es the RTL semantics of
+1 Strictly speaking, this is a software convention, not a mainstructions (Ramsey and Davidson 1998). It
+chine property, but it is associated with machines, and it uses
+can be used to generate RTL recognizers.
+the CSDL storage model.
+6
+
+Modifying a code expander We advise compiler particular what a compiler writer must do to get
+writers to keep the output from code expanders as an optimizing code generator for the intermediate
+simple as possible. For example, if you need to load a representation of his or her choice. But if Zephyr
+value from a variable stored at o set 12 from the stack is truly to be widely used, connecting that code
+pointer, don't think about what addressing modes are generator to the rest of the compiler must also
+available; just emit these RTLs:
+be easy, even if the rest of the compiler is composed of di erent components written in di erent
+t1 := 12
+languages. To simplify communication among such
+t2 := sp
+components, Zephyr supports creation and intert3 := t1 + t2
+change of trees: abstract-syntax trees, intermediatet4 := $m[t3 ]
+representation trees, RTL trees, and even trees repFrom this sequence, VPO can easily and eciently resenting calls to interface functions. These trees are
+recover t4 := $m[sp + 12]. Using such simple RTLs described using Zephyr's Abstract Syntax Description Language (ASDL) (Wang et al. 1997), which
+has two advantages:
+provides support for multiple languages. As an ex The code expander can be targeted to a small ample, Figure 3 shows the SUIF front end, which is
+subset of the actual machine. For example, it written in C++, connected to a code expander, which
+is written in ML, connected to VPO, which is written
+can typically ignore all addressing modes
+in C.
+except register and register indirect.
+ASDL uses grammars to describe tree data struc The subset actually targeted doesn't change
+tures. Figure 4 shows an ASDL description of a form
+much from machine to machine, so the code
+of RTLs.
+expander can be retargeted from M to M with
+few changes, because most simple RTLs will
+ASDL tools The ASDL generator, asdlGen, reads
+satisfy both M and M .
+ASDL descriptions and produces
+Porting an existing code generator Another  data-structure de nitions for concrete
+way of getting a code expander is to port an existing
+representations of trees,
+code generator. What is needed is a way of getting
+from the existing code generator's representation of  constructor functions for creating trees, and
+instructions to an RTL representation of the same
+instructions. If, for example, the existing code gen-  pickler and unpickler functions for writing trees
+erator prints assembly language, the calls to printf
+to disk and reading the results.
+can be replaced by calls to encoding procedures generated by the Zephyr tools. From a -RTL description, asdlGen supports C, C++, Java, Haskell, and Stanthe Zephyr tools can generate an encoding procedure dard ML. Pickled trees can be written to disk les or
+for each instruction in the target machine's instruc- sent over networks. They are language- and machinetion set. Each encoding procedure creates an RTL independent, so they provide a way for components
+suitable for passing to VPO.
+written in di erent languages to interoperate.
+The ASDL browser is an interactive tool that can
+create, browse, edit, and save ASDL trees. It o ers
+multiple views, including a \ le manager" view, a
+planar-graph view, and a sheye view. Research is
+underway on browsing techniques that will make it
+To this point, our presentation of Zephyr has fo- easier to visualize and debug data structures that are
+cused on back-end and retargeting issues, and in typically used in compilers.
+0
+
+0
+
+4 Connecting Zephyr
+components
+
+7
+
+zsuif.asdl
+zsuif.asdl
+
+ZSUIF
+ZSUIFto
+toRTL
+RTL
+
+RTL
+RTL
+
+hello.c
+hello.c
+
+ZSUIF
+ZSUIF
+
+SUIF
+SUIF
+
+ZSUIF
+ZSUIF
+Gateway
+Gateway
+
+asdlGen
+asdlGen
+
+SUIF
+SUIF2.0
+2.0
+
+VPO
+VPO
+
+hello.o
+hello.o
+
+Figure 3: Using ASDL to connect SUIF to VPO
+
+ASDL design goals ASDL is similar in purpose 5
+
+Zephyr status
+
+to interface-de nition languages (e.g., CORBA IDL),
+to SGML Document Type De nitions, and to ASN.1. As of Fall 1998, here is a snapshot of the status of
+Because it is targeted to tree-like data structures used the Zephyr tools and components:
+in compilers, ASDL is simpler and more concise than ASDL  asdlGen has been used for several
+these alternatives. It also has other advantages over
+projects and is reliable. Sources and
+these existing formalisms.
+binaries can be downloaded from the
+project web site.
+ ASDL descriptions tend to be much smaller
+ A prototype ASDL browser, written in
+than the corresponding language-speci c
+Tcl/Tk, is available. Work on a second
+data-structure and function de nitions.
+version, written in Java, is in progress.
+ An ASDL description of SUIF, called
+ ASDL supports multiple languages and
+ZSUIF, is available.
+guarantees consistency of representations native
+ The SUIF-to-VPO compilation path,
+to di erent languages. Support for new
+working through ASDL, is nearly
+languages is easy to add.
+complete. It compiles the full lcc test
+suite and several SPEC benchmarks. More
+testing is needed to eliminate bugs lurking
+ Code created by asdlGen is readable and uses
+in
+dark corners, e.g., varargs.
+the expected idioms of the target programming
+language.
+CSDL  SLED has been used for several
+projects and is reliable. Sources and
+binaries can be downloaded from the
+ ASDL is a good t to existing abstract-syntax
+project web site.
+trees and intermediate representations,
+including those used in SUIF, in lcc, and in
+ -RTL machine descriptions are available
+Standard ML of New Jersey.
+for comment, and generated code is being
+8
+
+ty = (int) -- size of a value, in bits
+exp
+= CONST (const)
+| FETCH (location, ty)
+| APP
+(operator, exp*)
+location = AGG
+(aggregation, cell)
+cell
+= CELL (space, exp)
+effect
+= STORE (location dst, exp src, ty)
+guarded = GUARD (exp, effect)
+rtl
+= RTL
+(guarded*)
+
+bit vector
+function
+bijection
+mutable store
+Meanings of unspeci ed
+terminal symbols
+
+const
+operator
+aggregation
+space
+
+Figure 4: ASDL speci cation of a form of RTLs
+
+References
+
+used internally, but the -RTL tools are
+not mature, and the tools are available \as
+Bailey, Mark W. and Jack W. Davidson. 1995 (January).
+is" on request.
+A formal model and speci cation language for pro The Calling Convention Language is
+cedure calling conventions. In Conference Record of
+mature, and the related tools are bundled
+the 22nd Annual ACM Symposium on Principles of
+with VPO.
+Programming Languages, pages 298{310, San Francisco,
+CA.
+ PLUNGE is in the planning stages; it is
+Benitez, Manuel E. and Jack W. Davidson. 1988 (July).
+not a Zephyr deliverable.
+
+A portable global optimizer and linker. Proceedings
+of the ACM SIGPLAN '88 Conference on ProgramVPO  VPO version 1 has been used for several
+ming Language Design and Implementation, in SIGprojects and is reliable. Sources and
+PLAN Notices, 23(7):329{338.
+binaries can be downloaded from the
+project web site. Version 1 uses an older, Davidson, J. W. and C. W. Fraser. 1984 (October). Code
+selection through object code optimization. ACM
+string-based RTL representation and
+Transactions on Programming Languages and Syshand-written recognizers.
+tems, 6(4):505{526.
+ Code-generation interfaces, for connecting Fraser, Christopher W. and David R. Hanson. 1995. A
+code expanders to VPO 2, are nearing
+Retargetable C Compiler: Design and Implementamaturity. They are available for comment,
+tion. Redwood City, CA: Benjamin/Cummings.
+from the project web site.
+Norman and Jack W. Davidson. 1998 (June).
+ A reference compiler, which demonstrates Ramsey,
+Machine descriptions to build tools for embedded
+the use of the new interfaces, will be
+systems. In ACM SIGPLAN Workshop on Lanavailable from the project web site in
+guages, Compilers, and Tools for Embedded Systems
+mid-November, 1998.
+(LCTES'98), Vol. 1474 of LNCS, pages 172{188.
+Springer Verlag.
+Ramsey, Norman and Mary F. Fernandez. 1997 (May).
+Specifying representations of machine instructions.
+ACM Transactions on Programming Languages and
+Systems, 19(3):492{524.
+
+9
+
+Standard Performance Evaluation Group. 1996. SPEC.
+Manassas, VA.
+Stallman, Richard M. 1992 (February). Using and Porting GNU CC (Version 2.0). Free Software Foundation.
+Wang, Daniel C., Andrew W. Appel, Je L. Korn, and
+Christopher S. Serra. 1997 (October). The Zephyr
+abstract syntax description language. In Proceedings
+of the 2nd USENIX Conference on Domain-Speci c
+Languages, pages 213{227, Santa Barbara, CA.
+Wilson, Robert P., Robert S. French, Christopher S.
+Wilson, Saman P. Amarasinghe, Jennifer M. Anderson, Steve W. K. Tjiang, Shih-Wei Liao, ChauWen Tseng, Mary W. Hall, Monica S. Lam, and
+John L. Hennessy. 1994 (December). SUIF: An infrastructure for research on parallelizing and optimizing compilers. SIGPLAN Notices, 29(12):31{37.
+
+10
+
+

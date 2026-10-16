@@ -1,0 +1,1120 @@
+FLIC - a Functional Language Intermediate Code
+Simon L Peyton Jones
+Department of Computer Science
+University College London
+Gower St, London WC1E 6BT
+Emaih simonpj@ cs.ucl.ac.uk
+Internal Note 2048, February 25, 1988
+
+Abstract. PLIC is a Functional Language Intermediate Code, intended to provide a common intermediate
+language between diverse implementations of functional languages, including parallel ones. This paper
+gives a formal definition of FLIC's syntax and semantics, in the hope that its existence may encourage
+greater exchange of programs and benchmarks between research groups.
+
+1. THE AIMS OF FLIC
+It is a common observation that high level functional languages are all "sugared" version of the lambda
+calculus, which suggests that it should be possible to define a common intermediate code into which they
+could all compile. Widespread use of such an intermediate language would
+(i)
+
+help aUeviate the bad effects of a proliferation of high level languages, without unduly
+constraining their different strengths;
+
+(ii)
+
+give wider access to fast implementations;
+
+(iii)
+
+make benchmark programs available to a wider community;
+
+(iv)
+
+provide a language in which some compiler passes can be regarded as source to source
+transformations (eg lambda lifting, strictness analysis).
+
+There appears to be widespread support for, and interest in, the development of such an intermediate code.
+This paper is an attempt to define an intermediate code, called FLIC, in a form acceptable to as many
+potential users as possible. It has been substantially improved upon during discussions held on the FP
+electronic mailing list. In the end, however, it represents a personal view, driven by the requirement to
+estabfish a standard for use in the GRIP project 1.
+Prototype compilers for FLIC already exist at University College London, Imperial College and Chalmers
+University. FLIC is also being used in experimental work at GEC's Hirst Research Lab, Birmingham
+University, Warwick University and the Los Alamos National Laboratory.
+
+1.1 Related work
+FLIC is similar in spirit to the FP/M intermediate language used at Imperial College2, but is rather more
+general and higher-level. The IF1 language is a intermediate language for dataflow compilers, used by the
+Manchester dataflow project 3, and has a similar purpose to FLIC in a different arena.
+
+30
+
+SIGPLAN Notices, Vol. 23, No. 8
+
+FLIC - a functional langauge intermediate code
+
+Another related language is Dactl Declarative Alvey Compiler Target Language) 4, which is a more
+expressive intermediate form than FLIC, and is designed to serve as a target for any declarative language.
+FLIC is less ambitious, and hence is rather simpler to implement than Dactl.
+
+2. T H E O B J E C T I V E S O F F L I C
+Based on the aims outlined above, the next two sections describe first the specific objectives and
+assumptions of FLIC, and then the detailed design decisions.
+
+(i)
+
+FLIC should be completely specific to functional languages, but should not favour any particular
+language, type system, implementation or architecture. In particular, it should be as suitable for
+parallel machines as for sequential ones.
+
+(ii)
+
+It should be possible to modify the front end of almost any compiler for a pure functional
+language to generate FLIC with only a rather small amount of work. A similar small amount of
+work should suffice to take FLIC as input to the back end.
+
+(iii)
+
+The syntax should contain few constructs and be easily machine readable. Nevertheless, the
+syntax should specify a printable (as opposed to binary) representation for FLIC programs, for
+maximum portability.
+
+(iv)
+
+As well as having a small syntax, FLIC should have a small semantics. This boils down to
+saying that FLIC should not have too many primitive (built-m) functions.
+
+(v)
+
+A FLIC program should be portable from one FLIC implementation to another, without an
+unacceptable loss m efficiency.
+
+There is a direct conflict between the last two objectives. Typically, a compiler front end will generate
+FLIC which contains references to functions which are recognised and treated specially by the back end.
+To port such a program to another implementation, FLIC definitions for these functions will have to be
+provided, with a consequent loss in efficiency.
+One way to minimise the loss in efficiency is to define a suitable vocabulary of primitive functions as part
+of FLIC, chosen so that the efficiency loss of using them alone is as small as possible. A very small
+vocabulary of primitives would give rise to simple but slow implementations; a large vocabulary would
+produce complex but fast implementations.
+The main effort in designing FLIC has gone into picking a set of primitives which preserves opportunities
+for back-end optimisations without becoming too large and baroque.
+
+3. MAJOR DESIGN DECISIONS
+Before proceeding to a detailed definition of FLIC, this section outlines the major design decisions m FLIC
+and justifies them.
+
+3.1 Computational model
+FLIC's computational model is the typed lamhda calculus, augmented with primitive functions and
+constants, using normal order reduction.
+31
+
+FLIC - a functional langauge intermediate code
+
+Normal order evaluation implies non-strkt semantics. The semantics of any particular program can be
+made strict by adding calls to the STRICT primitive (see Section 5.7). It may, however, be difficult to
+adapt a back end designed solely for a strict language to implement FLIC/
+Some languages, Lisp-based ones in particular, have the notion of an uncumed function; that is a function
+which is applied to several arguments at once, and for which partial applications are illegal. FLIC does not
+support this directly; all function applications are curried.
+It is clear that the only reasons for wanting uncurried functions are (powerful) efficiency reasons. We can
+therefore regard uncurried functions as efficient implementations of curried functions, in circumstances
+where the function is always applied to the right number of arguments, and the proper place for such
+information is as an annotation (see Section 3.3).
+
+3.2 Primitives
+For efficiency reasons, FLIC augments the lambda calculus with a collection of primitive functions, or
+primitives, which must be supported by all FLIC implementations.
+Of course, the implementation is free to support each primitive either directly or in terms of other
+primitives. Indeed, an extremely inefficient FLIC implementation could support the primitives using
+lambda abstraction alone.
+
+3.3 Annotations
+A FLIC program contains two sorts of information:
+(i) Semantic: that is, what is to be computed.
+(fi) Pragmatic: that is, how to compute it efficiently.
+These two kinds of information are kept completely distinct in FLIC, by putting all pragmatic information
+in lexically distinguishable annotations. The meaning of an annotated program is therefore defined to be
+the meaning of the FLIC program obtained by deleting all the annotations. Annotations may be
+implementation-specific, whereas the semantic information is entirely implementation-independent.
+Annotations therefore provide a way of conveying arbitrary information from one part of a compiler to
+another.
+If a compiler compiles code on the basis of information contained in annotations, and the annotations give
+incorrect or inconsistent advice, then the compiler may perhaps generate incorrect code. For example, if a
+non-strict function is incorrectly annotated to say that it is strict, a compiler might compile code to use
+call-by-value.
+Hence, whilst correct annotations may have benign effects, incorrect or inconsistent annotations can
+have pernicious effects. This convention allows a compiler to annotate the code consistently with all
+
+manner of implementation-specific information, while still allowing the same program to be run on a
+different system by simply ignoring all the annotations.
+
+3.4 Type-analysis and type-checking
+A FLIC program must be weU-typed. By this is meant that no run-time type checking need be performed,
+because it is guaranteed that functions will only be applied to arguments of the appropriate type. It does
+not mean that FLIC programs are compelled to include type information explicitly, nor does it mean that
+FLIC programs can be type-checked.
+
+32
+
+FLIC - a functional langauge intermediate code
+
+If explicit type information were compulsory, then a language for such type information would have to be
+provided, which would unreasonably constrain those who are experimenting with the type system itself.
+Insisting on type-checkability would be worse still, because it would imply a committment to one particular
+type system.
+Some compilation algorithms (such as strictness analysis) may nevertheless, requffe type information to be
+present, and many compilers will wish to carry type information in their FLIC programs. This is precisely
+what annotations are for - semantically irrelevant information which is useful for the compiler.
+Legislating that FLIC programs should be well-typed (in the sense that they cannot "go wrong" at run-time)
+seems at first to rule out Sasl, KRC and other untyped languages. However, all that needs to be done is to
+declare a sum-of-products type, Universal, to unite numbers, booleans, characters, fists and so on. Then a
+version of addition can be written which checks the type of its argument, and similarly for all the other
+functions. In other words, each object gets tagged with its type (by the sum), which is just what happens in
+the implementation of untyped languages. The reason for this design decision is that it allows typed
+languages to run with no penalty, and untyped languages to run with the penalty of tagging, which they
+incur in any implementation.
+
+3.5 Data types
+FLIC has only two built-in data types, the floating-poiut numbers (Float) and the integers (Int). All other
+domains are built up using either lambda abstraction (to build functions) or data construction (to build data
+structures).
+
+3.5.1 Data construction
+Functional programming languages often allow structured types to be declared. For example,
+tree ::= LEAF num I NODE tree tree
+might declare an object of type "tree" to be either a LEAF, in which case it has a single field of type "num",
+or a NODE in which case it has two fields both of type "tree". Each alternative form is associated with a
+constructor (LEAF or NODE, in this case) and a number of fields. The number of fields associated with a
+constructor is called its arity; in the example, LEAF has arity 1 and NODE has atity 2.
+The types of lists, characters and booleans can all be defined using structured type declarations, and this is
+the approach taken in FLIC (efficiency considerations are discussed below).
+These structured objects may conveniently be represented by tagged tuples. A tagged tuple consists of a
+non-negative integer tag, t, together with an ordered sequence of elements, x ... x . For semantic
+1
+n
+purposes, such tagged tuples will be denoted thus:
+< t l x 1 ,...,Xn >
+
+The constructors of a structured type are associated with distinct integer tags in the range 0..r-l, where r is
+the number of constructors in the type. Then objects of the type can then be represented by tagged tuples
+whose size is the arity of the constructor. For example, if LEAF was associated with tag 0 and NODE with
+1, the objects of type "tree" would be represented as
+<01 v > or <1 I t l , t 2 >
+
+where v is of type "num" and tl and t2 are of type "tree".
+FLIC provides primitives to build and manipulate tagged tuples. Technically, the domain construction
+33
+
+FLIC - a functional langauge intermediate code
+
+involved is the coalesced sum of lifted product. The primitives are:
+PACK
+UNPACK
+UNPACK!
+SEL
+CASE
+TAG
+
+contruction
+lazy destruction
+strict destruction
+extract a field
+perform case analysis
+extract tag
+
+This is not the minimal possible set of primitives, but a smaller set seems to lead to serious loss in
+efficiency. The details of these primitives are given in Section 5.2.
+It is important, for efficiency reasons, for compilers to be able to spot a number of special cases, which are
+now discussed.
+
+3.5.2 Tuples
+Many functional languages provide tuple types, which are structured types with only one alternative m the
+type. In this case no tag is required, and hence a more compact representation may be possible than in the
+general case.
+It would be possible to distinguish tuples using an annotation, but it is more direct to provide a family of
+functions:
+TUPLE
+UNTUPLE
+UNTUPLE!
+SEL-TUPLE
+
+tuple contruction
+lazy tuple destruction
+strict tuple destruction
+extract a field
+
+The semantics of these fimctions is defined directly in terms of their more general counterparts, but their
+use allows the compiler to use a more efficient data representation. The fact that the program is well-typed
+ensures that this optimisation does not affect the semantics of the program.
+The idea that some knowledge about the number of constructors in the type may allow more efficient
+implementations is taken up again in the detailed description of the language which follows, by providing
+an annotation to express the number of constructors in the type (Section 6.2).
+
+3.5.3 Enumeration types
+A boolean type might be declared thus:
+bool ::= TRUE I FALSE
+All the constructors have arity zero, and this property defines the enumeration types. Characters
+constitute another example of an enumeration type.
+As in the case of tuples, a compiler can often use a more compact representation for an object of an
+enumeration type than for general structured objects, so FLIC provides a specialised set of primitives to
+handle enumeration types:
+ENUM
+CASE-ENUM
+TAG-ENUM
+
+contruction
+perform case analysis
+extract tag
+34
+
+FLIC - a functional langauge intermediate code
+
+3.6 Arrays
+It is clear that at some stage FLIC should support some array-manipulation primitives, and this is the
+subject of much current debate. The situation is not yet stable enough for a suitable set to be specified, but
+this should happen eventually.
+
+4. CORE SYNTAX AND SEMANTICS
+FLIC's concrete syntax can denote the lambda calculus, plus "let", "letrec", numbers, characters and
+strings. Lambdas can only have one bound variable, and everything is curried.
+The syntax is defined using extended BNF, with angle brackets <> to delimit nonterminal symbols, square
+brackets [] to delimit optional symbols, star (*) to indicate zero or more repetitions, and plus (+) to denote
+one or more repetitions. These meta-symbols are enclosed in single quotes when they are used as temainal
+symbols. To avoid confusion over quoting, the symbols SINGLE-QUOTE and DOUBLE-QUOTE are
+used to stand for the terminal symbols ' and "respectively.
+The semantics of FLIC is given in the language of denotational semantics, using D to give the semantic
+interpretation of expressions, and C to give the interpretation of primitives and constants.
+As a notational convenience, a name in italics stands for the semantic interpretation of the corresponding
+FLIC primitive. In other words,
+CU PRIM I] = P R I M
+for any primitive PRIM. In general, all semantic values will be written in italics. For example, the
+semantics of the FLIC primitive SEQ are given by
+S E Q _1_b = .1_
+SEQ a b = b
+
+(All such equations should be read from top to bottom, picking the first equation which matches the
+arguments.)
+The semantics given below takes no account of annotations. The semantics of an annotated FLIC program
+is defined to be the semantics of the program obtained by omitting all annotations in the original program
+(cf Section 3.3).
+
+4.1 BNF syntax
+Here is the BNF for the concrete syntax of FLIC. The major constructs are function application, lambda
+abstraction, let-expressions and letrec-expressions, the last three of which are introduced with singlecharacter keywords.
+A FLIC program is an <Expr> (expression).
+<Expr>
+
+:
+I
+I
+I
+I
+
+<Simple>
+<Expr> <Simple>
+= <Name> <Simple> <Expr>
+= ( <Name>+ ) ( <Simple>+ ) <Expr>
+& ( <Name>+ ) ( <Simple>+ ) <Expr>
+
+35
+
+/* Application */
+/* let <Name> = <Simple> in <Expr> */
+/* let <Name>s = <Simple>s in <Expr> */
+/* letrec <Name>s = <Simple>s in <Expr> */
+
+FLIC - a functional langauge intermediate code
+
+<Simple>
+
+( <Expr> )
+( <Abstraction> )
+<Annotation> <Simple>
+<Name>
+<Number>
+<Character>
+<String>
+
+<Abstraction>
+
+:
+I
+
+\ <Name> <Expr>
+\ <Name> <Abstraction>
+
+<Annotation>:
+
+'[' <Name> [<Expr>] ']'
+
+/* lambda <Name>. <Expr> */
+
+Notice that abstractions bracket in the conventional way:
+(',x x x) is the same as ~ (x x))
+and
+(',,x\yXzx y y) is the same as (Xx (Ny (Xz (x y y))))
+
+4.1.1 Let and letrec
+FLIC provides special syntactic forms for let- and letrec-expressions, despite the fact that they can be
+translated into a form which uses only lambda binding.
+The reason for this decision is as follows. Let(rec)-expressions constitute a particular form of abstraction
+in which the value bound to the newly-defined name is known precisely, in contrast to lambda abstractions
+where the bound variable is only bound when the abstraction is applied to an argument. Substantial
+performance improvements are possible if let(rec)s are treated specially by the back end. The provision of
+syntax for let(rec)s allows the distinction to be made explicit, rather than relying on the compiler to spot a
+particular pattern of lambda abstraction and application (which is particularly complex in the case of
+letrecs).
+Let-expressions come in two forms: in the first form a single name is bound, while the second, form allows
+simultaneous binding of several names. The reason for introducing the second form is that it is rather
+tiresome to translate the second form into the first, since in general new unique names may have to be
+invented.
+One other feature in the syntax of lets and letrecs deserves a mention: the list of names to be bound comes
+before the list of values, rather than interleaved as they do in Lispkit. Thus:
+
+& (x Y) ((CONS 1 Y) (CONS 2 Y))
+binds X to (CONS 1 Y). This is convenient for compilers, because it means that a name is never
+encountered before it has been declared.
+Notice also that the syntax of both let and letrec allows extra definitions to be added to the front of an
+expression by simple concatenation. There is no need to add trailing brackets.
+
+4.1.2 Annotations
+An annotation is enclosed in square brackets, and consists of a name followed by an optional expression in
+FLIC syntax. It annotates the expression that follows it. The name uniquely distinguishes different sorts of
+36
+
+FLtC - a functional langauge intermediate code
+
+annotation from one another.
+The (optional) expression inside the annotation must be in FLIC syntax, but there is no assumption that it
+posseses FLIC semantics. It follows that names need not be bound, and annotations are not referentially
+transparent. An annotation could, for example, denote a type-expression.
+
+4.2 Semantics
+FLIC uses the standard denotational semantics for the lambda calculus, augmented with let and letrec. D is
+the main semantic function for the abstract syntax, and C gives the interpretation of constants and
+primitives.
+D~k]lp
+D~vBp
+DI[ <Annotation> E ]1 P
+D I E E lip
+DI[\vE~ p
+DII = v E B 1] p
+D~=(v I
+E)B]p
+. ii . . .
+DI[ & (v I •
+I ""
+B ll P
+
+=
+=
+=
+=
+=
+=
+
+=
+
+Cl[ k ]l
+pv
+D[[ E ]] p
+(D[[E ] ] p ) ( D [ [ E liP)
+Xw. Dk E ]] p[v=wl
+DI[ B ]] p[v=DII E ]] p]
+D I [ B ] ] p [ v =DI[E ] p ..... v =DI[EnDP]
+1
+,
+1
+n
+,
+DI[ B B (fix (kp .p[v =DI[E I ] p ..... v =DI[E ] p']))
+
+where k is a constant or primitive
+v, v ...v are variables
+1
+E, E l ...1~n, B are expressions
+
+4.3 Lexical conventions
+4.3.1 Layout and comments
+Anything between/* and */is treated as a comment, and ignored.
+Layout is not significant. Any sequence of white-space characters (spaces, tabs, newlines) is treated as a
+single separator.
+
+4.3.2 Names
+A name is an <Initial-Char> followed by zero or more <Sequel-Char>s.
+<Initial-Char> <Sequel-Char>*
+
+<Name>
+
+<Initial-Char>
+
+<Sequel-Char>
+
+:
+I
+I
+
+an alphabetic character (upper and lower case distinct)
+one ofthe characters: ! @ $ % ^ * _ - + ' ' : ; < > , . ? / 1 {
+<Escape-Char>
+
+:
+I
+I
+
+<Initial-Char>
+a digit (0-9)
+one of the characters: = &
+
+An <Escape-Char> is one of the following sequences:
+#n
+#s
+
+newline
+space
+37
+
+}
+
+FLIC - a functional langauge intermediate code
+
+~t
+#f
+#d
+##
+#xdd
+
+tab
+form feed
+delete (rubout)
+the character #, and similarly for any other non-alphabetic character
+the character whose ASCII code is dd (hexadecimal)
+
+These rules imply that the following characters must always be escaped anywhere in names:
+( ) [ ] # SINGLE-QUOTE DOUBLE-QUOTE SPACE
+For example, the following are valid and distinct names: fred, Fred, Name# with# space, #(Bracketed#
+name#), #3.
+
+4.3.3 Characters
+Characters are enclosed in single quotes.
+<Character> : SINGLE-QUOTE <Escape-Char> SINGLE-QUOTE
+The same escapes work in characters as in names, though only SINGLE-QUOTE and # must be escaped.
+Examples of characters are: 'a', 'Z', '#n', '#". The last example is the single-quote character.
+As mentioned earlier, in the discussion of data types, characters are interpreted as members of an
+enumeration type:
+C[I 'c' ]] = E N U M n, where n is the ASCII code for c
+
+The function E N U M is defined formally in Section 5.2. The ASCII code of a character can, of course, be
+obtained by extracting its tag using TAG-ENUM.
+
+4.3.4 Strings
+A string is enclosed in double quotes, and may be empty.
+<String> : DOUBLE-QUOTE <Escape-Char>* DOUBLE-QUOTE
+The same escapes work inside strings as in names, except that only DOUBLE-QUOTE and # must be
+escaped. For example, the following are valid strings: "hello", "New#nline", "Double quote #" in string".
+The interpretation of a string is a list of characters:
+CII "c 1 ... c n "]1 = C O N S CI[ c I ] l (... ( C O N S CII c n ~ NIL) ...)
+
+4.3.5 Numbers
+<Number> : <Digit>+ [. <Digit>*] [-] [E [-] <Digit>+]
+Examples of numbers are: 1, 6-, 3.4, 5E-4, 8.9-E3. Notice that the sign follows the mantissa of negative
+numbers, so that numbers always start with a digit.
+In systems which support integers and floating point numbers as separate types, numbers with no 'E' or
+decimal point are taken to be integers, all others are taken as floats.
+
+38
+
+FLIC - a functional langauge intermediate code
+
+4.4 Examples
+Here are some example FLIC programs:
+3
++34
+= f ( k x + x 1) (f 3)
+& (A B) ([Annotation] (CONS 1 B) (CONS 2 A)) A
+
+5. PRIMITIVES
+In this section the primitives are defined that must be supported by any FLIC implementation. They have
+been chosen to be sufficiently expressive to allow efficient compilation, without becoming too numerous.
+
+5.1 Selection primitives
+There is a family of primitives which select one argument out of several. For n > 0, 0 <_i < n:
+K - n i x o ... x n . l
+
+= x.
+
+X
+
+= .20
+
+K-n-i
+
+= K-n i
+
+5.2 Operations on structured data
+The earlier discussion should have motivated the following definitions of primitives operating on structured
+data:
+Forn_> 0, i < n , r_>0, d < r
+
+= <d / x o . . . . . x . 1>
+
+P A C K - n d x o .. x n a
+PACK-n-d
+SEL-n
+SEL-n
+
+i
+i
+
+PACK-n d
+
+<d/x o ..... x.>
+1
+
+=x.
+=.~
+= SEL-n i
+
+SEL-n-i
+
+UNPACK!-n
+UNPACK!-n
+
+f
+f
+
+< d l x 0 ..... x 1>
+±
+
+=fx o ...x. l
+=Z
+
+UNPACK-n
+
+f
+
+e
+
+= f (SEL-n 0 e) ... (SEL-n (n- 1) e)
+
+CASE-r
+CASE-r
+
+e°
+e
+
+TAG<d/x
+
+o ..... x l>=d
+
+0
+
+...
+...
+
+era
+e
+
+r-1
+
+< d / x o . . . . xn. ~>
+.1_
+
+= e
+= .~
+
+In the special case of tuples, the following definitions hold, for n _>2, 0 _<t < n
+TUPLE-n
+
+=
+
+PACK-n
+
+SEL-TUPLE-n
+
+=
+
+SEL-n
+
+0
+
+SEL-TUPLE-n-i
+
+=
+
+SEL-TUPLE-n
+
+i
+
+39
+
+FLIC - a functional langauge intermediate code
+
+UNTUPLE-n f t
+UNTUPLE!-n f t
+
+=
+=
+
+UNPACK-n f t
+UNPACK!-n f t
+
+Notice that the semantics of the tuple-specific functions are defined directly in terms of the semantics of
+their more general counterparts.
+In the special case of enumeration types, the following definitions hold, for d _>O, r _>1
+ENUM
+ENUM-d
+CASE-ENUM-r
+TAG-ENUM
+
+=
+=
+=
+=
+
+PACK-O
+PACK-O-d
+CASE-r
+TAG
+
+Whilst the semantics of these specialised primitives is given in terms of their more general counterparts,
+they must he used consistently. Objects built with the construction primitive of one family (general, tuple
+or enumeration type) can only be examined and taken apart with other primitives from that same family. In
+fact, the specialised families are best regarded as an annotations of the general primitives (see Section 6.2).
+
+5.3 Booleans
+The boolean truth-values are denoted using the names TRUE and FALSE and have the interpretations
+T R U E = ENUM-1
+F A L S E = ENUM-O
+
+There are the usual boolean operators:
+IF c x l x2
+
+= C A S E - E N U M - 2 x2 x l c
+
+NOTx
+ORxy
+ANDxy
+XORxy
+
+= IFx FALSE TRUE
+= IF x T R U E y
+= IF x y F A L S E
+= OR ( A N D x y) (AND ( N O T x ) ( N O T y))
+
+5.4 Equality
+In many functional programs the availability of polymorphic equality and comparison operators makes
+programming considerably simpler, particularly when building lookup tables or trees. FLIC therefore
+provides polymorphic equality and comparison primitives,
+POLY=,POLY>,POLY<,POLY<=,POLY>=,POLY!=,
+which may be applied to any data object constructed from the built-in types (Int and Real) using the data
+construction operations. They are not applicable to functions, or to data structures containing functions;
+this is another aspect of the assumption that programs are well-typed.
+The comparision primitives induce a total order on each data type, but an implementation is otherwise free
+to choose whatever ordering it pleases. For example, an implementation may simply perform
+lexicographic comparison of representation, which may induce a different ordering for the integers than
+that induced by the integer comparison primitives.
+
+5.5 Numbers
+The usual arithmetic and relational operators over the integers are provided:
+4O
+
+FL!C - a functional langauge intermediate code
+
+IiN'I~ (unary negation), INT+, INT-, INT*, INT/, INT% (remainder), INT<, INT<=, INT=,
+INT>=, INT>, INT!= (not equals).
+All are strict in their arguments. Division rounds towards zero, and remainder takes the same sign as the
+divisor.
+The corresponding family is provided for floating point numbers: FLOAT_, FLOAT+, etc. In addition,
+there are the following exponential and transcendental functions, which operate on floating point numbers:
+SQRT, SIN, COS, ARCTAN (result lies between :tpi/2), EXP (natural exponential), LN (natural
+log).
+INT->FLOAT and FLOAT->INT convert between integers and floating point numbers. FLOAT->INT
+rounds towards zero.
+Both integers and floating point numbers should have at least 32-bit precision, but particular
+implementations may provide more. Implementations are encouraged, but not compelled, to check for
+exceptions, such as overflow and division by zero.
+
+5.6 Lists
+The primitives CONS, HEAD, TAIL, IS-NIL and NIL manipulate lists, which are defined as a structured
+type in which NIL has tag 0, and CONS has tag 1.
+CONS
+NIL
+
+= PACK-2- l
+= PACK-0-0
+
+HEAD x
+TAIL x
+IS-NIL x
+
+= CASE-2 ABORT (SEL-2-0 x) x
+= CASE-2 ABORT (SEL-2-1 x) x
+= CASE-2 TRUE FALSE x
+
+5.7 Sequencing
+Those who have wntten interactive functional programs will be familiar with the phenomenon that the
+program prints something like:
+Enter data: Result is:
+
+where the initial segment of the result message comes out before the user has entered his input. This is
+quite fight, since the "Result is:" message does not depend on the input, but to get the right sequential
+operational behaviour we want to impose a dependence. This can be achieved with the SEQ primitive,
+defined by the equations:
+S E Q _1_b = A_
+SEQ a b = b
+
+The implementation of SEQ is simple - evaluate the first argument, then evaluate and return the second.
+On a parallel machine the evaluation of both arguments may proceed in ~amllel, but of course the second
+must not be returned until the first has terminated.
+
+5.8 Strict functions
+In a strict language (that is, a language in which all functions are strict) the equation
+41
+
+FLIC - a functional langauge intermediate code
+
+f±= ±
+must hold for all functions, reg~:lless of whether f actually uses its argument or not. The STRICT
+primitive is designed to allow this to be expressed neatly. STRICT is defined by the following semantic
+equations:
+STRICTf.L = ±
+STRICT f x = f x
+
+It is normally used at the point of definition of the strict function, by applying STRICT to a lambda
+abstraction. For example, here is a let-binding which defines SEQ in terms of STRICT
+= SEQ (STRICT (Xx\y y))
+(Of course, STRICT can be defined in terms of SEQ also.) In a sequential implementation STRICT can be
+implemented by evaluating the argument first; in a parallel implementation the constraint is that f must not
+return until evaluation of the argument has completed.
+
+5.9 Input and output
+FLIC takes a minimal approach to I/O.
+The result of the whole program is assumed to be its output, which may be tagged to indicate the device to
+which the output should be sent.
+The function INPUT takes a list of characters, which is intended to denote a file name or device name, and
+returns a list of characters, which is intended to be the contents of that file or device.
+I N P U T s = <the list o f characters referenced by s>
+
+The result of INPUT is implementation-dependent, and may be time-dependent (that is, it may give
+different results depending on when the program is run).
+
+5.10 Errors
+FLIC makes no attempt to specify error handling (this is a weakness). If a program contains an error, the
+behaviour of the implementation is not specified; in particular, it may deliver an incorrect result without
+other warning.
+For example, type errors may not be detectable at run-time, because objects of different types may share a
+common concrete representation. The polymorphic equality primitive is a similar case. Arithmetic
+overflow, underflow or division by zero may not necessarily be detected by an implementation.
+There is one exception: the primitive ABORT is guaranteed to cause a run-time error indication if it is
+evaluated.
+ABORT = ±
+
+5.11 Families of primitives
+Section 5 has defined a number of infinite indexed families of primitives. The main altemative would have
+been to use
+
+42
+
+FLIC - a functional langauge intermediate code
+
+(UNTUPLE n)
+instead of
+UNTUPLE-n
+There is something to be said on both sides, but it is easier for a lexical analyser to convert the latter into
+the former than vice versa. There is also something rather nasty about a function whose arity depends on
+one of its arguments, particularly as there would be nothing to prevent that argument from being an
+arbitrary expression rather than a manifest integer.
+In the case of structure tags, however, the argument leans the other way, because it is occasionally
+convenient to perform arithmetic on tags. The most common example of this occurs in converting a
+number to a character string, when the next digit is computed by adding an integer in the range 0-9 to the
+character '0'. Hence, some primitives which operate on structured objects are defined to take a tag as an
+argument. In practice, the tag is almost aJways known at compile-time, so primitives are provided which
+incorporate the tag also.
+Selection primitives, which return one of their arguments (or some component thereof) are another
+example. Here an integer which indicates which argument or component to select is defined as a separate
+argument, with other primitives that incorporate this information in the function name.
+
+6. ANNOTATIONS
+This section suggests annotations for two particular situations.
+
+6.1 Strictness information
+Compilers for non-strict languages sometimes perform strictness analysis to discover when a function is
+sure to evaluate its argument, in which case the analysis phase annotates the function with strictness
+information.
+There is an important difference between these strictness annotations and the use of the STRICT function
+described earlier: strictness annotations can be discarded without changing the meaning of the program. In
+contrast, discarding applications of STRICT might make a program terminate which did not do so before.
+There are two places where strictness information is useful: at a function definition and at a function
+application. The annotation [!] is used in both cases. An application (El E2) is annotated as strict like this:
+[[] (El E2)
+This indicates that the function E1 is strict, so that E2 can safely be evaluated before (or in parallel with)
+applying E 1 to E2. A lambda abstraction may be annotated thus
+[!] (X,x E)
+to indicate that the function denoted by Gx E) is strict.
+For example
+
+= f [!](,, x [ ! ] t y (INT- y x)))
+[!] ([!] (f x) y)
+43
+
+FLIC - a functional langauge intermediate code
+
+6.2 Tag sizes
+For the efficient implementation of structured objects, it may be desirable to vary the representation
+depending on how many alternatives there are in the type, which determines the maximum tag size. This
+can be achieved by annotating the primitives which manipulate structured data.
+The annotation [TAGS r], where r is a positive integer, indicates that the primitive thus annotated is being
+used to manipulate a structured data object which has exactly r alternative forms. For example, a FLIC
+let-binding for CONS could be
+= CONS ([TAGS 2] PACK-2-1)
+The [TAGS r] annotation can be applied to any of the primitives PACK-n, PACK-n-d, UNPACK-n,
+UNPACK!-n, SEL-n, SEL-n-i, CASE-r, TAG, ENUM, ENUM-d CASE-ENUM-r and TAG-ENUM. (The
+tuple-manipulation primitives are implicitly anotated with [TAGS 1].)
+The annotation must be performed consistently, otherwise a variant might be PACKed in an efficient
+representation, but UNPACKed by a function which did not expect that representation. As always,
+inconsistent or incorrect annotations may mislead the compiler (cf Section 3.3). Notice that if [TAGS-r ]
+annotates CASE-r 2 then necessarily r 1 =r 2 ; but the annotation may still be necessary to indicate that the
+argument is in an efficient representation.
+
+7. A p p e n d i x . D o m a i n s for data c o n s t r u c t i o n
+This appendix consists of a more discursive discussion of the domains used in FLIC's data constructors,
+and the reasons for their choice.
+As mentioned above, FLIC has only two built-in data types (Int and Float), and all other data types are built
+using the following domain constructions:
+• Arrow, to construct functions.
+• Cartesian product, to construct tuples.
+• Sum, to construct variants.
+Functions are constructed using lambda abstraction, and manipulated using function application. Objects
+from sum and product domains are constructed and maniuplated using primitive FLIC functions, and this
+appendix is mainly devoted to a discussion of sum and product domains, and the pnmitive operators
+required to use them.
+
+7.1 Product domains
+An element of a product domain is a tuple, an ordered set of values. For example, if D O and D are
+domains then
+1
+D
+
+o
+
+xD
+
+1
+
+is the domain of ordered pairs (2-tuples) of elements from D O and D I respectively.
+analogue of the cartesian product of sets:
+
+44
+
+This is a direct
+
+FLIC - a functional langauge intermediate code
+
+D O × D 1 = { < d o,d l > ] d o aDo andd I CD 1 }
+using the notation <do ,d 1 > to stand for the ordered pair o f d and d . Since a computation whose result is
+a tuple might not terminate, we actually get the lifted domain (Do x~31 )±, where
+(D O x D t ) ± = ( D o x D i ) w { Z }
+Notice that in this domain, the elements <L,±> and ± are distinct. This extends naturally to products of
+more than two domains:
+D o x . . . x D n , l = { < d o ..... d d > l d l e d i}
+
+7.2 Operatorsfor products
+A natural family of operators to construct tuples is TUPLE-0, TUPLE- 1, TUPLE-2, etc, where
+TUPLE-n x ° x 1 ... x . 1 = <x° , x 1 .... x . i >
+Notice that TUPLE-n does not evaluate its arguments.
+Why have a family of n-ary tuple constructors, rather than providing a single 2-tuple constructor (PAIR),
+and building n-tuples out of 2-tuples? The reason for preferring TUPLE-n can be expressed either
+pragmatically or semantically.
+Beginning with the former, suppose an implementation constructed a 3-tuple, t, using the expression
+(PAIR x (PAIR y z)). Then if SECOND selects the second component of a 2-tuple, (SECOND t) would be
+a perfectly legal construct, yielding a 2-tuple, which could be passed around as a first class object. But this
+would defeat a clever implementation which constructed the 3-tuple as a single construct, and only allowed
+the selection of single components. Put another way, there is no way of telling whether a composition of
+PAIRs is meant as an n-tuple or as a composition of PAIRs!
+In terms of semantics, the 3-tuple domain built by a composition of two PAIRs
+((D O x D 1 )± x D 2 )±
+is not isomorphic to the domain built with TUPLE-3
+(D O x D l × D 2 )±
+since the former contains elements such as <_k,t>, which do not appear in the latter. FLIC therefore
+provides n-ary tuple constructors.
+How should tuples be taken apart? Two altemafives suggest themselves:
+(i)
+
+Take the tuple apart and apply a specified function to the components:
+
+UNTUPLE-n
+
+f <a~ , x I . . . . x n . l > = f x o x 1 ... xn. 1
+
+(UNTUPLE-n is thus just an uncurrying operation.)
+(ii)
+
+Define a family of operators SEL-n which take two arguments, an integer i and an n-tuple t, and
+select the ith element from t. The reason that a distinct selection function is needed for each size
+of tuple is that the size of the tuple may be required to locate where the ith element is held.
+45
+
+FLIC - a functional langauge intermediate code
+
+A tricky point about UNTUPLE-n is whether or not it is strict in its second argument, the tuple. A
+straightforward (and efficient) implementation of UNTUPLE-n would evaluate its second argument,
+expecting to find a tuple, and apply its first argument (the function) to its n components. Thus its complete
+semantics would be
+U N T U P L E - n f <Xo , x t . . . . x . t >
+U N T U P L E - n f _I_
+
+z
+=
+
+f x 0 x1 ... Xn.1
+3_
+
+Alternatively, a less strict semantics might be:
+UNTUPLE-n f t = f (SEL-n 0 t)... (SEL-n (n- 1) t)
+This is less efficient, but lazier, since t is evaluated later.
+This is not a trivial question - see Phil Wadler's papers or my book 6 Briefly, the lazier version corresponds
+to lazy pattern matching, and can be vital to give good program behaviour. This is, however, a matter of
+taste, and FLIC should not legislate on the subject.
+The solution I adopt here is to define all three operator families: selection (SELECT-n), strict untupling
+(UNTUPLE!-n), and lazy untupling (UNTUPLE-n). It is up to each implementation to decide which ones
+to implement directly, and which (if any) to implement in terms of the others.
+
+7.3 Sum-of-products domains
+A sum domain contains labelled elements from each component domain. For example,
+DO + D t
+contains all the elements from D and all the elements from D t , but labelled so that by looking at an
+element from the sum domain it ~ possible to tell from which component domain it came (imagine the
+elements of D O being painted blue, and the elements from D 1 being painted red).
+I use the term "variant" (or "variant object") to describe an element of a sum domain, by analogy with
+Pascal's variant records. (There appears to be no generaUy agreed term for such things.) Variants may be
+represented by tagging the values of the component domains. Formally, we can write
+D O + D 1 ={0:d t I d ED o } U { l : d 2 Id 2 •D 1 }
+using the notation "t:v" to mean "the value v tagged with t", and using the non-negative integers as tags.
+Sums can be extended in the natural way to n-ary sums, and I define the "width" of the sum domain to be
+the number of domains which are being added together.
+Most typed functional languages allow user defined data types, such as
+tree : LEAF num I NODE tree tree
+This can be modelled by a domain which is a sum of products:
+tree = N u m + (tree x tree)
+
+Objects of such types can be represented as tagged tuples, LEAFs being tagged with 0, and NODEs with 1.
+This fits with the idea that the sum tags the tuples made by the product.
+
+46
+
+FLIC - a functional langauge intermediate code
+
+7.4 A defence of sum-of-products
+Domain theory provides us with two sorts of sum: "separated sum" and "coalesced sum". In tie latter, the
+bottom elements of all the domains are identified together, with the bottom of the sum domain; in the
+fbrmer, a new bottom element is adjoined, below the bottom elements of the component domains. Thus,
+0:2_ is a m e m b e r of D
+
+0
+
++D
+
+1
+
+where we are using separated sum, but not where we are using coalesced sum.
+These theoretical distinctions have immediate corresponding physical manifestations. For example, the
+NODEs defined above are tupled and tagged all-at-once, so that the element 1 :.1_does not exist, so we must
+be using a coalesced sum.
+At first it seems attractive to provide primitives for sum domains and product domains separately, and treat
+sum-of-product domains by composition. Unfortunately, this leads to a separated sum construction, since
+there is no way to avoid the possibility of constructing elements such as 1 :.1..
+It turns out that this difference actually has a significant impact on efficiency. If a variant tuple is built with
+a single sum-of-product constructor, it may be assumed that as soon as the tag of the object is available,
+then the components of the tuple are also available (though not necessarily evaluated). This allows a more
+efficient representation of variant tuples, as a tagged vector of storage locations.
+I have therefore come to the conclusion that FLIC should provide primitives for operating on product
+domains, and sum-of-product domains; rather than treating sum and product domains separately and sumof-products by composition.
+
+7.5 Operatorsfor sum-of-products domains
+The tag which distinguished variant tuples from one another within a domain is a non-negative integer,
+ranging from 0 to r-1 where r is the width of the domain. Variant tuples are constructed with a family of
+operators PACK-n:
+PACK-n
+
+d x o ... x n 4 = < d / x o . . . . . x 4 >
+
+where d is the tag, n is the number of components in the tuple, and the notation <d I x 0 .... , x n- > . denotes
+the tagged tuple d:<x o ..... xn.>. PACK-n is rather like TUPLE-n, except that it tags the tuple it ~mlds.
+When taking variants apart, we should provide a case for each possible tag, which suggests the CASF.,-r
+family, where
+<d/x
+C A S E - r e o e 1 ... e m 2C A S E - r e o e~ ... e m
+
+o . . . . . x "1 >
+
+=
+=
+
+e
+.1~
+
+CASE-r evaluates its last argument (the tagged tuple), extracts the tag d, and returns its d'th argument, r is
+the width of the sum domain. This is rather like a multi-way version of the ordinary two-way conditional.
+Having decided in which component of the sum the variant ties, it can be taken apart using UNPACK-n:
+UNPACK-n
+UNPACK-
+
+f < d / x o . . . . . x .1 >
+n f _1.
+
+=
+
+fxo...x_
+
+=
+
+_k
+
+1
+
+Notice that it is assumed that the number of components in the variant matches the unpack operator being
+used, and no tag check is performed (remember, FLIC assumes that programs are well-typed).
+47
+
+FLIC - a functional langauge intermediate code
+
+Together these can implement pattern-matching in an efficient manner (see my book for a full explanation).
+For example,
+f (LEAF x) = g x
+f (NODE tl t2) = h tl t2
+could compile to
+f x = CASE-2 (UNPACK- 1 g x) (UNPACK-2 h x) x
+assuming that LEAFs are tagged with tag 0, and NODEs with tag 1.
+For the efficient implementation of variants, it may be desirable to vary the representation depending on
+how many elements there are in the sum, which determines the maximum tag size. This efficiency
+improvement is provided by means of annotations (see above).
+
+References.
+1.
+
+2.
+3.
+4.
+5.
+6.
+
+Simon L Peyton Jones, Chris Clack, Jon SMkild, and Mark Hardie., "GRIP - a high-performance
+architecture for parallel graph reduction", pp. 98-112 in Proc IFIP conference on Functional
+Programming Languages and Computer Architecture, Portland, ed. G Kahn, Springer Verlag
+LNCS 274 (Sept 1987).
+Tony Field, "The compilation of FP/M programs into conventional machine code", Imperial
+College (June 1985).
+JR Gurd, CC Kirkham, and I Watson, "The Manchester prototype dataflow computer", CACM
+28(1) pp. 34-52 (Jan 1985).
+JRW Glauert, JR Kennaway, and MR Sleep, "Specification of Dactl", University of East Anglia
+(Dec 1987).
+Philip Wadler, " A splitting headache and its cure", Programming research group, Oxford (Jan
+1985).
+Simon L Peyton Jones, The implementation of functional programming languages, Prentice Hall
+(1987).
+
+48
+
+

@@ -1,0 +1,1360 @@
+An Intermediate Design Language and its Analysis
+Daniel Jackson
+Laboratory for Computer Science
+Massachusetts Institute of Technology
+dnj@lcs.mit.edu
+
+Abstract
+A simple relational language is presented that has two desirable properties. First, it is sufficiently expressive to encode,
+fairly naturally, a variety of software design problems. Second,
+it is amenable to fully automatic analysis. This paper explains
+the language and its semantics, and describes a new analysis
+scheme (based on a stochastic boolean solver) that dramatically outperforms existing schemes.
+
+some basic features with symbolic model checking [BC+92]
+(but is largely unrelated in the details). The entire problem is
+solved 'at once', so that a solution that would be near the start
+of an explicit search takes no less time to find, and yet problems can be handled that are far too large for an explicit
+search.
+The new scheme allows an improvement also in the architecture of the tool. To simplify the implementation, it helps
+to treat all datatypes - sets, scalars and relations - equivalently. But this made little sense for the explicit scheme, since
+the code for generating values of a scalar variable is very different from the code for generating values of a relation. In the
+symbolic scheme, however, sets and scalars can be treated as
+degenerate relations. Consequently, the front end of the tool
+encapsulates most of the complexity of the source language,
+and the analysis is performed on a much simpler intermediate
+
+1 Introduction
+In the last few years, we have been investigating analysis techniques for software specifications to which state-machinebased analyses - such as model checking - do not apply. We
+developed a simple specification language, called NP [JD96a],
+that attempts to capture the essence of Z [Spi92] without
+many of its complexities, which can be entered and displayed
+in plain ASCII, and analyzed fully automatically. Our too!,
+called Nitpick [JD96b], takes NP specifications and ca~i
+check the consistency of state and operation descriptions (a
+non-trivial task in the presence of conjunction), and more
+general properties such as invariant preservation and simple
+refinements.
+Nitpick/NP has been applied in a variety of settings. It has
+exposed errors in a mobile internet protocol [JNW97, Ng97],
+in a simulation framework proposed as a standard by the Department of Defense, and in a variety of small case studies. It
+has been taught to students in the Masters of Software Engineering degree at Carnegie Mellon University, and used on
+class projects.
+Recently, we have made a significant advance in the underlying checking technology. Using a new scheme based on
+boolean satisfaction, we are now able to analyze problems that
+are an order of magnitude larger. In comparison to the previous scheme in which the values of states were enumerated
+explicitly, this scheme might be termed 'symbolic'. It shares
+
+This paper presents the intermediate language a~d the new
+analysis scheme° By focusing o~ ~ e ~:~termediate language in
+its own right, rather than on the translation from the source
+!angL,age, we hope to make it eafier for other tool builders to
+determille whether the analysis scheme might be useful to
+them. Aside from its use on Z-~ke ~i?ecifications, the analysis
+might be applied to object models, or to architecture description languages.
+In the rest of the paper, we explain first the language, its
+syntax, typing and semantics (section 2); illustrate the translation of source into intermediate form by showing some
+typical examples (section 3); explain how a variety of analysis
+problems can be reduced to model finding (section 4); present
+the analysis itself, essentially a compilation (section 5); and
+finally comment on the efficacy of the approach and its deficiencies.
+
+2
+
+Permission to make digital or hard copies of all or part of this work for
+personal or classroom use is granted without fee provided that
+copies are not made or distributed for profit or commercial advantage and that copies bear this notice and the full citation on the first page.
+To copy otherwise, to republish, to post on servers or to
+redistribute to lists, requires prior specific permission and/or a fee.
+
+Thelntermediate Language
+
+2.1 An Example
+Let's start with a trivial illustration. The state of an employment database might be modelled by a relation worksForfrom
+employees to companies, and hasBoss that associates employees with their bosses. First we declare these two state components:
+
+SIGSOFT '98 11/98 Florida, USA
+© 1998 ACM 1-58113-108-9/98/0010..,$5.00
+
+121
+
+w o r k s F o r : Employee ~
+
+Company
+
+hasBoss : Employee ~
+
+Employee
+
+p r o b l e m ::= t y p e d e c l * f o r m u l a *
+
+M : f o r m u l a -o boolean
+E : e x p r ~ P (atom x atom)
+
+typedecl ::= var : type <--) type
+
+C : type -o P a t o m
+A : var ~ P (atom x atom)
+
+f o r m u l a ::=
+expr = expr
+
+equality
+
+] expr c expr
+
+M [p ~ q] = V a,b. (a,b) • E[p] ~ (a,b) E E[q]
+
+subset
+
+M [p = q] = V a,b. (a,b) • E[p] ¢~ (a,b) • E[q]
+
+I ~ formula
+
+negation
+
+E[Id:T~T]={(a,a)
+
+l a • CFI]}
+
+E [Ol = { }
+
+e x p r ::=
+
+E[Un:Se+T]={(a,b)
+
+Id
+
+identity relation c o n s t a n t
+
+la•
+
+C[S]^b•
+
+C[T]}
+
+E [p u q] = { (a,b) [ (a,b) • E[p] v (a,b) • E[q]}
+
+Un
+
+universal relation constant
+
+0
+
+e m p t y relation c o n s t a n t
+
+expr u expr
+
+union
+
+expr n expr
+
+intersection
+
+expr \ expr
+
+difference
+
+E [ p + ] = the smallest r e l a t i o n x s u c h t h a t x ; x c _
+
+expr ; expr
+
+relational c o m p o s i t i o n
+
+expr ~
+
+transpose
+
+E [s <: p] = { (a,b) E E[p] I (a,unit) E E[s]}
+E [dom p] = { (a,unit) I :lb. (a,b) ~ E[p]}
+
+expr +
+
+transitive closure
+
+dom expr
+
+domain
+
+e x p r <: e x p r
+
+d o m a i n restriction
+
+var
+
+variable
+
+E [p n q] = { (a,b) I (a,b) • E[p] ^ (a,b) • E[q]}
+E[p\q]
+
+={(a,b)
+
+l(a,b)•
+
+E[p;q]
+
+={(a,b)
+
+l 3c.(a,c)•
+
+E [ p ] A ( a , b ) ~ E[q]}
+E [ p ] A ( c , b ) • E[q]}
+
+E [p~] = { (a,b) I (b,a) • E[p]}
+x^
+
+p~x
+
+E [v] = AIv]
+
+Figure 2." Semantics
+
+Figure 1: Syntax
+
+2.2
+
+Syntax and Semantics
+
+The syntax of the intermediate language is shown in Figure 1.
+A problem to be analyzed is presented as a list of type declarations followed by a list of formulas, implicitly conjoined.
+Each formula is either an equation or inequation of two relational expressions, and may be negated.
+Relational expressions are built from a standard repertoire
+of operators that includes: three constants (the universal,
+identity, and empty relations); the three set-theoretic operators (union, intersection and difference); and the two quintessentially relational operators (composition and transpose).
+Transitive closure is included too; this extends the language's power and is indispensable in practice. We also include two operators that add no power in a formal sense, but
+allow more efficient generation of boolean formulas. They are
+the domain operator, which takes a relation to the set of elements that it maps, and domain restriction, which takes a set
+and a relation, and produces the subrelation whose pairs have
+first elements in the set.
+The semantics of the language is shown in Figure 2. A relation is modelled conventionally as a set of ordered pairs. A
+set is modelled as a degenerate kind of relation that maps each
+element of the set to the special value unit, the only member
+of the basic type Unit. This allows the set-theoretic operators
+to be treated uniformly for set and relation arguments; otherwise, we would have to regard them as overloaded, complicating both the language and its analysis.
+There are separate semantic functions for formulas (M)
+and for expressions (E). The meaning assigned to a problem
+depends on an assignment A of values to variables. If problem
+P has the meaning true for a assignment A, then A is said to
+be a model of P.
+The atoms from which the pairs of a relation are constructed are assumed to be drawn from some universe that is
+
+Now we can write invariants in terms of these variables. To
+assert, for example, that every employee works for a company,
+we would write
+dom worksFor = Un
+where Un stands for the universal set or relation; in Z or NP,
+this would be written as Employee instead. A more tricky assertion is that each employee has at most one boss:
+hasBoss~ ; hasBoss __ Id
+
+which would be appear in NP more succinctly as just fitn
+hasBoss (asserting that hasBoss is a function), or implicitly as
+part of the declaration by writing the type as Employee -+
+Employee. Finally, the assertion that a boss cannot work for a
+company unless each of her employees also works for that
+company would be written
+hasBoss ; w o r k s F o r ~ w o r k s F o r
+
+This would be no different in NP, since it lacks quantifiers,
+but might be written in Z as
+Ve : Employee, c: Company •
+(3b : Employee • (e, b) e hasBoss A(b, C)e worksFor)
+(e, c) e worksFor
+An example of an analysis problem is simply to check that
+a collection of such assertions forms a consistent invariant:
+that at least one satisfying state exists. If it finds such a state,
+the analysis will display it. For the assertions above, it might
+produce, for example:
+Employee = { e l , e2, e3}
+C o m p a n y = { c l , c2, c3}
+w o r k s F o r = {el ~ c l , e2 -- c l , e3 - c2}
+hasBoss = {el ~ e2}
+
+122
+
+partitioned into disjoint, primitive types. The semantic function C maps each primitive type to a set of atoms. Since the
+atoms are uninterpreted, the choice of C is not significant
+although the size of C(t) is: we call this the scope, since it
+bounds the assignments that can be constructed. C(Unit)
+must contain exactly one atom.
+The typing rules are shown in Figure 3. The judgment
+
+Id : T ~-~ T
+
+Un : S ~-~T
+
+p: S <--~ T
+
+says that the relation p is constructed from pairs whose first
+elements are atoms drawn from the type S, and whose second
+elements are atoms drawn from the type T. All type variables
+represent uninterpreted, primitive types, so T cannot, for
+example, have values that are integers, or values that are themselves relations.
+Note that the typing rules for constants have no hypotheses, and thus do not constrain the choice of primitive types.
+In general, these must be determined by type inference. In the
+formula
+pnld
+
+0 : S ~-~T
+p: S ~--~T, q: S ~-~ T
+puq
+
+:S~-~T
+
+p: S <-~.T, q: S <--)T
+p n q : S (-->T
+p: S e-) T, q: S <--)T
+p \ q : S<-->T
+
+=0
+
+for example, which asserts that the relation p maps no element to itself, p will be required to be homogeneous, and the
+identity constant will be inferred to have the same type as p
+itself.
+
+p: S <--~T, q: T ~. V
+p;q
+
+:S<-)V
+
+p: S <---)T
+p~ : T ~-~ S
+
+2.3 Expressive Power
+Tarski developed a formalization of set theory that required
+no variables or quantifiers, based on a relational calculus
+comprising only the identity constant, union, complement,
+transpose, composition and equality [Tar41, TG87]. Tarski
+showed that his calculus is weaker than first order logic, but
+that it can express any first order formula containing no subformulas with more than 3 free variables.
+Our language is essentially a version of Tarski's calculus
+with some convenient shorthands, plus transitive closure
+(which is not expressible in first order logic). Like the relational calculus [Sch79], therefore, it is undecidable, so properties cannot be checked fully automatically without sacrificing soundness or completeness.
+The restriction to 3 variables does not seem to matter
+much in practice, but the lack of quantifiers is a nuisance, and
+often results in terse but mysterious relational expressions.
+Tarski gives an algorithm for eliminating quantifiers [Tar41],
+but it is intricate and tends to produce a much larger relational formula than one would write by hand.
+
+p: T ~-~ T
+p+ : T ~--*T
+p: S ~ Unit, q: S ~-~ T
+p<:q:S~-~T
+p:S~T
+dorn p : S ~ Unit
+
+Figure 3: Typing
+ond case, the universal constant appropriately lifts the set s to
+a relation whose type matches p's. A similar scheme is described in [SS93], but, lacking Unit to distinguish sets from
+relations, it encodes the domain restriction as s n p, and requires that sets such as s be polymorphic in their right-hand
+side - a major inconvenience. In short, the notion of Unit is
+essential, but the inclusion of the operators is debatable.
+Subset and equality. Either of these could be dispensed
+with, but the cost is high. Subset formulas, as we shall see, are
+cheaper to analyze than equality formulas, so replacing subset
+by equality degrades performance. We also exploit equalities
+of the form v = e, where v is a variable, by replacing other
+occurrences of e with v (see section 5.4).
+Union and intersection. Since our language includes complementation (via the difference operator and the universal
+relation), there is technically no need for both union and intersection, since one can always be converted to the other by
+DeMorgan's laws. In our analysis, however, intersection is
+
+2.4 Rationale for Language Design
+Designing an intermediate design language is much like designing an instruction set. We took a RISC-like approach,
+starting with Tarski's calculus, and only adding crucial features. A feature was deemed crucial if it made the subsequent
+analysis either much simpler or much more efficient, or if it
+made the encoding of source formulas much more compact.
+Domain and restriction. The domain and restriction operators are not strictly necessary, since the domain of relation
+p can be written as p ; Un and the domain restriction s <: p as
+(s ; Un) n p . Type inference will ensure that, in the first case,
+the right-hand side of the universal constant will be Unit, so
+that the expression will have a set type, and that, in the s e c -
+
+123
+
+source language
+
+translated f o r m in intermediate language
+
+ran p
+
+dom p-
+
+p is total
+
+d o m p = Un
+
+p is a f u n c t i o n
+
+p~ ; P G Id
+
+e represents a scalar
+
+e ; e - c Id ^ ~ e = 0
+
+e~ s
+
+e_s
+
+(e, f) ~ p
+
+(f <: ((e <: Un)~))~ ~ p
+
+image of s u n d e r p
+
+dora ((s <: p)-)
+
+p (~ q (relational override)
+
+((Un \ dora q) <: p) M q
+
+p is acyclic
+
+p+ c7 Id = 0
+
+sx t
+
+(t <: ((s <: Un)~))~
+
+Va.(a,a)~
+
+p
+
+Idc_p
+
+Va.(a,a)~p
+Va, b . a ~
+
+Idnp=O
+s^b~
+
+Va, b , c . ( a , b )
+Va, b , c . C a , b ) ~
+
+t~Ca,b)~
+
+p
+
+e pA(b,c) E q~(a,c)~
+p~(b,c)~
+
+(t < : ( ( s < : U n ) - ) ) - ~ p
+r
+
+p;qc_r
+
+q
+
+p;(Un\q)=O
+
+Table 1: Sample translations
+cheap while union and complementation are expensive.
+Eliminating an operator destroys structure that the analysis
+would be forced to recover later.
+Conjunction. Remarkably, Tarksi's calculus requires no
+logical operators, since the conjunction
+
+To ensure that a and b behave like projections, we assert that
+both are total functions, and that two X's mapped to the same
+A's by a and the same B's by b are equal:
+
+pc_qAVC_W
+
+for example, can be written
+(p\q)
+
+L)(V\W)
+
+= 0
+
+Omitting conjunction, however, would be disastrous, since
+the conjunctive structuring is essential for the translation into
+conjunctive normal form (see section 5.3).
+3
+
+4
+
+d o m a = Un
+
+//a
+
+d o m b = Un
+
+/ / b is total
+
+is total
+
+a~ ; a c_ Id
+
+//a
+
+b - ; b G Id
+
+/ / b is a f u n c t i o n
+
+(a ; a~) • (b ; b~) c Id
+
+//a
+
+is a f u n c t i o n
+and b u n i q u e l y determine X's
+
+Reduction of Analysis to M o d e l Finding
+
+Given a problem represented as a collection of relational formulas, our analysis attempts to find a model: that is, an assignment of values to variables for which every formula is
+true. Many practical design questions can be cast as problems
+of this form:
+Simulation. Consider an operation specified implicitly as a
+logical formula whose subformulas are relational. We put the
+logical formula in disjunctive normal form, obtaining a set of
+problems each corresponding to a 'path' through the operation. Suppose, for example, that our operation has the form
+
+Translating f r o m Source to l n t e r m e d i a t e
+
+Table 1 shows some sample translations into the intermediate
+language. The cases in the upper half of the table show forms
+that occur in the NP source language, and which are translated by the Nitpick analyzer. The cases in the lower half cannot be expressed directly in NP.
+The relation (p-; p) associates two elements of the range of
+p when they a common domain element is mapped to both.
+If this relation is a subset of the identity relation, any pair of
+range elements to which a domain element is mapped are
+equal. S o p is a function exactly when
+
+A(s) ~
+
+C(s, s')
+
+A
+
+B(S) =~ D(s, S')
+
+where A(s) and B(s) are relational formulas whose relational
+variables include only components of the pre-state, and C(s,s')
+and D(s,s') are formulas including components of both preand post-states. Then, converting to disjunctive normal form,
+we obtain four problems
+
+p-;pcId
+
+Recall that a set is represented as a relation whose righthand side has the type Unit, denoting the primitive type
+containing exactly one element. Consequently, such a relation
+denotes a singleton set if its transpose is a function, and a
+scalar when, additionally, it is non-empry.
+The language allows only binary relations, but relations of
+higher arity are easily simulated. A cartesian product X with
+components of types A and B is modelled with two projection
+functions
+
+A(s) A ~ B(S)
+A(S) A D(S,S')
+B(S) ^ C(s,s')
+C(s,s') A D(S,S')
+
+corresponding to the cases in which the 'paths' executed are
+neither, D, C and both. A model in each case will be an execution of the relevant path.
+Invariantpreservation. The claim that an operation OP(s,s')
+preserves an invariant INVgives rise to a problem of the form
+
+a:X-~A
+b:X-)B
+
+OP(s,s') A INV(s) ^ ~INV(s')
+
+124
+
+mize the blowup on translation. We have put less effort into
+techniques to minimize the boolean formula during its construction; these would likely bring further improvements in
+performance.
+
+whose models are counterexamples: executions of the operation from states that satisfi/the invariant to states that do not.
+If the invariant involves a conjunction or the operation involves a disjunction, a set of problems must be generated.
+Which problem has a model will then indicate which path of
+the operation violates which conjunct of the invariant.
+Refinement. Given a concrete operation OPc(sc,sc'), an abstract operation OPa(sa,sa'), and an abstraction function from
+concrete states sc to abstract states sa, represented as a formula
+A(sc, sa), the claim that OPc refines OPa gives rise to the
+problem
+
+5.1 Sample Translation
+To see how this works, consider translating the formula
+p, q: T <-->T
+
+p ~ { } A q ~ { } ^ p ; q ={}
+
+for a scope of 2. Start by introducing a variable p[id] to represent the edge from the ith atom in the domain o f p to the jth
+atom in the range. The first subformula says thatp has at least
+one edge; it becomes the boolean formula
+p[O,O] v p [o,11 ~, piT,o] v p [ ] , 1 ]
+Likewise, the second subformula becomes
+
+OPc(sc,sc') ^ A(sc,sa) ^ A(sc',sa') ^ -~OPa(sa,sa')
+
+whose solutions are transitions of OPc that violate the behaviour described in OPa. Again, if there are disjunctions in OPc
+or conjunctions in OPa, there will be a set of problems rather
+than a single problem.
+
+q [0,0]
+
+v q [0,1]
+
+v q [1,01 v q [ 1 , 1 ]
+
+The third subformula asserts that there is no atom with an
+incoming edge in p and outgoing edge in q. As a boolean
+formula, this assertion becomes
+
+5 Analysis Scheme
+Since the language is undecidable, there is no algorithm that
+can determine whether a model exists. So instead, we conduct
+a search for a model within finite bounds. The user specifies a
+scope
+
+(p [0,0] A q [0,0])
+(p [ 0 , 0 ] ^ q [0,1])
+--, (p [0,1] A q [1,0])
+
+(p [0,I] A q [I,I])
+
+scope: Type -~ Nat
+
+that associates a natural number with each primitive type. A
+model will only be considered if it can be constructed with no
+more atoms in each primitive type than the scope permits.
+Usually, the same bound is assigned to all types, and we often
+talk informally of a 'scope of 3' to mean that each type has at
+most 3 atoms. In practice, the scope required to find a design
+flaw is often surprisingly small. In almost all cases we have
+studied, a scope that assigns no more than 3 atoms to each
+type suffices; in a few cases, a scope of 5 or 6 is necessary.
+The idea behind the analysis is simple. For a finite scope,
+the possible values of a relation can be described as bit matrices, and the set of all possible values of a relation can be described by a matrix of boolean variables. Viewing a relation as
+a graph, each boolean variable is associated with a potential
+edge, and its truth value determines whether the edge is present or missing from the relation. Any property of relations
+can then be expressed using boolean variables alone, and a
+relational formula may be translated to a purely boolean one.
+Having obtained the boolean formula, we apply an off-theshelf boolean solver to find a model. As a byproduct of translation, we generate a mapping between relational and boolean
+variables. This mapping is applied in reverse to the boolean
+solution to reconstitute the relational values.
+Since the formula may be enormous, backtracking solvers
+seem to be inadequate, and we have resorted to a hillclimbing solver. The solver is incomplete; it is possible get
+stuck at a local minimum, and thus fail to find a model
+within a given scope, even when one exists. In our experiments, this has been very rare; in only one case have we had
+to run the solver for more than 5 minutes to find a model.
+Oddly, the bottleneck in our scheme appears to be not in
+solving the boolean formula but in generating it. Our initial
+attempts to generate a boolean formula exhausted memory on
+even toy problems. Most of our effort has been focused on
+techniques for manipulating the relational formula to mini-
+
+(p [1,0] ^ q [0,0])
+(p [l,O] A q [0,1])
+
+(p [] ,1] A q [1,01)
+-~ (p [1,1] ^ q [1,1])
+
+The problem is now the conjunction of these 10 formulas.
+One solution is
+p[O,O] true, q[1,1] true, all other p[i,j] and q [ i j ] false
+
+If T is represented by the atoms {tO,t~}, this corresponds to
+the relational model
+p = {tO ~ tO}
+q = {tl -
+
+tl }
+
+In fact, the translation is not performed exactly like this.
+Rather than translating the third subformula in one fell
+swoop, we construct a translation of the product p ; q, as a
+matrix of boolean formulas. The formula in the top left-hand
+position of this matrix, for example, is
+(p[O,O] A q [ O , I ] ) v ( p [ O , l ]
+
+A q [1,11)
+
+Asserting that the product is empty now amounts to asserting
+the falsehood of each such boolean formula. This compositional approach, described in the next section, is clean but not
+viable if applied naively.
+
+5.2 Compositional Translation
+The translation from relational to boolean form can be implemented compositionally, as shown in Figure 4. Each relational variable becomes a matrix of boolean variables; each
+expression becomes a matrix of boolean formulas; and each
+relational formula becomes a boolean formula.
+The dimensions of the matrix created for a variable are
+determined by the scope. For a variable v : S <-+7, the matrix
+has scope(S) rows and scope(T) columns.
+Suppose we have translated an expression p into a matrix
+X[p], and a term q into a matrix X[q]. The element in the ith
+row and the jth column of XTT], which we write X[P]ij, is a
+boolean formula that is interpreted as being true when p maps
+
+125
+
+B : f o r m u l a -~ b o o l e a n F o r m u l a
+
+the-shelf boolean solvers require their input in CNF. Second,
+C N F is well suited to the typical structure of relational problems: note how, in Figure 4, the translation of an elementary
+relational formula conjoins the element formulas (of which
+there are k2 for a scope of k), and the translation of a problem
+conjoins the translations of its constituent formulas.
+Unforunately, direct translation of a relational formula
+into C N F is infeasible. To see why, consider how boolean
+operations are performed in CNF. Viewing a CNF formula as
+a set of clauses, each being a set of literals, we can define the
+logical operators for CNF as follows:
+
+X : expr ~ booleanFormulaMatrix
+
+B [-~fl = ~ R If]
+B [p c_ q] = ^l ^j (X[p]ij ~ X[q]ij
+B [p = q] = ^i ^j (X[plij <=~ X[q]u
+X [Id]=j = (i = j)
+X [O]~j = false
+X [Un]ij = t r u e
+X [p u q]u = X[pl~j v X[q]u
+X [p c~ q]~j = X[p]~j ^ X[q]u
+X [p \ ql~j = X[p]u ^ ~X[q]u
+
+CNF [F ^ G] = CNF IF] u CNF [G]
+
+X [p ; q]ij = vk X[p]*k ^ X[q]kj
+
+CNF [F v G] = { f u g I f • CNF [F] A g ~ CNF [G]}
+
+X [p~]ij = X[p]ji
+
+CNF [-~F] = {c I Literals(c) G NegLiterals(F)
+
+X [S <: pllj = X[p]ij ^ X[s]io
+
+A VfeCNF[F].3!X.
+
+X [v] = a m a t r i x o f f r e s h b o o l e a n v a r s
+
+Figure 4: Translationj~om relational to booleanform
+the ith element of its left-hand type to the flh element of its
+right-hand type. The translation of the term p n q is given by
+Xtp n qlu = X[pi,j ^ X[q]u
+
+since an edge is in the intersection of two relations when it is
+in both relations. Other operators are treated similarly.
+Elementary relational formulas are translated into boolean
+formulas. The rule
+B[p c__q] = ^ ij X[pllj =~ X[q] U
+
+for example, states that a relation p is a subset of a relation q
+when there is an edge in q corresponding to every edge in p.
+The boolean formula for a problem is then just the conjunction of the boolean formulas for the collection of relational
+formulas.
+There is no translation rule for closure; instead, closure is
+replaced by union and composition. The closure of p is given
+by the series
+pu(p;p)
+
+5.4
+
+-~x~c}
+
+Temporary Variable Introduction
+
+Relational union translates directly to disjunction. These disjunctions, however, are elementwise, and only become intolerable when attempting to translate a union of complex relational expressions. Relational compositions are worse, because
+they involve k disjunctions for a scope of k for each element
+of the result. Equalities are also problematic; the formula p =
+e, where p is a variable and e is a relational expression, creates
+terms of the form [e],j ~ [p]~5which involves a negation of
+[e]ij.
+As a concrete example of these problems, consider following the rules of Figure 4 to translate the expression (p ; q) ; r
+for a scope of 3, where p, q and r are variables. Each element
+in the translation of (p ; q) is a disjunction of 3 formulas, each
+of which contains 2 clauses of one literal each; in CNF, this
+element therefore has 23 = 8 clauses. In the matrix representing the entire expression, each element will be a disjunction of
+3 formulas, each with 9 clauses, which gives a formula of 93 =
+729 clauses. Now suppose that this expression sits on the
+right-hand side of an equality: v = p ; q ; r. Translating the
+equality will require negating each element of the translation
+of the expression, resulting in a formula of perhaps 2729
+clauses.
+
+u(p;p;p)u...
+
+which, for a scope of k, converges in at most k steps. To see
+why, note that the closure essentially computes whether there
+is a path between a given pair of nodes in the graph representing p; if there is a path, there is one with at most k edges.
+A more efficient translation uses the technique known as iterative squaring [BC+92]:
+po= p
+pi+l = ( p i ; pi) U pi
+
+For a scope of k, this series converges in log k steps. The unwinding is purely syntactic; it simply generates from a closure
+expression an expression involving union and composition
+that is equivalent for the given scope. This expression cannot
+usually be translated directly, but will be reduced by the
+method described in section 5.4 below.
+5.3
+
+XE f^
+
+Conjunction is simply union of clause sets. Disjunction,
+though, is cross product; the size of a disjunction is, in the
+worst case, the product of the sizes of the original formulas.
+The negation of a formula F is the set of all clauses that can
+be obtained by taking one literal from each clause of F and
+negating it. In the worst case, the size of the negation is exponential in the number of clauses of the original formula. (To
+exclude bogus literals from each clause c, its literals are constrained to be drawn from the set of negations of literals already appearing in F).
+Because of their heavy cost, disjunction and negation of
+complex formulas must be avoided. Translating a problem as
+given is usually hopeless; even small problems easily exhaust
+memory. To minimize C N F explosion, the problem is manipulated prior to translation in two ways: introduction of
+temporary variables and symmetry breaking. When a negation must be performed, the cost can often be reduced by a
+simple technique we call 'negation caching'.
+
+X [dora p]io = vk X[p]ik
+
+CNF R e p r e s e n t a t i o n
+
+The boolean formulas are represented in conjunctive normal
+form (CNF), that is, as a conjunction of disjunctions of literals. Two factors motivate the choice of CNF. First, most off-
+
+126
+
+To avoid these problems, complex expressions are broken
+up by the introduction of temporary variables. The formula
+
+X[p]oo
+for example.
+For this case, the effect is not dramatic: (p ~: 0) can be
+translated anyway into a single clause. But a negated equality
+(p = q) would be translated to v ~jX[p]~j~: X[q]~j, which for a
+scope of k is a disjunction of k 2 terms. Even when p and q are
+variables, constructing this formula is infeasible for a scope of
+5 or more. We therefore break symmetry on these troublesome formulas, in this case allowing us to replace the disjunction
+
+p = (q c~ r) u ( s c~t)
+
+for example, is broken into 3 formulas:
+p = tempo u tempi
+t e m p o = (q c~ r)
+t e m p i = (s n t)
+
+The introduction of temporaries has the additional benefit
+of common subexpression elimination: multiple occurrences
+of a single expression are replaced by the same temporary
+variable.
+Currently, we use some simple heuristics to determine
+when to introduce variables: for all subexpressions of a relational composition, unless trivial (a variable or its transpose);
+for all subexpressions of a union that involve composition or
+intersection; for one side of an equality, and the left-hand side
+of an inequality, when both sides are compound expressions;
+for both sides of a negated equality or inequality. We have
+not shown these to be optimal, but they seem to work well in
+practice.
+
+5.5
+
+vu ~ X[p]u ¢:~ X[q]ij
+
+whose size varies, in the worst case, with the exponent of the
+square of the scope, by the single term
+X[p]oo ¢~ X[q]oo
+
+which gives a formula of a single clause!
+This argument has some subtleties. I f p is a homogeneous
+relation, its indices cannot be permuted independently. Consequently, we have to include a diagonal and an off-diagonal
+element. In general, more than one negated equality (or inequality) can be reduced in this way, so long as each reduction
+exploits permutation of a different type. We therefore rank
+the negated subformulas according to their severity, and then
+allocate symmetry breaking reductions from the most to the
+least severe, making sure never to break symmetry on the
+same type twice.
+Permutation invariance holds only because the primitive
+types are uninterpreted. Even in the presence of interpreted
+types (such as integers), relational formulas are still permutation invariant over the uninterpreted types. So symmetry
+breaking can still be used in the presence of interpreted types,
+so long as it is used only to justify permutations of uninterpreted atoms.
+
+SymmetryBreaking
+
+We have shown previously [JDJ96, JJD98] that the models of
+relational formulas are permutation invariant: given a model
+of a formula, the assignment that results from permuting the
+atoms of the underlying universe will also be a model. For
+example, the formula discussed above
+p, q: T*-~ T
+p~{}^q~{}^p;q
+
+={}
+
+with model
+p = {tO ~ tO}
+q = {tl ~ tl }
+
+must also have the model
+p = {tl
+
+5.6
+
+~ tl }
+
+since the atoms tO and tI are uninterpreted, and exchanging
+them is insignificant.
+Consider now a model of the formula
+p : S <--)T
+F^(p~O)
+
+where F is an arbitrary subformula, and p and q are variables.
+The models of F form a set that can be partitioned into
+equivalence classes by such permutations. Suppose S is represented by the set of atoms {sO#l}, and T by the set {tO,tl}.
+Then the models of (p ~ 0) are all the non-empty assignments
+top, such as
+p={sO~tO,
+
+NegationCaching
+
+As noted above, translating an equality p = e, where p is a
+variable and e is a relational expression, creates terms of the
+form .X[e]ij ==~X[p]ij which involves a negation of.X[e]i; Introduction of temporary variables creates a large number of these
+equalities. Worse, the expression e is often complex - precisely why it was replaced by a temporary in the first place.
+Often, however, the negation ofX[e]i is smaller than X[e]ij
+itself. Suppose e is a composition p ; q o(variables. Then
+
+q = {tO ~ tO}
+
+X[e]u = Vk X[p]ik ^ X[q]kj
+
+which gives, for a scope of k, 2 ~ clauses of k literals each,
+whereas
+-~[e]~j = AkX[pl=k v X[qlki
+
+which gives k clauses of 2 literals each. Since CNF is not canonical, computing X[e]~j and then negating it will not result
+in this small formula, but on the contrary produces an even
+larger formula.This effect is compounded by redundancy in
+the CNF representation. A clause is redundant if one of its
+subsets also appears as a clause. By using a trie representation
+of C N F [ZS94], we eliminate some of these redundant
+clauses - namely those that are lexical prefixes of clauses already present - but not all of them.
+We therefore employ the following strategy. When the
+element formulas for a composition are computed, their duals
+are also computed and cached. The representation of a for-
+
+s! ~ t O }
+
+Clearly, for any edge we might pick, there is an assignment to
+p including that edge that is a model of (p ~: 0). But more
+interestingly, there must also be a model of the formula as a
+whole in which p contains that edge. Any model of the formula must have p contain some edge, and by permuting the
+atoms of S and T, we can effectively choose the edge.
+This observation can be exploited in the translation.
+Rather than translating (p ~: 0) as the disjunction
+vii X[p]ij
+
+we can break the symmetry, and pick an element of the relation to be true; picking the top left-hand element gives
+
+127
+
+The column marked Problems gives the number of problems generated by the claim; Formulas gives the maximum
+number of relational formulas in each problem (after variable
+introduction). The columns marked Vats and Clauses give the
+number of boolean variables and clauses in the emitted formula; Translate and Solve give the times to perform the
+translation and solve the boolean formula. All formulas were
+solved using WalkSAT, except when DP appears in parentheses after the solving time; for these, the Davis-Putnam solver
+was sufficient (ie, found a solution in less than 30s). The final
+column gives the time taken by the previous, explicit version
+of Nitpick (as described in UDJ96, JDJ98]).
+The formulas generated are large, but not necessarily hard
+to solve. Formulas can be classified according to the average
+number of literals per clause, and the ratio of the number of
+variables to the number of clauses. It seems that hardest
+classes of formulas are those for which the probability of satisfiability is about 50%; for clauses of 3 literals, this corresponds to a ratio of 4.3 clauses/variable [MSL92]. Our formulas often have 10 or more literals/clause; we have not yet
+studied whether they fall into the hard or easy category.
+Timings were obtained on a modestly equipped machine;
+the two versions of Nitpick actually run on different platforms, but are roughly comparable. The entry ?? indicates that
+a model was not found in a reasonable time; we set a bound
+of one hour. The explicit checker did find a model for Mobile
+IP, but for a smaller scope in which different bounds were
+associated with different types.
+As can be seen, the new method outperforms the old
+method in almost all cases. (One reviewer of this paper
+claimed that the old method is 'clearly hopeless'. Remarkably,
+it isn't: not because it scales well - which it does not - but
+because counterexamples can often be found in tiny scopes.
+In the Mobile IP case study, for example, one message and
+two hosts was sufficient to expose a serious flaw.) Moreover,
+the new method is much simpler to implement; our entire
+prototype is only about 6000 lines of Java code, of which
+almost half is concerned with front-end functionality (parsing
+and static checks).
+Negation caching has a dramatic effect on all the examples,
+often reducing the formula size, and translation time, by an
+order of magnitude. Symmetry has a marked effect only on
+examples involving negated equalities. On Style, for example,
+it reduces the number of clauses from 53,495 to 4,385 for a
+scope of 4, and translation time from 17s to 2s. Detailed
+performance figures appear in the technical report Uac97].
+
+mula thus includes two formulas: the formula itself, and optionally its negation. When the negation of a formula is required, the cached formula, if present, is used directly; if
+absent, the negation is computed and cached. This simple
+idea has a very dramatic effect on performance.
+
+5.7 Solving
+We have experimented with two boolean solvers: a trie-based
+version [ZS94] of Davis-Putnam [DP60], which we implemented as part of Nitpick in Java, and WalkSAT [SKC94], a
+stochastic solver developed at Bell Labs, which is run as a
+native method in C.
+WalkSAT works by local search, and is thus incomplete: it
+may fail to find a model of the boolean formula when one
+exists. This has rarely been a problem in practice; almost always, a model, if one exists, is found on the first try. DavisPutnam works only on small problems; when there are more
+than a few hundred boolean variables, it does not terminate in
+a reasonable time. It is, however, deterministic and thus complete: it will eventually find a model if one exists. We have
+also experimented briefly with GRASP [SS96], a more modern deterministic algorithm, but it seems unable to match the
+performance of WalkSAT on practical examples.
+WalkSAT uses an intriguingly simple strategy. Its metric is
+the number of clauses in the C N F formula that are satisfied;
+at each step, it attempts to change the assignment by flipping
+the value of a boolean variable so as to increase the metric.
+The basic algorithm is as follows:
+f o r i = 1 to MAX_TRIES {
+T = r a n d o m l y generated assignment
+f o r j = 1 to MAX_FLIPS
+if T satisfies f o r m u l a return T
+v = the variable w h o s e f l i p p i n g gives largest increase
+in #clauses satisfied
+T = T with v flipped
+return "no assignment f o u n d "
+
+WalkSAT adds an element of random walk to the search. At
+each step, it tosses a coin: with probability p, it follows the
+standard scheme; with probability (l-p), it picks a variable
+from an unsatisfied clause and flips it.
+Some performance results for a variety of analyses are
+shown in Table 2. Phone and Finder are toy specifications.
+Style is a specification of the paragraph style hierarchy of Microsoft Word, constructed as a class project in the Masters of
+Software Engineering degree at Carnegie Mellon; it is described in detail in [JD96b]. Allocate is a simplified fragment
+of a railway interlocking design written in Z by Praxis UK
+PLC. Mobile IP is a description of a draft version of a mobile
+internet protocol for IPv6, written by an undergraduate at
+Carnegie Mellon UNW97, Ng97]. The descriptions are reproduced in full in the technical report [Jac97]; they are all in
+NP, Nitpick's source language, and were translated automatically into the intermediate language. For each example, a representative claim was analyzed; in all cases, the claim has a
+counterexample in the smallest scope.
+
+6
+Conclusions
+We have experimented before with a boolean analysis, representing boolean formulas not in C N F but with ordered binary decision diagrams (BDDs) [DJJ96]. Although that
+method performed excellently on small examples, it did not
+scale well. BDDs, unlike CNF, are a canonical representation.
+In model checking, this is essential - it allows fixpoints to be
+detected - but in our setting there is little benefit, and the
+extra cost is unwarranted.
+
+128
+
+Example
+Phone
+
+Problems
+1
+
+Finder
+
+1
+
+Style
+
+12
+
+Allocate
+
+1
+
+Mobile IP
+
+1
+
+Formulas t Scope
+10
+3
+4
+5
+6
+47
+3
+4
+5
+6
+71
+3
+4
+5
+41
+3
+4
+5
+10
+68
+3
+4
+5
+
+Vars
+66
+112
+1 70
+
+240
+273
+464
+705
+996
+408
+704
+1080
+192
+316
+
+470
+1690
+438
+760
+1170
+
+I
+
+Clauses
+307
+842
+2159
+5413
+1364
+3500
+8483
+20779
+1864
+4385
+9977
+522
+931
+1473
+6693
+2436
+6548
+16536
+
+Translate
+0s
+0s
+0s
+ls
+0s
+0s
+0s
+9s
+ls
+2s
+6s
+0s
+0s
+0s
+6s
+0s
+3s
+
+J
+
+Solve
+0s (DP)
+0s (DP)
+0s (DP)
+2s (DP)
+1 s (DP)
+0s
+3s
+2m,33s
+6s (DP)
+0s
+5s
+1s (DP)
+0s
+0s
+0s
+0s
+0s
+
+8s
+
+Os
+
+Explicit
+0s
+0.5s
+35s
+5m
+0.5s
+ls
+11s
+2m,12s
+ls
+11 s
+11 m,45s
+10s
+.7?.
+.7?.
+7?.
+??
+7?.
+
+??
+
+Table 2: Performance of new method versus old method
+
+The remarkable success of the stochastic solver GSAT
+[SLM92] and its descendants has made boolean translation
+attractive in other domains too. The closest application to
+ours is in planning [KS96, EMW97]. The planning problem
+is technically closer to the model checking problem than to
+our problem: namely finding a sequence of transitions in a
+state machine that leads to a state satisfying a given property
+(in planning, the goal, and in model checking, the negation of
+the invariant). The focus on data structures rather than on
+transition sequences makes our scheme rather different.
+The scheme described in this paper is novel in two respects. The novelty of the intermediate language is not in its
+operators, but in its typing. By representing sets as relations
+with Unit as their right-hand type, we are able to treat sets
+and relations uniformly, making the language and analyzer
+simpler, without incurring any overhead in the boolean
+translation. Unit always has one atom, so a set is translated, as
+expected, into a k × 1 matrix - namely a vector.
+The novelty of the translation is in preempting the blowup
+by manipulating the relational formula prior to translation.
+The treatment of closure is particularly simple and effective
+(although it does make the manipulation of the relational
+formula dependent on the scope). No doubt further improvements could be obtained by optimizing the manipulations of the boolean formulas themselves - how they are represented and combined.
+The notion of scope is perhaps unremarkable, but seems to
+be the lynchpin to making progress in automating the analysis
+of software specifications. Nevertheless, the incompleteness
+resulting from an ad hoc bound on the search, compounded
+by the incompleteness of the solver, is of course undesirable.
+Sometimes the user will conclude that a property holds only
+
+because the search was conducted in too small a scope, or was
+not given enough time to find a counterexample.
+We are investigating ways to mitigate this problem. The
+analyzer might, for example, provide an estimate of the probability that a model exists but has not been found; from this,
+the user could determine for how long to run the solver. In a
+safety-critical application, it would be appropriate to construct an abstraction that establishes that a search within a
+given scope suffices to show correctness for all scopes, but for
+mainstream software development, the effort is not worthwhile.
+Researchers in formal methods have devoted almost all
+their attention to analysis schemes that gain completeness at
+the expense of automation. It seems to us that fast and fully
+automatic analyses whose results are correct with high probability are more likely to appeal to practitioners, and offer
+exciting new research challenges.
+Acknowledgments
+
+We are very grateful to Greg Nelson, who suggested dusting
+off our BDD-based checker and trying again with Davis Putnam; to Mihai Badoiu, Somesh Jha, Craig Damon and Jeannette Wing for helpful discussions; and to the National Science Foundation for sponsoring this work in part (under
+grant CCR-9523972).
+References
+
+[BC÷92]
+
+129
+
+J.R. Burch, E.M. Clarke, K.L. McMillan, D.L.
+Dill and L.J. Hwang. Symbolic model checking:
+102° states and beyond. Information and Computation, Vol. 98, No. 2, pp.142-170, June 1992.
+
+Craig A. Damon, Daniel Jackson and Somesh
+Jha. Checking Relational Specifications with Binary Decision Diagrams. Proc. 4th ACM SIGSOFT Conf. on Foundations of Software Engineering, San Francisco, CA, October 1996,
+pp.70-80.
+[DP60]
+Martin Davis and Hilary Putnam. A computing
+procedure for quantification theory. Journal of the
+ACM, Vol. 7, pp. 202-215, 1960.
+[EMW97] Michael D. Ernst, Todd D. Millstein and Daniel
+S. Weld. Automatic SAT-Compilation of Planning Problems. Proc. 15th International Joint
+Conference on Artificial Intelligence (IJCAI-97),
+Nagoya, Aichi, Japan, August 1997, pp. 11691176.
+[Jac97]
+Daniel Jackson. Boolean Compilation of Relational
+Specifications. Technical Report MIT-LCS-TR735. Laboratory for Computer Science, Massachusetts Institute of Technology, Cambridge,
+MA. December 1997. Available at.
+Daniel Jackson and Craig A. Damon. Nitpick
+UD96a]
+Reference Manual. CMU-CS-96-109. School of
+Computer Science, Carnegie Mellon University,
+Pittsburgh, PA, January 1996.
+Daniel Jackson and Craig A. Damon. Elements
+UD96b]
+of Style: Analyzing a Software Design Feature
+with a Counterexample Detector. IEEE Transactions on Software Engineering, Vol. 22, No. 7,
+July 1996, pp. 484-495.
+Daniel Jackson, Craig A. Damon and Somesh
+[JDJ96]
+Jha. Faster Checking of Software Specifications.
+Proc. ACM Conf. on Principles of Programming
+Languages, St. Petersburg Beach, FL, January
+1996, pp. 79-90.
+Daniel Jackson, Somesh Jha and Craig A. Da[JJD981
+mon. Isomorph-free Model Enumeration: A New
+Method for Checking Relational Specifications.
+ACM Transactions on Programming Languages
+and Systems, Vol. 20, No. 2, March 1998, pp.
+302-343.
+UNW97] Daniel Jackson, Yuchung Ng and Jeannette
+Wing. A Nitpick Analysis of IPv6. Submitted to
+Formal Aspects of Computing.
+
+[KS96]
+
+[DJJ96]
+
+[MSL92]
+
+[Ng97]
+
+[Sch79]
+[SKC94]
+[SLM921
+
+[Spi92]
+[SS93]
+[SS96]
+
+[Tar41]
+[TG87]
+
+[ZS94]
+
+130
+
+Henry Kautz and Bart Selman. Pushing the envelope: planning, propositional logic, and stochastic search. Proc. ~h National Conference on
+Artificial Intelligence, 1996, pp. 1194-1201.
+David Mitchell, Bart Selman and Hector
+Levesque. Hard and easy distributions of SAT
+problems. Proc. lOth National Conference on Artificial Intelligence (AAAI-92), San Jose, CA, July
+1992, pp. 459-465.
+Yu-Chung Ng. A Nitpick Specification of IPv6.
+Senior Honor's Thesis, Computer Science Department, Carnegie Mellon University, May
+1997.
+Wolfgang Schoenfeld. An undecidability result
+for relational algebras. Journal of Symbolic Logic,
+44(1), March 1979.
+Bart Selman, Henry Kautz and Bram Cohen.
+Noise strategies for improving local search. Proc.
+AAAI-94, pp. 337-343, 1994.
+Bart Selman, Hector Levesque and David
+Mitchell. A new method for solving hard satisfiability problems. Proc. lOth National Conference
+on Artificial Intelligence (AAAI-92), San Jose, CA,
+July 1992.
+J. Michael Spivey. The Z Notation: A Reference
+Manual. Second ed, Prentice Hall, 1992.
+Gunther Schmidt and Thomas Stroehlein. Relations and Graphs. EATCS Monographs in Theoretical Computer Science, Springer-Verlag, 1993.
+J.P.M. Silva and K.A. Sakallah. Grasp - A New
+Search Algorithm for Satisfiability. IEEE International Conference on Computer Aided Design,
+San Jose, CA, November 1996, pp. 220-227.
+Alfred Tarski. On the calculus of relations. Journal of Symbolic Logic, 6(1941), pp. 73-89.
+Alfred Tarski and Steven Givant. A Formalization
+of Set Theory Without Variables. American
+Mathematical Society, Colloquium Publications,
+Volume 41, 1987.
+Hantao Zhang and Mark E. Stickel. Implementing the Davis-Putnam Algorithm by Tries. Technical Report 94-12, Artificial Intelligence Center,
+SRI International, Menlo Park, CA. December
+1994.
+
+

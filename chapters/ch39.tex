@@ -1,0 +1,185 @@
+\chapter{Type Theory for Compilers}
+\label{ch:type-theory-compilers}
+
+A checker that only knows integers and booleans catches misused operators, but it cannot describe a function passed as an argument, a value that may be absent, or a container whose length matters.
+Each of those ideas is a \term{type}: a static description of what values an expression may produce and which operations on them are meaningful.
+This chapter extends the Mini checker of Chapter~\ref{ch:names-types-diagnostics} with function types and a small set of reasoning rules, so later passes can trust kinds, calling shapes, and data layout without re-proving them at every use.
+Types do not make programs run faster by themselves.
+They let the compiler remove tests, choose representations, and reject meaningless programs earlier, with the reason recorded as a judgment rather than scattered facts.
+
+\section{Types describe values, judgments record reasons}
+\label{sec:ch39-judgments}
+
+A type answers one question: which operations on this value are meaningful.
+The judgment $\Gamma \vdash e : T$ answers a second question: why does expression $e$ deserve type $T$ under assumptions $\Gamma$.
+Here $\Gamma$ is a finite map from variables to types, extended exactly as scopes nest in Chapter~\ref{ch:names-types-diagnostics}.
+The Mini extension of this chapter, called Mini-Fun, adds two expression shapes to the language of Chapter~\ref{ch:names-types-diagnostics} and one new kind of type:
+\begin{equation}
+  e ::= \cdots \mid \operatorname{lam}(x : T, e) \mid \operatorname{app}(e, e),
+  \qquad
+  T ::= \operatorname{int} \mid \operatorname{bool} \mid T \to T.
+  \label{eq:ch39-syntax}
+\end{equation}
+The form $\operatorname{lam}(x : T, e)$ is a function whose parameter $x$ promises type $T$ and whose body is $e$.
+The form $\operatorname{app}(e_1, e_2)$ applies the function computed by $e_1$ to the argument computed by $e_2$.
+The arrow $T_1 \to T_2$ classifies functions that accept $T_1$ and deliver $T_2$.
+No other shapes are added: numbers, comparisons, conditionals, and loops keep the meaning and checks they already had.
+In particular, Mini-Fun has no general recursion and no mutable cell in this chapter, so the discussion below claims kind safety only, not termination of programs that use the inherited loop form.
+
+A typing rule has premises above a line, a conclusion below it, and a name beside it.
+Table~\ref{tab:ch39-rules} lists the rules consumed by the checker.
+Each rule is syntax-directed: the shape of $e$ selects at most one rule, so checking never guesses.
+\begin{table}
+\caption{Typing rules for Mini-Fun. Each rule is selected by the shape of $e$; the context $\Gamma$ maps in-scope variables to types.}
+\label{tab:ch39-rules}
+\centering
+\begin{tabular}{ll}
+\toprule
+Rule & Conclusion from premises \\
+\midrule
+Var & $\Gamma \vdash x : \Gamma(x)$ when $x$ is bound in $\Gamma$ \\
+Int & $\Gamma \vdash n : \operatorname{int}$ for every integer literal $n$ \\
+Bool & $\Gamma \vdash b : \operatorname{bool}$ for $b$ true or false \\
+Add & $\Gamma \vdash e_1 + e_2 : \operatorname{int}$ when each side has type $\operatorname{int}$ \\
+Cmp & $\Gamma \vdash e_1 < e_2 : \operatorname{bool}$ when each side has type $\operatorname{int}$ \\
+If & $\Gamma \vdash \operatorname{if}\,e\,\operatorname{then}\,e_1\,\operatorname{else}\,e_2 : T$ when $e : \operatorname{bool}$ and both arms have type $T$ \\
+Lam & $\Gamma \vdash \operatorname{lam}(x : T_1, e) : T_1 \to T_2$ when $\Gamma, x : T_1 \vdash e : T_2$ \\
+App & $\Gamma \vdash \operatorname{app}(e_1, e_2) : T_2$ when $e_1 : T_1 \to T_2$ and $e_2 : T_1$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+The variable rule consults the assumption map and therefore subsumes the resolution walk: an unbound name has no rule and checking stops with an undefined-name diagnostic.
+The addition rule requires both sides at type integer, exactly as the Chapter~\ref{ch:names-types-diagnostics} checker already enforced, now written as a reusable judgment.
+The conditional rule requires a boolean test and forces both arms to share one result type $T$, so either arm can supply the value.
+The abstraction rule extends the context with the annotated parameter and checks the body once.
+The application rule checks that the argument kind matches the domain the function expects; a mismatch is reported with both kinds and the position of the call.
+% TODO(cite): need a primary reference for simply typed lambda calculus and its safety statement.
+
+Figure~\ref{fig:ch39-derivation} shows one complete derivation as a tree, so the audit trail is visible.
+\begin{figure}
+\centering
+\begin{tikzpicture}[node distance=1.1cm and 1.4cm]
+\node[basic block] (lam) {$\emptyset \vdash \operatorname{lam}(x : \operatorname{int}, x + 1) : \operatorname{int} \to \operatorname{int}$};
+\node[basic block, above=of lam, xshift=-3.2cm] (var) {$x : \operatorname{int} \vdash x : \operatorname{int}$};
+\node[basic block, above=of lam, xshift=3.2cm] (one) {$\Gamma \vdash 1 : \operatorname{int}$};
+\node[basic block, above=of lam] (add) {$x : \operatorname{int} \vdash x + 1 : \operatorname{int}$};
+\draw[cfg edge] (var) -- (add);
+\draw[cfg edge] (one) -- (add);
+\draw[cfg edge] (add) -- node[right, font=\sffamily\scriptsize] {Lam} (lam);
+\end{tikzpicture}
+\caption{The derivation for a one-argument increment function reads upward: leaves justify the operands, the addition rule justifies the body, and the abstraction rule discharges the assumption.}
+\label{fig:ch39-derivation}
+\end{figure}
+Leaves justify facts with no further premises, such as the literal $1$ at integer or the variable $x$ at its assumed type.
+Each interior node names the rule that combines its children.
+The root carries the empty context because the closed function assumes nothing.
+A derivation that cannot be completed at some node is a diagnostic: the rule selected by that node names the expected kinds, the inferred kinds name what was found, and the source span of that node names the position.
+
+\section{A checker the compiler can trust}
+\label{sec:ch39-checker}
+
+Algorithm~\ref{alg:ch39-check} implements Table~\ref{tab:ch39-rules} as a single syntax-directed walk.
+\begin{algorithm}
+\caption{Syntax-directed checking for Mini-Fun.}
+\label{alg:ch39-check}
+\begin{pseudocode}
+\Require checked scope structure, expression $e$, context $\Gamma$ mapping bound names to types
+\Ensure type $T$ of $e$ under $\Gamma$, or a diagnostic naming the failing node
+\Function{Check}{$\Gamma, e$}
+\If{$e$ is a variable $x$}
+\If{$x$ is bound in $\Gamma$} \Return $\Gamma(x)$
+\Else \Return diagnostic undefined name at $e$
+\EndIf
+\ElsIf{$e$ is an integer literal} \Return $\operatorname{int}$
+\ElsIf{$e$ is a boolean literal} \Return $\operatorname{bool}$
+\ElsIf{$e$ is $e_1 + e_2$ or $e_1 < e_2$}
+\State $T_1 \gets \Call{Check}{\Gamma, e_1}$; propagate any diagnostic
+\State $T_2 \gets \Call{Check}{\Gamma, e_2}$; propagate any diagnostic
+\State require $T_1 = T_2 = \operatorname{int}$ or report operator kinds at $e$
+\State \Return $\operatorname{int}$ for $+$ and $\operatorname{bool}$ for $<$
+\ElsIf{$e$ is $\operatorname{if}\,c\,\operatorname{then}\,e_1\,\operatorname{else}\,e_2$}
+\State require $\Call{Check}{\Gamma, c} = \operatorname{bool}$ or report the test kind at $c$
+\State $T_1 \gets \Call{Check}{\Gamma, e_1}$; $T_2 \gets \Call{Check}{\Gamma, e_2}$
+\State require $T_1 = T_2$ or report the arm mismatch at $e$
+\State \Return $T_1$
+\ElsIf{$e$ is $\operatorname{lam}(x : T_1, b)$}
+\State \Return $T_1 \to \Call{Check}{\Gamma, x : T_1, b}$
+\ElsIf{$e$ is $\operatorname{app}(e_1, e_2)$}
+\State $F \gets \Call{Check}{\Gamma, e_1}$; $A \gets \Call{Check}{\Gamma, e_2}$
+\State require $F = T_1 \to T_2$ with $A = T_1$ or report the call mismatch at $e$
+\State \Return $T_2$
+\EndIf
+\EndFunction
+\end{pseudocode}
+\end{algorithm}
+The walk visits each node once, extends the context at each abstraction, and restores it on exit, so shadowing behaves exactly as in Chapter~\ref{ch:names-types-diagnostics}.
+Running time is $O(N)$ for $N$ expression nodes under constant-time context operations, with one diagnostic produced at the first unjustifiable node.
+Memory holds the context along the current path plus one result type per completed subtree.
+A common defect checks the body of an abstraction in the outer context instead of the extended one, which lets the parameter escape with the wrong type; the worked example below catches exactly this shape.
+
+The checker supports one compiler contract: a program that checks at type $T$ never confuses the kinds the rules distinguish.
+Concretely, an integer is never applied as a function, a boolean is never added, and a function of type $T_1 \to T_2$ is only applied to $T_1$ arguments.
+This is \term{kind safety}, and it holds because every elimination in the table demands the kind its introduction promised.
+Kind safety is weaker than full correctness: it does not promise termination, bounds, or the intended numeric answer.
+Types are erased before execution in this design, so a checked program runs with the same representation as an unchecked one; later chapters exploit the erased facts to skip tests rather than to change values.
+% TODO(cite): need a primary reference for type erasure and its observable-behavior condition.
+
+\section{Worked example with a higher-order call}
+\label{sec:ch39-worked}
+
+We check the closed program $\operatorname{app}(\operatorname{lam}(f : \operatorname{int} \to \operatorname{int}, \operatorname{app}(f, 2)), \operatorname{lam}(x : \operatorname{int}, x + 1))$ under the empty context.
+The outer application first checks its function part.
+Checking $\operatorname{lam}(f : \operatorname{int} \to \operatorname{int}, \operatorname{app}(f, 2))$ extends the context to $f : \operatorname{int} \to \operatorname{int}$ and checks $\operatorname{app}(f, 2)$.
+The variable $f$ looks up to $\operatorname{int} \to \operatorname{int}$, the literal $2$ checks at $\operatorname{int}$, and the application rule delivers $\operatorname{int}$ because the domain matches.
+Discharging gives the outer function type $(\operatorname{int} \to \operatorname{int}) \to \operatorname{int}$.
+The argument $\operatorname{lam}(x : \operatorname{int}, x + 1)$ checks as in Figure~\ref{fig:ch39-derivation} at $\operatorname{int} \to \operatorname{int}$.
+The outer application rule matches domain $\operatorname{int} \to \operatorname{int}$ against argument $\operatorname{int} \to \operatorname{int}$ and returns $\operatorname{int}$.
+Evaluating the program applies the increment function to $2$ and yields $3$, which has the predicted type.
+
+Two failure variants show what the rules reject.
+Replacing the argument with $\operatorname{lam}(x : \operatorname{bool}, x)$ changes its type to $\operatorname{bool} \to \operatorname{bool}$, so the outer application reports a call mismatch: it expected $\operatorname{int} \to \operatorname{int}$ and found $\operatorname{bool} \to \operatorname{bool}$ at the argument position.
+Replacing the body $\operatorname{app}(f, 2)$ with $\operatorname{app}(2, f)$ makes the checker require an arrow type for the literal $2$, which fails with an operator-kind diagnostic at the inner call.
+In both cases the diagnostic names the rule, both kinds, and the span, which is exactly the information a later pass needs to avoid re-deriving the failure.
+
+\section{What richer types buy and cost}
+\label{sec:ch39-richer}
+
+Simple arrows already let lowering choose calling conventions per signature and let the optimizer trust arity, but real programs ask for more.
+A \term{polymorphic} type abstracts over a kind, so one identity function serves integers and booleans without duplication; instantiating it substitutes actual kinds for the bound variable.
+An \term{existential} type hides a representation behind an interface, so clients manipulate a value only through advertised operations; opening it reveals the operations but not the hidden witness.
+A \term{dependent} type lets the result kind mention a value, so a lookup operation can promise to return exactly the stored element kind; checking such types may require evaluating terms and therefore needs a termination or coverage argument this book does not develop.
+Each extension moves work from run time into checking: fewer tags, fewer guards, tighter layouts.
+Each also moves failure earlier: programs that would have crashed on a bad call are rejected with a derivation gap instead.
+The cost is checker complexity and diagnostic quality.
+Polymorphism needs instantiation discipline, existentials need open-and-hide discipline, and dependency needs decidable equality on terms.
+A compiler team should adopt an extension only with its checking algorithm, its complexity bound, and its diagnostic shapes worked out, then measure whether the removed tests pay for the checking time.
+This chapter adopts only simple arrows for that reason; the appendix sketches how the lambda calculus, categories, and these extensions fit together for readers who want the wider map.
+% TODO(cite): need primary references for parametric polymorphism, existential packages, and dependent function types.
+
+\section{Implementation notes}
+\label{sec:ch39-implementation}
+
+Represent types as immutable terms with sharing: integer and boolean are singletons, and each distinct arrow node is hash-consed so equality is pointer comparison.
+Represent contexts as persistent maps keyed by declaration identity rather than spelling, so shadowing from Chapter~\ref{ch:names-types-diagnostics} survives lowering unchanged.
+Store one source span per expression node and copy it into every diagnostic; positions are the only debugging channel that survives erasure.
+Keep checking separate from inference: this chapter requires annotations on every abstraction, so no constraint solving runs.
+An inference extension would collect equality constraints between type variables and solve them with union-find, but that solver, its occurs check, and its generalization rule belong to a session that also adopts let-polymorphism deliberately.
+Lowering consumes checked types in three places: call sites select a convention from the arrow, closure conversion captures exactly the free variables the derivation used, and layout picks representations compatible with the promised kinds.
+Never keep types and values in separate tables keyed by position; attach the checked type to the node the later pass consumes so a rewrite cannot silently pair a new tree with an old judgment.
+
+\section{Exercises}
+\label{sec:ch39-exercises}
+
+\begin{enumerate}
+\item Derive the type of $\operatorname{lam}(x : \operatorname{int}, \operatorname{if}\,x < 1\,\operatorname{then}\,x\,\operatorname{else}\,1)$ with Algorithm~\ref{alg:ch39-check}. \label{ex:ch39-derive-if} Show the judgment at every node, name the rule used at each step, and state the closed type.
+\item Run Algorithm~\ref{alg:ch39-check} on $\operatorname{app}(\operatorname{lam}(x : \operatorname{bool}, x), 1)$. \label{ex:ch39-call-mismatch} Give the inferred function and argument types, the rule that fails, and the diagnostic with both kinds and the offending span.
+\item Extend Mini-Fun with a pair constructor and projections, add their typing rules beside Table~\ref{tab:ch39-rules}, and argue that erasure still preserves observable behavior on one concrete program. \label{ex:ch39-pairs} State the new syntax, the two elimination requirements, and where lowering uses the checked kinds.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch39-reading}
+
+Appel shows how checked trees feed lowering and why each pass should restate what it assumes about its input, see~\cite{appel-1998-modern}.
+Morgan relates static knowledge to backend decisions about shape and layout, see~\cite{morgan-1998-optimizing}.
+Safonov explains why each checking step should be testable against execution rather than trusted silently, see~\cite{safonov-2010-trustworthy}.
+The C language definition illustrates how a real standard phrases constraints, diagnostics, and undefined behavior for a much larger type system, see~\cite{wg14-2011-c11}.

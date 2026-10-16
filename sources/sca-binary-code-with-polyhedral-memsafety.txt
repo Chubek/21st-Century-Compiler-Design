@@ -1,0 +1,1461 @@
+Author Version of « Static Analysis Of Binary Code With Memory Indirections Using Polyhedra»,
+Clément Ballabriga, Julien Forget, Laure Gonnord , Giuseppe Lipari, Jordy Ruiz accepted at VMCAI’19
+
+Static Analysis Of Binary Code With Memory
+Indirections Using Polyhedra? .
+Clément Ballabriga1 , Julien Forget1 , Laure Gonnord2 , Giuseppe Lipari1 , and
+Jordy Ruiz1
+1
+
+CRIStAL (Univ. Lille, CNRS, Centrale Lille, UMR 9189), Lille, France
+firstname.lastname@univ-lille.fr
+2
+Univ. Lyon, LIP (UMR CNRS/ENS Lyon/UCB Lyon1/INRIA), Lyon, France
+laure.gonnord@ens-lyon.fr
+
+Abstract. In this paper we propose a new abstract domain for static
+analysis of binary code. Our motivation stems from the need to improve the precision of the estimation of the Worst-Case Execution Time
+(WCET) of safety-critical real-time code. WCET estimation requires
+computing information such as upper bounds on the number of loop
+iterations, unfeasible execution paths, etc. These estimations are usually
+performed on binary code, mainly to avoid making assumptions on how
+the compiler works. Our abstract domain, based on polyhedra and on
+two mapping functions that associate polyhedra variables with registers
+and memory, targets the precise computation of such information. We
+prove the correctness of the method, and demonstrate its effectiveness
+on benchmarks and examples from typical embedded code.
+
+1
+
+Introduction
+
+In real time systems, checking that computations complete before their deadlines
+under all possible contexts is a crucial activity. Worst-Case Execution Time
+(WCET) analysis consists in computing an upper bound to the longest execution
+path in the code. It is usually performed on the binary code, because it needs
+information on the low-level instructions executed by the hardware processor.
+In this paper, we propose a static analysis of binary code based on abstract
+interpretation using a polyhedra-based abstract domain. Our motivation is the
+need to enhance existing WCET analysis by improving the computation of upper
+bounds on the number of iterations in loops. However, our abstract domain has
+other potential applications (not developed in this paper), such as buffer-overflow
+analysis, unfeasible paths analysis or symbolic WCET computation [6].
+Most analyses by abstract interpretation proposed in the literature are performed on source code. On the contrary, as it is usually the case for WCET
+analysis, we propose to analyze binary code. There are several important advantages in performing static analysis of binary code: 1) we analyze the code that
+?
+
+Partially funded by the French National Research Agency, Corteva project (ANR17-CE25-0003), and CODAS project (ANR-17-CE23-0004-01)
+
+Page 2 of 22
+
+Author Version of « Static Analysis Of Binary Code With Memory Indirections Using Polyhedra»,
+Clément Ballabriga, Julien Forget, Laure Gonnord , Giuseppe Lipari, Jordy Ruiz accepted at VMCAI’19
+
+1
+2
+3
+4
+5
+6
+
+void send_packet(char *buf) {
+int iphdr_l = ((struct ip*)buf)->hdr_len;
+int udp_l = ((struct udp*)(buf + iphdr_l))->len;
+for (int i = 0; i < udp_l; i++) { /* do CRC */ }
+ethernet_write(buf);
+}
+
+7
+8
+9
+10
+11
+12
+13
+
+void send_request(int iphdr_size, int udp_size) {
+char buf[1024];
+if ((iphdr_size >= 20) && (iphdr_size <= 60) &&
+(udp_size >= 4) && (udp_size <= 100)) {
+struct ip *h1 = buf;
+struct udp *h2 = buf + iphdr_size;
+
+14
+
+h1->hdr_len = iphdr_size;
+h2->len = udp_size;
+fill_packet_payload(buf);
+send_packet(buf);
+
+15
+16
+17
+18
+
+}
+
+19
+20
+
+}
+
+Fig. 1. Network-inspired benchmark
+
+actually runs on the machine, hence no need for additional assumptions on how
+the compiler works; 2) in presence of undefined behaviors (of source code), the
+analysis is more accurate; 3) we can perform the analysis even without access to
+the source code.
+The main problem is that, in higher-level representations, the variables, addresses and values are well identified. In binary code, the notion of program
+variable is lost, so we can only analyze processor registers and memory locations. We propose to identify the subset of registers and memory locations to
+be represented in the abstract state as the analysis progresses. This representation enables us to design a relational analysis on binary code, which is the main
+contribution of the paper.
+1.1
+
+Motivating example
+
+As a motivating example, we present a snippet of C code, inspired from packet
+processing network drivers in Figure 13 . We remind however that our methodology addresses (disassembled) binary code.
+The send_request function sends a request in some application-layer protocol that runs over UDP/IP. Lines 12-13 build a packet composed of a variablelength IP header, a fixed-length UDP header, and a variable-length UDP payload
+(some operations on IP or UDP fields have been omitted). Note that the starting
+3
+
+The original bench listing is available here: https://pastebin.com/C5UPYRx3
+
+Page 3 of 22
+
+Author Version of « Static Analysis Of Binary Code With Memory Indirections Using Polyhedra»,
+Clément Ballabriga, Julien Forget, Laure Gonnord , Giuseppe Lipari, Jordy Ruiz accepted at VMCAI’19
+
+address of the UDP header depends on the size of the IP header (h1->hdr_len).
+At line 17, we call the function responsible for putting the useful data (payload)
+into the packet. At line 18, the packet is sent using the send_packet function,
+which belongs to the lower-level network layer API. This function does not take
+the packet size as parameter, since it can be deduced from the header: in lines
+2-3, the function parses the packet to obtain the UDP payload size, and the
+UDP checksum is computed by iterating over the payload.
+To automatically compute a bound on the number of iterations of the loop at
+line 4, the analysis has to discover that udp_l equals udp_size (due to line 16).
+This can be done with an appropriate use of a relational abstract domain. However, very few of the existing analyses running on binary code use a relational
+domain, and to the best of our knowledge, none support relations between addresses that are not know statically (udp_l, udp_size). Let us emphasize that
+such a use of pointers and memory buffers is typical of many embedded systems:
+for instance in network packet processing, but also in many device drivers.
+1.2
+
+Contribution
+
+The contributions of the paper are:
+– A new relational abstract domain POLYMAP, which consists of a polyhedron
+and two mappings that track the correspondence between data locations
+(registers or memory) and polyhedra variables;
+– An abstract interpretation procedure, which computes abstract states of
+POLYMAP for a small assembly language, and which we prove to be sound;
+– An experimental evaluation of our prototype called Polymalys. It implements
+the previous procedure and computes upper bounds to loop iterations. We
+compare Polymalys with other existing tools on a set of classic benchmarks.
+
+2
+
+Language definition
+
+In this section, we define the analyzed language, called MEMP, a simplified assembly language where we focus on memory indirection operators.
+2.1
+
+Syntax
+
+In order to simplify the presentation, we make the following assumptions: all
+data locations have the same size, memory accesses are aligned to the word size,
+there are no integer overflows, and function calls are inlined (these limitations
+could be lifted using for instance [10,28]). We also reduce the set of instructions to a minimum (Polymalys actually supports the ARM A32 instruction set).
+The syntax of MEMP is defined in Figure 2. A program is a sequence of labeled
+instructions. Instructions operate on registers, labels or constants. Concerning
+memory instructions, if r contains value c, then ∗(r) denotes the content at address r (below, we overload the notation and also denote ∗(c) for this content).
+
+Page 4 of 22
+
+Author Version of « Static Analysis Of Binary Code With Memory Indirections Using Polyhedra»,
+Clément Ballabriga, Julien Forget, Laure Gonnord , Giuseppe Lipari, Jordy Ruiz accepted at VMCAI’19
+
+OPc denotes the concrete semantics of operation OP. RAND emulates undefined
+registers, to represent e.g. function parameters. Other instructions are directly
+commented in the figure (on the left of each instruction).
+::= l1 : I1 , l2 : I2 , . . . , ln : END
+Programs (P)
+::= {l1 , l2 , . . .}
+Labels (L)
+::= {r1 , r2 , . . .}
+Registers (R)
+::= {c1 , c2 , . . .}
+Constants (C)
+::=
+Instructions (I)
+r1 ← OPc (r2 , r3 )
+| OP r1 r2 r3
+r←c
+| SET r c
+Emulate undefined r | RAND r
+r1 ← ∗(r2 )
+| LOAD r1 r2
+∗(r1 ) ← r2
+| STORE r1 r2
+Branch to l if r = 0 | BR r l
+Halt
+| END
+Fig. 2. Syntax of MEMP
+
+2.2
+
+Formal semantics
+
+The small-steps semantics of MEMP is defined below. The semantics of data and
+i
+arithmetic/logic operations is defined in Figure 3 by function −→, which operates
+in a context (R, ∗) consisting of two mappings where:
+– R : R 7→ Z is the registers content, which maps registers to their values. We
+assume that it is initially empty;
+– ∗ : Z 7→ Z is the memory content, which maps memory addresses to their
+values. We assume that it is also initially empty. Note that integer wrapping
+could be used to restrain addresses to be in N instead of Z [10].
+For a given mapping m, we denote m[x : y] the mapping m0 such that m0 (x) =
+y and, for every register x0 6= x, m0 (x0 ) = m(x0 ). In other words, m[x : y]
+denotes a single mapping substitution (or mapping addition if x was previously
+unmapped). We also denote m\(x1 : x2 ) the mapping such that the association
+x1 : x2 is removed from m.
+The semantics of control flow operations is defined in Figure 4, by the function
+c
+e
+→, which adds a program counter pc to the previous context. We use → to denote
+the last transition of the program.
+
+3
+
+Abstract domain
+
+The abstract domain we propose is based on the polyhedral abstract domain [12],
+to which we add information to track relations between polyhedra variables and
+registers or memory addresses.
+
+Page 5 of 22
+
+Author Version of « Static Analysis Of Binary Code With Memory Indirections Using Polyhedra»,
+Clément Ballabriga, Julien Forget, Laure Gonnord , Giuseppe Lipari, Jordy Ruiz accepted at VMCAI’19
+
+c = random()
+i
+
+(SET r c, R, ∗) −→ (R[r : c], ∗)
+R(r2 ) = c2
+
+i
+
+(RAND r, R, ∗) −→ (R[r : c], ∗)
+
+R(r3 ) = c3
+
+c1 = OPc (c2 , c3 )
+
+i
+
+(OP r1 r2 r3 , R, ∗) −→ (R[r1 : c1 ], ∗)
+R(r2 ) = c2
+
+∗(c2 ) = c1
+
+R(r1 ) = c1
+
+i
+
+R(r2 ) = c2
+i
+
+(LOAD r1 r2 , R, ∗) −→ (R[r1 : c1 ], ∗)
+
+(STORE r1 r2 , R, ∗) −→ (R, ∗[c1 : c2 ])
+
+Fig. 3. Semantics of data and arithmetic operations.
+P [pc] = BR r l
+
+R(r) 6= 0
+
+c
+
+P [pc] = END
+
+P [pc] = I
+
+e
+
+P ` (pc, R, ∗) → (R, ∗)
+
+R(r) = 0
+
+P [pc] = BR r l
+
+P ` (pc, R, ∗) → (pc + 1, R, ∗)
+
+c
+
+P ` (pc, R, ∗) → (l, R, ∗)
+I 6∈ {END, BR}
+
+i
+
+(I, R, ∗) −→ (R0 , ∗0 )
+
+c
+
+P ` (pc, R, ∗) → (pc + 1, R0 , ∗0 )
+
+Fig. 4. Semantics of control-flow operations.
+
+3.1
+
+Polyhedra
+
+A polyhedron p denotes a set of points in a Z vector space bounded by linear constraints (equalities or inequalities). More formally, let |S| denote the cardinality
+of set S. Let Cn denote the set of linear constraints in Zn on the set of variables
+Vn , where |Vn | = n. Then hc1 , c2 , ..., cm i denotes the polyhedron p consisting
+of all the vectors in Zn that satisfy constraints c1 , c2 , . . ., cm , where ci ∈ Cn
+for 1 ≤ i ≤ m (n and m are unrelated). We denote dim(p) = n the dimension
+of p. In the rest of the paper, the term variable implicitly refers to polyhedron
+variables. We denote:
+– P the set of polyhedra;
+– s ∈ p when s (with s ∈ Zdim(p) ) satisfies the constraints of polyhedron p;
+– p v p0 iff ∀s ∈ p, s ∈ p0 ;
+– p00 = p t p0 the convex hull of p and p0 ;
+– p00 = p u p0 the union of the constraints of p and p0 ;
+– vars(p) the set of variables of p, where |vars(p)| = dim(p) by definition;
+– proj (p, x1 . . . xk ) the projection of p on space x1 . . . xk , with k < |dim(p)|;
+– p[xi /xj ] the substitution of variable xj by xi in p.
+3.2
+
+Abstract States
+
+In polyhedral analysis of source code, variables of the polyhedra are related
+to variables of the source code. In our case, polyhedra variables are related to
+registers and memory contents. We use the term data location to refer indistinctly
+to registers or memory addresses. Let V denote the set of polyhedra variables.
+The set of abstract states POLYMAP is defined as A = P × (R 7→ V) × (V 7→
+V). An abstract state a ∈ A, with a = (p, R] , ∗] ), consists of a polyhedron
+
+Page 6 of 22
+
+Author Version of « Static Analysis Of Binary Code With Memory Indirections Using Polyhedra»,
+Clément Ballabriga, Julien Forget, Laure Gonnord , Giuseppe Lipari, Jordy Ruiz accepted at VMCAI’19
+
+p, a register mapping R] and an address mapping ∗] . We have R] (r) = v iff
+variable v represents the value of register r in p. We have ∗] (x1 ) = x2 iff variable
+x2 represents the value at the memory address represented by variable x1 . We
+denote vars R (p) the codomain of R] (i.e. register content variables), vars A (p)
+the domain of ∗] (i.e. address variables) and vars C (p) the codomain of ∗] (i.e.
+address content variables). Sets vars R (p), vars A (p) and vars C (p) are disjoint
+and are all subsets of vars(p).
+Example 1. In the following abstract state, register r0 contains value 2, and
+address 2 contains value 1:
+({x1 = 2, x2 = x1 , x3 = 1}, {r0 : x1 }, {x2 : x3 })
+The usual operators on the abstract domain (inclusion, join and widening),
+and its least and greatest elements are presented in Section 4.4.
+3.3
+
+Aliasing
+
+In a general sense, aliasing occurs in a program when a data location can be
+accessed through several symbolic names. As we will see in Section 4, aliases
+play an important role in our analysis. In fact, we introduce mechanisms that
+prevent their occurrence in the abstract state (see Section 4.2), so as to simplify
+the analysis. We define the aliasing relation between two variables x1 and x2 of
+a polyhedron p as follows:
+– Cannot alias: whenever hx1 = x2 i ∩ p = ∅;
+– May alias: whenever hx1 = x2 i ∩ p 6= ∅;
+– Must alias, denoted x1 ≡ x2 : whenever p v hx1 = x2 i.
+The aliasing relation between a register r and a variable x is defined by the
+aliasing relation between R] (r) and x. Similarly, the aliasing relation between
+two registers r1 , r2 is defined by the aliasing relation between R] (r1 ) and R] (r2 ).
+To avoid ambiguities with notations on constraints, let same(x1 , x2 ) denote
+the fact that x1 and x2 are the same polyhedron variables (not just equivalent
+variables). There is no need to check register aliases, because a single register
+cannot be mapped to two different variables (R] is a function). The absence of
+aliases can thus be stated as follows.
+Definition 1. Let s = (p, R] , ∗] ) be an abstract state. We say that s is alias
+free iff:
+∀x1 , x2 ∈ vars A (p), x1 ≡ x2 ⇒ same(x1 , x2 )
+
+4
+
+Computing abstract states
+
+Our analysis follows the abstract interpretation framework proposed in [12], adapted to our setting with non-local control-flow, following the technique proposed
+in Astrée [21] and MOPSA [23]. An important singularity of our analysis is
+that polyhedral variables are progressively created or removed during the analysis. Whenever a new polyhedron variable is introduced, we assume it is a fresh
+variable that has never been used at any other point during the analysis.
+
+Page 7 of 22
+
+Author Version of « Static Analysis Of Binary Code With Memory Indirections Using Polyhedra»,
+Clément Ballabriga, Julien Forget, Laure Gonnord , Giuseppe Lipari, Jordy Ruiz accepted at VMCAI’19
+
+4.1
+
+Interpretation algorithm
+
+We use (p0 , [ri : xi ], [xj : xk ])(·) as a shorthand for λ(p, R] , ∗] ).(p u p0 , R] [ri :
+xi ], ∗] [xj : xk ]), and denote − when a state component remains unchanged. Procedures to compute the join (t), widening (O) and antialias of abstract states,
+and the transfer function (I )] of instruction I are detailed in the remainder of
+this section. The complete interpretation procedure is described in Algorithm 1.
+It applies to a program P of MEMP. During the interpretation, we keep a subset
+L of labels of interest. Abstract values are stored in a map M from labels to
+abstract values. We assume that loop header labels LW of P have previously
+been identified using an existing analysis (e.g. Tarjan’s algorithm [29]). Figure
+5 reports a running example of this analysis, that will be used throughout the
+rest of the section.
+
+Algorithm 1 Interpret(P)
+1: procedure update(`, a, L)
+. Auxiliary procedure
+2:
+a ← antialias(a)
+3:
+if ` ∈ LW then
+. Check if l is a loop header
+
+4:
+new ← M [l ] O(M [l ] t a
+5:
+else
+6:
+new ← M [`] t a
+7:
+end if
+8:
+if new 6v M [`] then
+. Abstract value for ` changed, propagate
+9:
+M [`] ← new ; L ← L ∪ `
+10:
+end if
+11: end procedure
+12:
+13: for all (`, I) ∈ P do
+. Start of main procedure
+14:
+M [`] ← ⊥
+. Begin with empty abstract states
+15: end for
+16: M [`1 ] ← >; L ← {`1 }
+. Program starting label
+17: while L 6= ∅ do
+. Fixpoint iteration
+18:
+Pick and remove ` from L
+19:
+match P [`]
+20:
+with BR r `0
+21:
+update(`0 , (hr = 0i, −, −)(M [`]), L)
+. Branching case
+22:
+update(` + 1, (−, −, −)(M [`]), L)
+. Not branching case
+23:
+with END
+24:
+skip
+25:
+with
+26:
+update(` + 1, ((P [`])] )(M [`]), L)
+. Abstract semantics of I
+27: end while
+28: return M
+
+Page 8 of 22
+
+Author Version of « Static Analysis Of Binary Code With Memory Indirections Using Polyhedra»,
+Clément Ballabriga, Julien Forget, Laure Gonnord , Giuseppe Lipari, Jordy Ruiz accepted at VMCAI’19
+
+Label
+
+Polyhedron
+
+5
+
+p1 = hx1 = 4, x2 = 5i
+
+6
+7
+8
+10 (from 9)
+100 (from 8)
+unify(10, 100 )
+
+p2 = p1 u hx3 = x0 + x1 i
+p3 = p2 u hx4 = x3 , x5 = x1 i
+p4 = p3 u hx8 = x7 − x1 i
+p5 = p4 u hx9 = x2 i
+p6 = p4 u hx8 = 0i
+p7 = p6 [x9 /x5 ]
+p8 = p2 u hx4 = x3 , x8 = x7 − x1 ,
+x1 ≤ x9 ≤ x2 i
+p8 u hx10 = x9 i
+
+10 t 100
+11
+
+9: STORE r3 r2
+10: LOAD r6 r3
+11: END
+
+5: ADD r3 r0 r1
+6: STORE r3 r1
+7: SUB r5 r7 r1
+8: BR r5 10
+
+1: RAND r0
+2: RAND r7
+3: SET r1 4
+4: SET r2 5
+
+Registers
+Memory
+R]1 = {r0 : x0 , r1 : x1 ,
+r 2 : x2 , r 7 : x7 }
+R]2 = R]1 [r3 : x3 ]
+R]2
+∗]1 = {x4 : x5 }
+]
+]
+R3 = R2 [r5 : x8 ]
+∗]1
+]
+]
+R3
+∗2 = {x4 : x9 }
+R]3
+∗]1
+]
+]
+R3
+∗3 = {x4 : x9 }
+R]3
+
+∗]3
+
+R]3 [r6 : x10 ]
+
+∗]3
+
+Fig. 5. Running example of analysis
+
+4.2
+
+Anti-aliasing
+
+Whenever updating an abstract state, we immediately remove aliases (line 2),
+because the absence of aliases significantly simplifies the analysis in places where
+we need to check the equivalence of two variables (LOAD, STORE, t and O). In
+practice, aliases are introduced when encountering a conditional branching (see
+Section 4.3). We remove an alias using procedure antialias, which relies on the
+procedure Merge defined below. It is based on the following observation: if two
+addresses are equal, then the values stored at these addresses must be equal too.
+Let x1 , x2 be two variables of vars A (p) such that: ¬same(x1 , x2 ) ∧ x1 ≡ x2 .
+0
+
+Merge((p, R] , ∗] ), x1 , x2 ) = (p0 , R] , ∗] )
+
+with p0 = (p[x1 /x2 ])[∗] (x1 )/ ∗] (x2 )]
+0
+
+and ∗] = ∗] \ (x2 : ∗] (x2 ))
+
+Function antialias : A → A applies Merge for each pair of distinct equivalent
+address variables of an abstract state.
+Example 2. In state a below, address x2 is an alias on address x1 . Thus, x4
+must be equal to x3 , so Merge(a, x1 , x2 ) replaces x2 by x1 and x4 by x3 . In
+the result, x3 is constrained by the original constraints of x3 and x4 , and the
+memory mapping x2 : x4 is discarded.
+a = (hx1 = x2 , x3 ≥ 4, x4 ≤ 5i, −, ∗] = {x1 : x3 , x2 : x4 })
+0
+
+Merge(a, x1 , x2 ) = (h4 ≤ x3 ≤ 5i, −, ∗] = {x1 : x3 })
+
+Page 9 of 22
+
+Author Version of « Static Analysis Of Binary Code With Memory Indirections Using Polyhedra»,
+Clément Ballabriga, Julien Forget, Laure Gonnord , Giuseppe Lipari, Jordy Ruiz accepted at VMCAI’19
+
+4.3
+
+Transfer functions
+
+We now define the constraints generated for the analysis of each instruction of
+our language. We denote (I )] : A → A the transfer function of instruction I.
+Binary operation If the relation r1 = OPc (r2 , r3 ) is linear, we map the target
+register to a new variable, subject to the corresponding linear constraint in the
+polyhedron. The memory mapping is unchanged. Otherwise, the target register
+is mapped to a new unconstrained variable.
+(
+(hx = OPc (R] (r2 ), R] (r3 ))i, [r1 : x], −)(·) if linear(OPc )
+]
+(OP r1 r2 r3 ) =
+(−, [r1 : x], −)(·)
+otherwise
+Example 3. In Figure 5, at label 6 (i.e. the label immediately following the ADD
+operation) we introduce the constraint x3 = x0 + x1 and the register mapping
+R]1 (r3 ) = x3 .
+Set The impact of the immediate load instruction is straightforward:
+(SET r1 c)] = (hx = ci, [r1 : x], −)(·)
+Rand The random instruction maps a register to an unconstrained variable:
+(RAND r1 )] = (−, [r1 : x], −)(·)
+Load If the input state contains a memory address variable that is equivalent
+to the load address (note that for alias free states, if such a variable exists, it
+is unique), then in the output state the value of the destination register is the
+value of the memory value mapped to this address. Otherwise, the value of the
+destination register is undefined:
+(
+(hx = ∗] (a)i, [r1 : x], −)(·) if a ≡ r2
+]
+(LOAD r1 r2 ) =
+(−, [r1 : x], −)(·)
+otherwise
+Example 4. In Figure 5, at label 10 we have x4 ≡ r3 and ∗] (x4 ) = x9 , so at
+label 11 we introduce the constraint x10 = x9 and the mapping R]3 [r6 ] = x10 .
+Store Again, we need to consider the impact of aliases. If there exists an address
+variable equivalent to the target register, then there already exists a memory
+mapping for this address. The previous content at this address is replaced by
+the content of the source register (see Replace below). Otherwise, we create a new
+memory mapping (see Create below). An alias free state contains at most one
+
+Page 10 of 22
+
+Author Version of « Static Analysis Of Binary Code With Memory Indirections Using Polyhedra»,
+Clément Ballabriga, Julien Forget, Laure Gonnord , Giuseppe Lipari, Jordy Ruiz accepted at VMCAI’19
+
+address variable that must-alias with r1 . It may however contain several mayalias address variables a0 . For each such a0 , this means that a0 either equals r1 ,
+which requires a Replace, or is different from r1 , which has no impact. We apply
+operator t on both cases to manage this uncertainty, and add the constraints
+for each may-alias address (see May below).
+(
+λs.Replace(a)(May(s)) if ∃a ∈ vars A (p), a ≡ r1
+(STORE r1 r2 )] =
+λs.Create(May(s))
+otherwise
+With (
+
+denotes function composition):
+Replace(a) = (hx = R] (r2 )i, −, [a : x])(·)
+Create = (hxi = R] (r1 ), xj = R] (r2 )i, −, [xi : xj ])(·)
+λs.(Replace(a)(s) t s)
+
+May =
+{a∈A|a may-alias r1 }
+
+Example 5. In Figure 5, at label 7, we create a new memory mapping ∗]1 (x4 ) = x5
+and we introduce the constraints x4 = x3 , x5 = x1 .
+Example 6. In Figure 5, at label 10, when coming from label 9, we replace a previous mapping, x4 is mapped to x9 (instead of x5 previously), and we introduce
+the constraint x9 = x2 .
+Branching In Algorithm 1, when branching to a target label (`0 ) the branching
+condition holds (r = 0). We add no constraint for the otherwise case because it
+cannot be encoded using a linear relation.
+Example 7. In Figure 5, at label 10, when coming from label 6, we add the
+constraint x8 = 0.
+4.4
+
+Abstract domain operators, least and greatest elements
+
+Our analysis introduces new variables and removes old ones as it progresses.
+There is no predefined correspondence between variables and data locations,
+because the set of data locations used by the program is unknown a priori. As
+a consequence, it may happen that two abstract states use different variables to
+designate the same data location. This implies that to compare two states we
+first need to check whether some variables of the two states actually correspond
+to the same data location. This verification relies on a unification procedure,
+presented below. Unification is used for inclusion testing, and also in the join
+and widening operators.
+Unification Unification checks for the equivalence of two variables in two polyhedra, p1 and p2 . Intuitively, we try to express each variable as a linear expression
+of a well-chosen set of variables to conveniently check their equivalence.
+
+Page 11 of 22
+
+Author Version of « Static Analysis Of Binary Code With Memory Indirections Using Polyhedra»,
+Clément Ballabriga, Julien Forget, Laure Gonnord , Giuseppe Lipari, Jordy Ruiz accepted at VMCAI’19
+
+Let Vc = vars(p1 ) ∩ vars(p2 ) and p0 = proj (p1 , Vc ) t proj (p2 , Vc ). We denote
+npiv (p0 ) the set of non-pivot variables discovered by Gauss-Jordan elimination
+performed on the system of equality constraints of p0 (we exclude inequalities).
+Then, npiv (p0 ) is such that, in p0 :
+– no variable in npiv (p0 ) is equivalent to a linear expression of other variables
+of npiv (p0 );
+– each variable in vars(p0 )\npiv (p0 ) is equivalent to a linear expression of variables from npiv (p0 ).
+Let linexpr (x, p1 , npiv (p0 )) denote the linear expression representation of
+variable x ∈ vars(p1 ) in terms of variables in npiv (p0 ), represented as the
+vector of the linear expression coefficients. Let C 0 be the constraint system of
+proj (p1 , x∪npiv (p0 )). If C 0 contains an equality constraint involving x, then computing linexpr (x, p1 , npiv (p0 )) is straightforward. Otherwise, the empty vector is
+returned. If several (non-equivalent) equality constraints appear, we arbitrarily
+pick one. Note that, even though our unification can miss equivalent variables,
+this does not jeopardize the soundness of the analysis (see Section 5.3 and in
+particular Lemma 3).
+Algorithm 2 describes our unification procedure. We directly modify the second state to unify it with the first one. First, we compute set of non-pivot variables (line 4). Then, we check for the equivalence of address variables according
+to their linear expression representation, and we perform variable substitutions
+0
+0
+in p02 , R]2 and ∗]2 in case of equivalence (line 8). Register unification is simpler,
+0
+we just replace the bindings in R]2 by those of R]1 (line 12).
+Algorithm 2 unify((p1 , R]1 , ∗]1 ), (p2 , R]2 , ∗]2 ))
+0
+
+0
+
+1: (p02 , R]2 , ∗]2 ) ← (p2 , R]2 , ∗]2 )
+2: Vc ← vars(p1 ) ∩ vars(p2 )
+. common variables
+3: p0 ← proj (p1 , Vc ) t proj (p2 , Vc )
+4: B ← npiv (p0 )
+5: for all (xi , xj ) ∈ vars A (p1 ) × vars A (p2 ) do
+6:
+vi = linexpr (xi , p1 , B); vj = linexpr (xj , p2 , B)
+7:
+if vi 6= [] and vj 6= [] and vi = vj then
+. variables are equivalent
+0
+0
+8:
+Replace xj by xi and ∗] (xj ) by ∗] (xi ) in p02 , R]2 , and ∗]2
+9:
+end if
+10: end for
+11: for all r ∈ Dom(R]1 ) ∩ Dom(R]2 ) do
+. variables are trivially equivalent
+0
+0
+12:
+Replace R]2 (r) by R]1 (r) in p02 , R]2 , and ∗]2
+13: end for
+0
+0
+14: return (p02 , R]2 , ∗]2 )
+
+Example 8. In Figure 5, when computing unify(10, 100 ), s1 corresponds to the
+state of 10 and s2 to the state of 100 . A possible set of non-pivot variables is
+
+Page 12 of 22
+
+Author Version of « Static Analysis Of Binary Code With Memory Indirections Using Polyhedra»,
+Clément Ballabriga, Julien Forget, Laure Gonnord , Giuseppe Lipari, Jordy Ruiz accepted at VMCAI’19
+
+{x0 , x7 }. In s1 (and in s2 ), we have x4 − x0 + 0 · x7 − 4 = 0, so linexpr (x4 ) =
+[1; − 1; 0; − 4] (corresponding, respectively, to the coefficients of x4 , x0 , x7 ,
+and the constant). Since ∗]2 (x4 ) = x9 (in s1 ) and ∗]1 (x4 ) = x5 (in s2 ), we replace
+x5 by x9 in s2 .
+Inclusion Let us now define formally the partially ordered set (A, v). Given
+two functions f and g, we denote f ⊆ g when Dom(f ) ⊆ Dom(g) and ∀x ∈
+Dom(f ) : f (x) = g(x). Introducing new mappings in R] or ∗] (i.e. enlarging
+their domains) actually removes feasible concrete states, thus we define abstract
+states inclusion as follows (see lemma 4 for more details):
+Definition 2. Let a1 = (p1 , R]1 , ∗]1 ) and a2 = (p2 , R]2 , ∗]2 ). The ordering operator v is defined as follows:
+0
+
+0
+
+a1 v a2 ⇔p01 v p2 ∧ R]2 ⊆ R]1 ∧ ∗]2 ⊆ ∗]1
+0
+
+0
+
+with (p1 0 , R]1 , ∗] ) = unify(a2 , a1 )
+There exists several equivalent representations of the greatest and least elements of (A, v). We define them as follows:
+Definition 3. The greatest element of (A, v) is denoted >, with > = (hi, ∅, ∅).
+Definition 4. The least element of (A, v) is denoted ⊥ and defined as ⊥ = (p⊥ ,
+R]⊥ , ∗]⊥ ), where p⊥ is the empty polyhedron and R]⊥ , ∗]⊥ are such that every data
+location is mapped to a variable.
+Join Algorithm 3 describes our join procedure. It unifies the input states (line 1),
+then computes the convex hull on the unified states (line 2). Then, if a memory
+location or register is bound in one input state and unbound in the other, it is
+unbound in the result state.
+Algorithm 3 (p1 , R]1 , ∗]1 ) t (p2 , R]2 , ∗]2 )
+0
+
+0
+
+1: (p02 , R]2 , ∗]2 ) = unify((p1 , R]1 , ∗]1 ), (p2 , R]2 , ∗]2 ))
+2: p ← p1 t p02
+3: R] ← ∅; ∗] ← ∅
+0
+4: for all r ∈ Dom(R]1 ) do
+0
+5:
+if R]1 (r) = R]2 (r) then R] (r) ← R]1 (r) end if
+6: end for
+0
+7: for all a ∈ Dom(∗]1 ) do
+0
+8:
+if ∗]1 (a) = ∗]2 (a) then ∗] (a) ← ∗]1 (a) end if
+9: end for
+10: return (p, R] , ∗] )
+
+Page 13 of 22
+
+Author Version of « Static Analysis Of Binary Code With Memory Indirections Using Polyhedra»,
+Clément Ballabriga, Julien Forget, Laure Gonnord , Giuseppe Lipari, Jordy Ruiz accepted at VMCAI’19
+
+Example 9. In Figure 5, when computing 10 t 100 , we obtain identical register
+and memory mappings for 10 and unify(10, 100 ). The convex hull p5 t p7 groups
+the constraints on x9 (x1 ≤ x9 ≤ x2 ) and lifts those on x8 .
+Widening Due to the presence of loops, the widening operator O is used to
+ensure that our analysis reaches a fixpoint. O is defined just like t, except that
+we use a polyhedra widening operator O in place of t .
+4.5
+
+Loop bounds
+
+To compute loop bounds, for each loop header label ` we create a “virtual”
+register r` , to count the number of iterations of `. We instrument the program
+so that the register r` is set to 0 when entering loop `, and incremented at each
+iteration of ` (which is fairly classic, see e.g. [15]).
+Finally, let P a program of MEMP and M = interpret(P ). Let `e be the label of
+instruction END in P . Let (pf , R]f , ∗]f ) = M [`e ]. Then the loop bound for a loop
+header ` is computed as max(pf , R]f [r` ]) (where max(p, x) denotes the greatest
+value of variable x satisfying the constraints of p).
+
+5
+
+Soundness
+
+In this section, we prove the soundness of our analysis. We first establish a set of
+important lemmas on our abstract domain operators, and then prove soundness
+with respect to the concretization function.
+5.1
+
+Join
+
+Operator t is not commutative. We establish that it does however compute an
+upper bound of its operands, with respect to our inclusion definition (Lemma 1).
+The proof is based on two auxiliary properties on mapping inclusions:
+Property 1. Let a1 = (p1 , R]1 , ∗]1 ), a2 ∈ A, a3 = (p3 , R]3 , ∗]3 ) = a1 t a2 . We have:
+(p1 v p3 ) ∧ (R]3 ⊆ R]1 ) ∧ (∗]3 ⊆ ∗]1 )
+Proof. Considering Algorithm 3: (p1 v p3 ) follows from line 2, (R]3 ⊆ R]1 ) from
+t
+u
+line 5, and (∗]3 ⊆ ∗]1 ) from line 8.
+0
+
+0
+
+Property 2. Let a1 , a2 , a01 ∈ A, with a01 = (p01 , R]1 , ∗]1 ) = unify(a2 , a1 ). Then:
+0
+
+0
+
+(R]2 ⊆ R]1 ) ∧ (∗]2 ⊆ ∗]1 ) ⇒ (R]2 ⊆ R]1 ) ∧ (∗]2 ⊆ ∗]1 )
+Proof. Obvious from Algorithm 2.
+Lemma 1. Let a1 , a2 ∈ A. We have: (a1 v a1 t a2 ) ∧ (a2 v a1 t a2 ).
+
+Page 14 of 22
+
+Author Version of « Static Analysis Of Binary Code With Memory Indirections Using Polyhedra»,
+Clément Ballabriga, Julien Forget, Laure Gonnord , Giuseppe Lipari, Jordy Ruiz accepted at VMCAI’19
+
+Proof. Polyhedron inclusion follows from the polyhedra join operator. We must
+also prove the inclusion of register and memory mappings (after unification).
+Case for a1 follows from Properties 1 and 2. Concerning the case for a2 ,
+let a3 = a1 t a2 . When computing a3 , a variable v of a2 falls into one of three
+categories: 1) v is also in vars(p1 ), it remains in a3 ; 2) v is equivalent to a variable
+v1 of vars(p1 ), it is replaced by v1 in a3 (Algorithm 2, line 8); 3) otherwise, it
+is removed (Algorithm 3). Then, let a02 = unify(a3 , a2 ). When computing a02 ,
+variables that fell in category 2 at the previous step (when computing a3 ) will
+be replaced by their equivalent in a3 , because they fall again in category 2. Thus
+0
+0
+t
+u
+we obtain R]3 ⊆ R]2 , ∗]3 ⊆ ∗]2 , which concludes the proof.
+5.2
+
+Widening
+
+Lemma 2 establishes that operator O is indeed a widening operator.
+Property 3. Let a1 , a2 ∈ A. We have: (a1 t a2 ) v (a1 O a2 ).
+Proof. The property holds because t and O use the same unification procedure,
+t
+u
+and because we assume that O is a valid polyhedra widening operator.
+Property 4. Let a1 = (p1 , R]1 , ∗]1 ), a2 ∈ A, a3 = (p3 , R]3 , ∗]3 ) = a1 O a2 . We
+have: (p1 v p3 ) ∧ (R]3 ⊆ R]1 ) ∧ (∗]3 ⊆ ∗]1 )
+Proof. Same as for Property 1.
+Property 5. Let (bn )n∈N be a non decreasing infinite sequence in A. Then, the
+sequence a0 = b0 and an+1 = an O bn+1 converges in a finite number of steps.
+Proof. Thanks to Property 4, and considering that there is a finite quantity of
+data locations, there exists N ∈ N such that for all i > N , R]i+1 = R]i and
+∗]i+1 = ∗]i . Thus, ai+1 = (pi O qi+1 , R]i , ∗]i ), where qi+1 is the polyhedron of bi+1
+and pi that of ai .
+Assuming that O is a valid polyhedra widening operator, there exists m > N
+such that pm+1 = pm . Since m > N we also have R]m+1 = R]m and ∗]m+1 = ∗]m ,
+which concludes the proof.
+t
+u
+Lemma 2. Operator O is a widening operator.
+Proof. Follows from Properties 3 and 5.
+5.3
+
+Concrete and abstract states
+
+Let C = ((R 7→ Z) × (Z 7→ Z)) denote the set of concrete states (pairs of
+registers contents and memory contents). Data locations are mapped to values
+in a concrete state, while they are mapped to polyhedra variables in the abstract
+state. The concretization function γ relates data location values to data location
+variables as follows:
+
+Page 15 of 22
+
+Author Version of « Static Analysis Of Binary Code With Memory Indirections Using Polyhedra»,
+Clément Ballabriga, Julien Forget, Laure Gonnord , Giuseppe Lipari, Jordy Ruiz accepted at VMCAI’19
+
+Definition 5. Let a = (p, R] , ∗] ) be an abstract state. The concretization function γ is defined as follows:
+γ : A −→ P(C)
+n
+(p, R] , ∗] ) 7−→ (∗, R) | ∃f : Dom(∗] ) → Dom(∗),
+
+
+
+
+l
+
+hR] (r) = R(r)i
+
+r∈Dom(R] )
+
+
+
+
+l
+
+u
+
+hx = f (x), ∗] (x) = ∗(f (x))i v p
+
+o
+
+x∈Dom(∗] )
+
+More intuitively, we build a polyhedron p0 with the following constraints: 1)
+register values of the concrete state (R(r)) must be equal to the corresponding
+variable in the abstract state (R] (r)); 2) we try to find a function f that maps
+address variables to addresses (x = f (x)), then the content of each address
+variables (∗] (x)) must be equal to the memory value (∗(f (x))). If p0 v p then
+the concrete state satisfies the constraints of p and belongs to the concretization.
+Example 10.
+a = ({1 ≤ x1 ≤ 2, x2 = x1 , x3 = 1}, {r0 : x1 }, {x2 : x3 })
+γ(a) = {({r0 = 1}, {∗(1) = 1}}),
+
+(f (x2 ) = 1)
+
+({r0 = 2}, {∗(2) = 1})}
+
+(f (x2 ) = 2)
+
+c
+
+c
+
+Let −
+→∗ denote the transitive closure of →. The soundness of our abstract
+interpretation is established as follows:
+Theorem 1. Let P be a MEMP program. Let M = Interpret(P ). Then, for any
+c
+concrete state sinit : (P ` (l1 , sinit ) −
+→∗ (`, s)) =⇒ (s ∈ γ(M [`]))
+Proof. The proof of soundness follows from the structure of Algorithm 1, and
+from the following lemmas, which establish the soundness of each operator used
+in the algorithm.
+Lemma 3. Let a1 , a2 ∈ A. We have: γ(a1 ) = γ(unify(a2 , a1 )).
+Proof. Let a01 = unify(a2 , a1 ). Since we assume that a1 and a2 are alias free
+(recall Section 4.2), any two non-equivalent variables in a1 are also replaced by
+non-equivalent variables in a01 (or unchanged). Thus a01 is a simple renaming of
+a1 , and so a1 and a01 have the same concretization.
+t
+u
+Lemma 4. Let a1 , a2 ∈ A. We have: (a1 v a2 ) ⇒ γ(a1 ) ⊆ γ(a2 )
+0
+
+0
+
+Proof. Let s ∈ γ(a1 ). Let a01 = (p01 , R]1 , ∗]1 ) = unify(a2 , a1 ). From Lemma 3, s ∈
+γ(a01 ), thus there exists a function f for s satisfying the property of Definition 5
+0
+with a = a1 . Now, assume that p01 v p2 ∧ R]2 ⊆ R]1 ∧ ∗]2 ⊆ ∗]1 (i.e. a1 v a2 ).
+Then there exists a function f 0 for s that satisfies Definition 5, with a = a2 : just
+take f 0 such that it is the restriction of f to Dom(∗]2 ). So s ∈ γ(a2 ).
+t
+u
+
+Page 16 of 22
+
+Author Version of « Static Analysis Of Binary Code With Memory Indirections Using Polyhedra»,
+Clément Ballabriga, Julien Forget, Laure Gonnord , Giuseppe Lipari, Jordy Ruiz accepted at VMCAI’19
+
+Lemma 5. Let a1 , a2 ∈ A. We have: γ(a1 ) ∪ γ(a2 ) ⊆ γ(a1 t a2 ).
+Proof. From Lemma 1 and Lemma 4.
+Lemma 6. Let a1 , a2 ∈ A. We have: γ(a1 ) ∪ γ(a2 ) ⊆ γ(a1 O a2 )
+Proof. From Lemma 5, Lemma 4 and Property 3.
+Lemma 7. Let a ∈ A. We have: γ(a) ⊆ γ(antialias(a))
+Proof. Let (p, R] , ∗] ) = a. Let x1 , x2 ∈ vars A (p) be such that ¬same(x1 , x2 ) ∧
+x1 ≡ x2 . Then:
+s ∈ γ(a) ⇒ s ∈ γ(p u hx1 = x2 , ∗] (x1 ) = ∗] (x2 )i, R] , ∗] )
+⇒ s ∈ γ((p[x1 /x2 ])[∗] (x1 )/ ∗] (x2 )], R] , ∗] )
+⇒ s ∈ γ(Merge(a1 , x1 , x2 ))
+The soundness of antialias follows.
+
+t
+u
+
+Lemma 8. Let P be a MEMP program. Let M = Interpret(P ). Then, for all labels
+`, `0 of P :
+c
+
+(P ` (`, R, ∗) → (`0 , R0 , ∗0 )) =⇒ ((R, ∗) ∈ γ(M [`]) ⇒ (R0 , ∗0 ) ∈ γ(M [`0 ]))
+Proof. Trivially follows from the formal semantics and from the definition of
+0
+0
+transfer functions, except for STORE. Let a0 = (p0 , R] , ∗] ) = (STORE r1 r2 )] (a).
+The proof follows from noting that: 1) Both in the Create and Replace cases,
+0
+0
+0
+we obtain ∗] (R] (r1 )) = R] (r2 ), which is coherent with the formal semantics of
+STORE; 2) The soundness of May follows from the soundness of t and Replace.
+t
+u
+Lemma 9. Algorithm 1 terminates.
+Proof. Because O is applied on loop headers and O is a valid widening operator.
+t
+u
+
+6
+
+Related works
+
+Abstract interpretation using polyhedra has been first described in [12]. Static
+analysis tools such as Astree [21], Frama-C [11] or PAGAI [18] use various abstract domains (including polyhedra) to generate invariants for proving various
+properties, such as the absence of array out-of-bounds accesses for instance.
+While Astree and Frama-C work on the Abstract Syntax Tree, PAGAI processes LLVM Intermediate Representation (IR). Compared to our approach, both
+the AST and LLVM representations are closer to the source code, and contain
+information on variables and their types, and also a precise control flow. This
+makes the analysis easier to design, but less precise as far as WCET is concerned.
+
+Page 17 of 22
+
+Author Version of « Static Analysis Of Binary Code With Memory Indirections Using Polyhedra»,
+Clément Ballabriga, Julien Forget, Laure Gonnord , Giuseppe Lipari, Jordy Ruiz accepted at VMCAI’19
+
+Several other abstract domains other that polyhedra, capable of representing
+linear constraints between variables, have been proposed, such as for instance
+[20,30,24]. Choosing the most appropriate domain boils down to a trade-off between the execution time and the precision of the analysis. In our work we chose
+the polyhedra domain and thus favored precision. However, we think that it
+would be simple to adapt our work to another domain (e.g. to reduce analysis time), because our computation of memory and register mappings does not
+depend on how constraints between variables are represented and computed.
+Several works address static analysis of binary code [4,13,26,27,7], however
+they do not consider the problem of identifying memory locations of interest. In
+contrast, we identify these locations during the analyses.
+An important problem when dealing with binary code analysis is to figure
+out the set of interesting data locations used by the program. This is related
+to pointer analysis (the so-called aliasing problem), and has been extensively
+studied [19,17]. While the majority of pointer analyses have been proposed in
+the context of compiler optimizations, a certain number of ideas can be borrowed
+and applied to binary code analysis.
+In this paper, our approach is applied to static loop bound estimation, in the
+context of WCET analysis, so we compare our results with other loop bound
+estimation tools. The oRange tool [8] is based on an abstract interpretation
+method defined in [2]. It provides a very fast estimation of loop bounds, but it is
+restricted to C source code. SWEET [14] features a loop bound estimator, which
+works on an intermediary representation (ALF format). The approach is based
+on slicing and abstract interpretation and it generally provides very tight loop
+bounds even in complex cases, but the running time of the analysis seems to
+depend on the loop bound values, and in our experience for large loop bounds
+the analysis did not terminate.
+KTA [9] is a static WCET analysis tool based on abstract interpretation
+and path exploration of binary code. As its purpose is to compute a WCET,
+it does not directly provide information on loop bounds and we could not find
+documentation on the method used to compute these bounds. Thus, KAT was
+not included in our benchmarks. Furthermore, the analysis time seems to depend
+on the loop bound values.
+Compared to these existing works, our approach combines the polyhedral
+domain with binary code analysis, taking into account memory accesses and
+supporting analysis of relations between unknown memory addresses; moreover
+our method is proved to be sound and to always terminate.
+
+7
+
+Experimental results
+
+Our methodology is implemented in a prototype called Polymalys. Our experiments consist of two parts. First, we validate our approach by comparing Polymalys with other existing loop bound analysis tools on classic benchmarks. Then,
+we provide detailed examples of programs for which Polymalys successfully estimates loops bounds, while the other tools fail to do so.
+
+Page 18 of 22
+
+Author Version of « Static Analysis Of Binary Code With Memory Indirections Using Polyhedra»,
+Clément Ballabriga, Julien Forget, Laure Gonnord , Giuseppe Lipari, Jordy Ruiz accepted at VMCAI’19
+
+7.1
+
+Implementation
+
+Polymalys is implemented as a plugin of OTAWA (version 2.0), an open source
+WCET computation tool [5]. Polymalys relies on OTAWA for control-flow analysis and manipulation, and on PPL [3] for polyhedra operations. Polymalys implements several optimizations to reduce the number of variables and constraints
+of an abstract state (p, R] , ∗] ), most notably:
+– Unmapped variables: any variable that is not in R] or in ∗] can be safely
+removed from the polyhedron by performing a projection on the remaining
+(used) variables;
+– Dead registers: we remove dead register variables by perform a preliminary
+liveness analysis, using classic data-flow analysis methods [1];
+– Out-of-scope variables: whenever modifying the stack pointer register (SP ),
+assuming that the stack grows downwards, for each pair of variables (xi , xj )
+such that ∗] (xi ) = xj , if p v hxi < R] [SP ]i then xi and xj can be removed.
+7.2
+
+Benchmarks
+
+The analyses have been executed on a PC with an Intel core i5 3470 at 3.2 Ghz,
+with 8 GB of RAM. Every benchmark has been compiled with ARM crosstoolNG 1.20.0 (gcc version 4.9.1), using the -O1 optimization level.
+First, we report the results of our experiments on the Mälardalen benchmarks [16] and on PolyBench [25] in Table 1. The benchmarks gemver, covariance, correlation, nussinov and floyd-warshall are from PolyBench, while the
+others are from Mälardalen. We exclude benchmarks that are not supported
+by OTAWA, mainly due to floating point operations or indirect branching (e.g.
+switch). We compare Polymalys with SWEET [22], PAGAI [18] and oRange [8].
+For each benchmark, we report: the number of lines of code (in the C source),
+the total number of loops, the number of loops that are correctly bounded by
+each tool, and the computation time. We do not report the computation time for
+SWEET because we only had access to it through an online applet. For oRange,
+computation time is below the measurement resolution (10ms), except for edn,
+where it reaches 50ms. We ran PAGAI with the -d pk -t lw+pf options. For the
+PolyBench benchmarks, we did not succeed in running them with SWEET due to
+the online applet limitation. For the correlation benchmark, we did not succeed
+in running it with PAGAI, it terminates without giving any result.
+The execution time of Polymalys is typically higher than that of PAGAI because we introduce more variables and constraints. We believe that we can reduce
+the gap with additional optimizations, however Polymalys will probably remain
+more costly , because it works at a lower level of abstraction.
+Cases where tools fail to analyze some loop bounds are depicted in bold.
+There is only one benchmark for which Polymalys did not find a loop bound:
+for janne complex. The difficulty is that it contains complex loop index updates
+inside a if-then-else. On the contrary, there are several cases where Polymalys
+successfully estimates loops bounds, while the other tools fail to do so. Note
+
+Page 19 of 22
+
+Author Version of « Static Analysis Of Binary Code With Memory Indirections Using Polyhedra»,
+Clément Ballabriga, Julien Forget, Laure Gonnord , Giuseppe Lipari, Jordy Ruiz accepted at VMCAI’19
+
+that PAGAI does not specifically compute loop bounds, instead it computes loop
+invariants. We deduced loop bounds from these invariants.
+Loops Correctly Bounded
+Time (ms)
+Benchmark
+LoC Loops Polymalys SWEET PAGAI oRange Polymalys PAGAI
+crc
+16
+1
+1
+1
+1
+1
+150
+40
+fibcall
+22
+1
+1
+1
+1
+1
+230
+50
+janne complex 26
+2
+1
+2
+1
+1
+870
+140
+expint
+56
+3
+3
+2
+3
+3
+732
+9140
+matmult
+84
+5
+5
+5
+5
+5
+3455
+1380
+fdct
+149
+2
+2
+2
+2
+2
+7421
+2150
+jfdctint
+165
+3
+3
+3
+3
+3
+10660
+1960
+fir
+189
+2
+2
+2
+2
+1
+4989
+390
+edn
+198
+12
+12
+12
+9
+12
+21356
+15660
+ns
+414
+4
+4
+4
+4
+4
+1700
+380
+gemver
+186
+10
+10
+N/A
+10
+10
+12136
+6029
+covariance
+138
+11
+11
+N/A
+11
+11
+7248
+836
+correlation
+168
+13
+13
+N/A N/A
+13
+9129
+25062
+nussinov
+143
+8
+8
+N/A
+8
+8
+7272
+2811
+floyd-warshall 112
+7
+7
+N/A
+2
+7
+2904
+468
+Table 1. Benchmark results.
+
+7.3
+
+Loop bounds examples
+
+We further illustrate the differences between tool capabilities on some synthetic
+program examples.
+Example 11. The following example contains pointer aliasing and pointer arithmetic:
+foo() {
+int i, bound = 10;
+int *ptr = &bound;
+ptr++; ptr--; *ptr = 15; k = 0;
+for (i = 0; i < bound; i++);
+}
+
+PAGAI does not find the loop bound (the loop is considered unbounded),
+because it does not infer that ptr = &bound when executing the instruction
+*ptr=15. Other tools bound the loop correctly (15 iterations).
+Example 12. The following example contains an off-by-one array access:
+1
+2
+3
+
+#define SIZE 10
+foo(int offset) {
+int i, bound = 10;
+
+Page 20 of 22
+
+Author Version of « Static Analysis Of Binary Code With Memory Indirections Using Polyhedra»,
+Clément Ballabriga, Julien Forget, Laure Gonnord , Giuseppe Lipari, Jordy Ruiz accepted at VMCAI’19
+
+int tab[SIZE];
+if ((offset > SIZE) || (offset < 0))
+return -1;
+tab[offset] = 100;
+for (i = 0; i < bound; i++);
+
+4
+5
+6
+7
+8
+9
+
+}
+
+The off-by-one error (lines 5-6) may cause the array cell assignment (line 7) to
+overwrite the bound variable with the value 100. Polymalys correctly detects that
+the loop may iterate 100 times, while oRange and SWEET detect a maximum
+of 10 iterations. PAGAI also bounds to 10 iterations, but warns about a possible
+undefined behavior and unsafe result. Note that the bound depends on the stack
+variable allocation layout. In our experiments, the compiler allocates the bound
+variable next to the array. Such an information is much easier to analyze at the
+binary code level than at the source code level.
+Example 13. The following example shows the benefits of a relational domain:
+1
+2
+3
+4
+5
+6
+7
+
+#define MAXSIZE 10
+foo() {
+int base, end, i;
+if (end - base > MAXSIZE)
+end = base + MAXSIZE;
+for (i = base; i < end; i++);
+}
+
+Here, we do not know statically the value of end and base. However, due to
+the if statement (line 4), Polymalys introduces the constraint end − base ≤ 10.
+Thus, Polymalys bounds the loop correctly (10 iterations), while PAGAI, oRange
+and SWEET do not.
+Example 14. Finally, we report analysis results for the motivational example of
+Figure 1. Polymalys correctly finds that the loop bound is equal to the maximum
+size of the UDP payload; PAGAI, oRange and SWEET fail to provide any bound.
+
+8
+
+Conclusion
+
+In this paper we propose a novel technique for performing abstract interpretation
+of binary code using polyhedra. It consists in adding new variables to the polyhedra as the analysis progresses, and maintaining a correspondence with registers
+and memory addresses. Thanks to the relational properties of polyhedra, our
+technique naturally provides information on pointer relations when compared
+to other techniques based on non-relational domains. While the complexity of
+our method is currently still higher than other existing techniques, we believe
+that there is room for improvement. In particular, we are planning to extend our
+work with a modular procedure analysis and a data-structure analysis.
+
+Page 21 of 22
+
+Author Version of « Static Analysis Of Binary Code With Memory Indirections Using Polyhedra»,
+Clément Ballabriga, Julien Forget, Laure Gonnord , Giuseppe Lipari, Jordy Ruiz accepted at VMCAI’19
+
+References
+1. Aho, A.V., Lam, M.S., Sethi, R., Ullman, J.D.: Compilers: Principles, Techniques,
+and Tools (2nd Edition). Addison-Wesley Longman Publishing Co., Inc., Boston,
+MA, USA (2006)
+2. Ammarguellat, Z., Harrison, III, W.L.: Automatic recognition of induction variables and recurrence relations by abstract interpretation. In: Proceedings of the
+ACM SIGPLAN 1990 Conference on Programming Language Design and Implementation. pp. 283–295. PLDI ’90, ACM, New York, NY, USA (1990)
+3. Bagnara, R., Hill, P.M., Zaffanella, E.: The Parma polyhedra Library: Toward a
+complete set of numerical abstractions for the analysis and verification of hardware
+and software systems. Science of Computer Programming 72(1), 3–21 (2008)
+4. Balakrishnan, G., Reps, T.: Analyzing memory accesses in x86 executables. In:
+Compiler Construction. pp. 2732–2733. Springer (2004)
+5. Ballabriga, C., Cassé, H., Rochange, C., Sainrat, P.: OTAWA: An open toolbox for
+adaptive WCET analysis. In: Software Technologies for Embedded and Ubiquitous
+Systems, Lecture Notes in Computer Science, vol. 6399, pp. 35–46. Springer Berlin
+Heidelberg (2010)
+6. Ballabriga, C., Forget, J., Lipari, G.: Symbolic wcet computation. ACM Transactions on Embedded Computing Systems (TECS) 17(2), 39 (2018)
+7. Bardin, S., Herrmann, P., Védrine, F.: Refinement-based CFG reconstruction from
+unstructured programs. In: International Workshop on Verification, Model Checking, and Abstract Interpretation (VMCAI’11) (2011)
+8. Bonenfant, A., de Michiel, M., Sainrat, P.: oRange: A tool for static loop bound
+analysis. In: Workshop on Resource Analysis, University of Hertfordshire, Hatfield,
+UK (2008)
+9. Broman, D.: A brief overview of the KTA WCET tool. arXiv preprint arXiv:
+1712.05264 (2017)
+10. Bygde, S., Lisper, B., Holsti, N.: Fully bounded polyhedral analysis of integers with
+wrapping. Electronic Notes in Theoretical Computer Science 288, 3–13 (2012)
+11. Correnson, L., Signoles, J.: Combining analyses for c program verification. In:
+Stoelinga, M., Pinger, R. (eds.) Formal Methods for Industrial Critical Systems.
+pp. 108–130. Springer Berlin Heidelberg, Berlin, Heidelberg (2012)
+12. Cousot, P., Halbwachs, N.: Automatic discovery of linear restraints among variables of a program. In: Proceedings of the 5th ACM SIGACT-SIGPLAN symposium on Principles of programming languages (POPL). pp. 84–96. ACM (1978).
+https://doi.org/10.1145/512760.512770
+13. Djoudi, A., Bardin, S.: Binsec: Binary code analysis with low-level regions. In: International Conference on Tools and Algorithms for the Construction and Analysis
+of Systems (TACAS’15) (2015)
+14. Ermedahl, A., Sandberg, C., Gustafsson, J., Bygde, S., Lisper, B.: Loop bound
+analysis based on a combination of program slicing, abstract interpretation, and
+invariant analysis. In: Rochange, C. (ed.) 7th International Workshop on WorstCase Execution Time Analysis (WCET’07). OpenAccess Series in Informatics (OASIcs), vol. 6. Schloss Dagstuhl–Leibniz-Zentrum fuer Informatik, Dagstuhl, Germany (2007)
+15. Gulwani, S., Mehra, K.K., Chilimbi, T.: Speed: precise and efficient static estimation of program computational complexity. In: ACM SIGPLAN-SIGACT Symposium on Principles of Programming Languages (POPL’09). pp. 127–139. ACM
+(2009)
+
+Page 22 of 22
+
+Author Version of « Static Analysis Of Binary Code With Memory Indirections Using Polyhedra»,
+Clément Ballabriga, Julien Forget, Laure Gonnord , Giuseppe Lipari, Jordy Ruiz accepted at VMCAI’19
+
+16. Gustafsson, J., Betts, A., Ermedahl, A., Lisper, B.: The Mälardalen WCET benchmarks: Past, present and future. In: OASIcs-OpenAccess Series in Informatics.
+vol. 15. Schloss Dagstuhl-Leibniz-Zentrum fuer Informatik (2010)
+17. Hardekopf, B., Lin, C.: The ant and the grasshopper: fast and accurate pointer
+analysis for millions of lines of code. ACM SIGPLAN Notices 42(6), 290–299 (2007)
+18. Henry, J., Monniaux, D., Moy, M.: Pagai: A path sensitive static analyser. Electronic Notes in Theoretical Computer Science 289, 15–25 (2012)
+19. Hind, M.: Pointer analysis: Haven’t we solved this problem yet? In: ACM
+SIGPLAN-SIGSOFT Workshop on Program Analysis for Software Tools and Engineering(PASTE’01). pp. 54–61. ACM, New York, NY, USA (2001)
+20. Karr, M.: Affine relationships among variables of a program. Acta Informatica
+6(2), 133–151 (Jun 1976)
+21. Kästner, D., Wilhelm, S., Nenova, S., Cousot, P., Cousot, R., Feret, J., Mauborgne,
+L., Miné, A., Rival, X.: Astrée: Proving the absence of runtime errors. In: Embedded Real Time Software and Systems (ERTS2’10). p. 9 (May 2010)
+22. Lisper, B.: SWEET–a tool for WCET flow analysis. In: International Symposium
+On Leveraging Applications of Formal Methods, Verification and Validation. pp.
+482–485. Springer (2014)
+23. Miné, A., Ouadjaout, A., Journault, M.: Design of a Modular Platform for Static
+Analysis. In: 9h Workshop on Tools for Automatic Program Analysis (TAPAS’18).
+p. 4. Lecture Notes in Computer Science (LNCS) (08 2018)
+24. Miné, A.: Field-sensitive value analysis of embedded C programs
+with union types and pointer arithmetics. In: ACM SIGPLAN/
+SIGBED Conference on Languages, Compilers, and Tools for Embedded
+Systems (LCTES’06). pp. 54–63 (2006)
+25. Pouchet, L.N.: Polybench: The polyhedral benchmark suite (2012), http://www.
+cs.ucla.edu/pouchet/software/polybench
+26. Reps, T., Balakrishnan, G.: Improved memory-access analysis for x86 executables.
+In: Compiler Construction. pp. 16–35. Springer (2008)
+27. Sepp, A., Mihaila, B., Simon, A.: Precise static analysis of binaries by extracting relational information. In: 18th Working Conference on Reverse Engineering
+(WCRE’11). IEEE (2011)
+28. Sharir, M., Pnueli, A.: Two approaches to interprocedural data flow analysis. Tech.
+rep., New York University. Courant Institute of Mathematical Sciences. ComputerScience Department (1978)
+29. Tarjan, R.: Depth-first search and linear graph algorithms. SIAM journal on computing 1(2), 146–160 (1972)
+30. Venet, A.: The gauge domain: Scalable analysis of linear inequality invariants.
+In: 24th International Conference on Computer Aided Verification (CAV’12). pp.
+139–154 (2012)
+
+

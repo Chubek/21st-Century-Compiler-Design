@@ -5,7 +5,7 @@ See [BOOK-PLAN.md](BOOK-PLAN.md) for the approved outline, content-driven scope,
 current progress, and next writing tasks. Follow [AGENTS.md](AGENTS.md) for all
 repository work. Reference extracts in `sources/` are read-only.
 
-**Status:** All 38 chapters and three appendices have drafts. A third refinement
+**Status:** All 39 chapters and four appendices have drafts. A third refinement
 pass strengthens technical contracts, examples, and explanations. Source coverage is complete;
 technical validation and primary-source citations are still in progress.
 Chapter lengths follow content, with no minimum or maximum word quota.

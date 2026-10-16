@@ -1,0 +1,2400 @@
+CRIL: A Concurrent Reversible Intermediate Language
+Shunya Oguchi
+
+Shoji Yuen
+
+Graduate School of Informatics, Nagoya University
+Furo-cho, Chikusa-ku, Nagoya 464-8601, Japan
+{oguchi321,yuen}@sqlab.jp
+
+We present a reversible intermediate language with concurrency for translating a high-level concurrent programming language to another lower-level concurrent programming language, keeping
+reversibility. Intermediate languages are commonly used in compiling a source program to an object code program closer to the machine code, where an intermediate language enables behavioral
+analysis and optimization to be decomposed in steps. We propose CRIL (Concurrent Reversible Intermediate Language) as an extension of RIL used by Mogensen for a functional reversible language,
+incorporating a multi-thread process invocation and the synchronization primitives based on the P-V
+operations. We show that the operational semantics of CRIL enjoy the properties of reversibility,
+including the causal safety and causal liveness proposed by Lanese et al., checking the axiomatic
+properties. The operational semantics is defined by composing the bidirectional control flow with the
+dependency information on updating the memory, called annotation DAG. We show a simple example of ‘airline ticketing’ to illustrate how CRIL preserves the causality for reversibility in imperative
+programs with concurrency.
+
+1
+
+Introduction
+
+Reversible programming languages have been proposed to describe reversible computation where the
+control flows both forward and backward [24, 4, 23, 6]. They directly describe reversible computation
+and develop new aspects of software development since reversibility holds all information at any point
+of execution. In forward-only execution, the computation can overwrite the part of its intermediate
+history unless it is used in the following computation for efficiency. In analyzing the behavior, such as
+debugging, it is common to replay the execution to the point in focus to recreate the lost part of history.
+For a concurrent program, replaying the execution is usually difficult since updating shared resources
+among multiple control threads depends on the runtime environment.
+Intermediate languages mediate the translation from the source language to a low-level machine
+language for execution. Step-by-step translation via intermediate languages is a common technique for
+optimization in compilers. The intermediate language in LLVM [14] is often used as a behavioral model
+for program analysis.
+Mogensen uses RIL [16] as an intermediate language with reversibility for a functional reversible
+language in the memory usage analysis. RSSA [17] based on RIL is used for compiling and optimizing
+Janus programs [9, 3]. Reversibility with concurrency has been studied in process calculi [2, 20, 11, 10],
+in event structures [18, 19, 21, 15] and recently in programming languages such as Erlang [12] and a
+simple imperative programming language [6, 8].
+We propose a reversible intermediate language CRIL by extending RIL. CRIL extends RIL by allowing multiple blocks to run concurrently and the synchronization primitive based on the P-V operations.
+In CRIL, concurrent blocks interact with each other via shared variables. To establish the reversibility
+for concurrent programs, the causality among shared variables has to be preserved. Unlike sequential
+G. Caltais and C. A. Mezzina (Eds): Combined Workshop on
+Expressiveness in Concurrency and Structural Operational Semantics
+(EXPRESS/SOS 2023).
+EPTCS 387, 2023, pp. 149–167, doi:10.4204/EPTCS.387.11
+
+© S. Oguchi & S. Yuen
+This work is licensed under the
+Creative Commons Attribution License.
+
+150
+
+CRIL: A Concurrent Reversible Intermediate Language
+
+reversible programs, even if one step of a program is reversible, the whole program is not reversible in
+general since shared variables may not be reversed correctly.
+To make a program of CRIL reversible, we give the operational semantics as the labeled transition
+system, LTSICRIL , as the composition of the operational semantics with one-step reversibility and a data
+structure called ‘annotation DAG’. An annotation DAG accumulates the causality of updating memory in
+a forward execution and rolls back the causality to control the reversed flow in the backward execution.
+We show that LTSICRIL has the basic properties for reversibility proposed in [13]. Using the approach of
+[13], it is shown that LTSICRIL enjoys the Causal Safety and the Causal Liveness, which are important in
+analyzing CRIL programs compositionally.
+By translating a high-level programming language to CRIL, LTSICRIL works as a virtual machine,
+and its behavior is guaranteed to be reversible. CRIL enables fine-grained behavioral analysis such as
+optimization and reversible debugging. In section 4, we present a simple example of airline ticketing
+given in [5] to enable reversible debugging.
+The paper is organized as follows. Section 2 presents the syntax of CRIL and the operational semantics for control flow. Section 3 introduces annotation DAG as a data structure to store the causality of
+updating memory. We define LTSICRIL as the operational semantics for CRIL and show the reversibility
+of LTSICRIL , which is followed by the airline ticketing example in section 4. Section 5 presents concluding remarks.
+
+2
+
+CRIL
+
+Pg
+The syntax of CRIL is defined in figure 1. Following RIL
+b
+[16], a CRIL program consists of an unordered set of basic
+instb
+blocks. Given a set of labels L , a block has an entry point
+entry
+followed by a block body and an exit point with labels. A
+exit
+block body is either a basic instruction or a call statement.
+inst
+
+::=
+::=
+::=
+::=
+::=
+::=
+
+callb
+e
+left
+right
+⊕
+⊙
+
+::=
+::=
+::=
+::=
+::=
+::=
+
+2.1
+
+Basic block
+
+b∗
+instb | callb
+entry inst exit
+l <- | l;l <- e | begin l
+-> l | e -> l;l | end l
+left ⊕= e | left <-> left
+| V x | P x | assert e | skip
+l <- call l(, l)∗ -> l
+right ⊙ right | !right
+x | M[x]
+k | left
++|-|^
+⊕ | == | != | < | <= | >
+| >= | && | ||
+
+We assume all references to variables have a global scope
+and there exists a heap memory M indexed by integers,
+where M[x] denotes the x-th element in M. An expression
+e is either an arithmetic expression or a boolean expression
+with the usual operators +, -, ^, ==, !=, <, <=, >, >=, &&, ||, !
+Figure 1: The syntax of CRIL
+of the C language, where ^ is the bitwise exclusive OR operation. The boolean operators and logical connectives treat
+0 as false and any non-0 value as true. An expression can contain integer constants, which are denoted
+by k.
+Entry/exit point An entry/exit point of a basic block is the following forms:
+Entry point
+(1) l <(2) l1 ;l2 <- e
+(3) begin l
+
+Exit point
+(1’) -> l
+(2’) e -> l1 ;l2
+(3’) end l
+
+S. Oguchi & S. Yuen
+
+151
+
+where l, l1 , l2 ∈ L . We write entry(b) for the entry point of a basic block b, and exit(b) for the exit point
+of a basic block b.
+The informal meaning of each item is explained as follows:
+(1) and (1’): l <- receives the control at l unconditionally in a forward execution. In a backward execution, it sends the control to the block that receives the control at l. -> l dually works in the reversed way
+of l <-.
+(2) and (2’): l1 ; l2 <- e receives the control at l1 when e is evaluated to a non-0 value and at l2 otherwise in
+a forward execution. In a backward execution, it returns the control to the block that receives the control
+at l1 when e is evaluated to non-0 and at l2 otherwise. e -> l1 ;l2 dually works in the reversed way of
+l1 ; l2 <- e.
+(3) and (3’): begin l receives the control from the call statement labeled by l in a forward execution. In
+a backward execution, it returns the control to the statement labeled by l. end l dually works in the
+reversed way of end l.
+A basic block is either an instruction block or a call statement.
+Instruction block Basic instruction is in the forms:
+(1) left ⊕= e
+(3) V x (5) assert e
+(2) left1 <-> left2 (4) P x (6) skip
+We write inst(b) for the basic instruction in b. The informal semantics is explained as follows:
+(1): left ⊕= e is an update statement where left is a left-value, and ⊕ ∈ {+, -, ^}. left is relatively updated
+by e in that +=, -=, and ^= with the same semantics as in the C language. If left = x, x must not appear
+in e. If left = M[x], heap references must not appear in e.
+(2): left1 <-> left2 is an exchange where left1 and left2 are left-values. It swaps the values specified by
+left1 and left2 . The same variable must not appear on both sides of <->.
+(3) and (4): V x and P x are the P and V operations for synchronization, which correspond to those commonly used in operating systems. We assume variables in P and V instruction only appear as the parameters of P and V. In a forward execution, V x is defined when x is 0 and terminates when x is 1 and P x is
+defined when x is 1 and terminates when x is 0. In a backward execution, V x and P x work as P x and V x
+of the forward execution respectively.
+(5): assert e aborts the execution if e evaluates to 0, and does nothing otherwise.
+(6): skip does nothing in either direction.
+We call R = Vars ∪ {M} memory resources. Let Var(E) be the set of memory resource references appearing in E, where E is one of entry, exit, or inst in the grammar of figure 1. For example,
+Var(z-=M[x]+y) = {M, x, y, z}. read(b) is the memory resources that b uses, and write(b) is the memory
+resources that b updates.
+
+
+{x}
+If inst(b) = x ⊕= e
+
+
+
+
+
+{M}
+If inst(b) = M[x] ⊕= e
+
+
+
+
+
+read(b) = Var(entry(b))
+{x, y} If inst(b) = x <-> y
+∪ Var(inst(b))
+write(b) = {x, M} If inst(b) ∈ {x <-> M[y], M[y] <-> x}
+
+
+∪ Var(exit(b))
+
+{M}
+If inst(b) = M[x] <-> M[y]
+
+
+
+
+
+{x}
+If inst(b) ∈ {P x, V x}
+
+
+
+
+∅
+Otherwise.
+
+152
+
+CRIL: A Concurrent Reversible Intermediate Language
+
+Call statement A call statement is a basic block in the following form:
+l <- call l1 , · · · ,ln -> l ′ (n ≥ 1)
+When n = 1, it behaves as a subroutine call in RIL. If n ≥ 2, the controls are simultaneously sent
+to all basic blocks with begin li in the forward execution, and to all basic blocks with end li in the
+backward execution. In a forward execution, call l1 , · · · ,ln terminates when all controls are returned to
+this block. In a backward execution, it sends the controls to the blocks whose exit points are end li .
+As in RIL, call appears only in a basic block whose entry and exit parts are unconditional, and not
+in any begin and end blocks. CRIL does not have uncall for a call statement since uncall makes
+the semantics more complex in that an uncall nested in multiple calls causes the mixture of forward and
+backward execution for process blocks. An uncall can be implemented as a symmetrical call.
+
+2.2
+
+Process
+
+For a basic block b, in(b),out(b) ⊆ L are defined as follows:
+
+
+{l}
+in(b) = {l1 , l2 }
+
+
+∅
+
+if entry(b) = l <if entry(b) = l1 ; l2 <- e
+if entry(b) = begin l
+
+
+
+if exit(b) = -> l
+{l}
+out(b) = {l1 , l2 } if exit(b) = e -> l1 ; l2
+
+
+∅
+if exit(b) = end l
+
+Basic blocks b1 and b2 are connected, written as b1 ▷◁ b2 , if out(b1 )∩in(b2 ) ̸= ∅ or in(b1 )∩out(b2 ) ̸=
+∅. A process block of b is PB(b, Pg) = {b′ ∈ Pg | b′ ▷◁∗ b}, where ∗ stands for reflexive and transitive
+closure. No basic block is shared among process blocks since they are the equivalence classes of ▷◁∗ ,
+which is an equivalence relation on basic blocks.
+S
+Let L1 (B) = b∈B (in(b) ∪ out(b)) and L2 (B) = {l | ∃b ∈ B. entry(b) = begin l ∨ exit(b) = end l}.
+A CRIL program Pg is well-formed when it satisfies the following conditions:
+(1): For all l ∈ L1 (Pg), there exists a unique pair (b1 , b2 ) such that in(b1 ) ∩ out(b2 ) = {l};
+(2): For all l ∈ L2 (Pg), there exists a unique pair (b1 , b2 ) such that entry(b1 ) = begin l and exit(b2 ) =
+end l;
+(3): L1 (Pg) ∩ L2 (Pg) = ∅
+(4): For all b ∈ Pg, |L2 (PB(b, Pg))| = 1; and
+(5): There is a special label main ∈ L2 (Pg).
+The well-formedness ensures that once a control enters into a process block at begin l, the control
+may reach only the matching end l in the forward execution and vice versa in the backward execution.
+A process block PB(b, Pg) is labeled by l when it contains the basic block with begin l.
+A call statement call l1 , · · · ,ln sends controls to process blocks labeled by l1 , · · · , ln . A process
+block with control is called a process. A process is executed by passing the control among the basic
+blocks in its process block. Since call can be recursive, a process may have some subprocesses.
+In a forward execution, l <- call l1 , · · · ,ln -> l ′ receives a control at l, forks n processes, and sends
+the control to l ′ after merging the processes. In the backward execution, it works in a reversed manner.
+In the following, we assume a CRIL program is well-formed.
+
+S. Oguchi & S. Yuen
+
+2.3
+
+153
+
+Basic operational semantics
+
+The set of process identifiers PID is (N+ )∗ where N+ is the set of positive integers. p ∈ PID denotes
+an identifier uniquely assigned to a process. When p executes a process block PB(b, Pg), we also write
+PB(p). If p is labeled by l, PB(p) = PB(b, Pg) where entry(b) = begin l. A special root process has
+the identifier of ε. The runtime invokes the root process and sends the control to a process block labeled
+by main to start an execution of a CRIL program. For a process p, p · i is assigned to the i-th subprocess
+invoked by a call statement of process p. ⪯ is the prefix relation. A process set PS is a set of process
+identifiers satisfying (1) ε ∈ PS; (2) p ∈ PS implies p′ ∈ PS for p′ ⪯ p; and (3) p · i implies p · j ∈ PS for
+j < i. For a process set PS and a process id p, isleaf(PS, p) holds if for all p′ ∈ PS, p ⪯ p′ imples p = p′ .
+A process configuration is (l, stage), where l ∈ L and stage ∈ {begin, run, end} are the location of
+the control in a process block. If stage = begin, it is before executing the process block, if stage = run,
+it is executing the process block, and if stage = end it terminated the process block. PC is the set of
+process configurations.
+A program configuration is (Pg, ρ, σ , Pr), where Pg is the program (which never changes), ρ :
+Vars → Z maps a variable to its value, σ : N → Z maps a heap memory address to its value. A process map Pr : PID → PC ∪ {⊥} maps a process to a process configuration. We assume Pract is a process
+set where Pract = {p ∈ PID|Pr(p) ∈ PC}. C is the set of all program configurations.
+A transition relation over program configurations
+p,Rd,Wt
+
+′
+′
+′
+(Pg, ρ, σ , Pr) −
+↽−
+−−
+−−
+−⇀
+− (Pg, ρ , σ , Pr )
+prog
+
+is defined in figure 2. (Pg, ρ, σ , Pr) steps forward to (Pg, ρ ′ , σ ′ , Pr′ ) by the process p with reading memory resource Rd and updating memory resource Wt. And (Pg, ρ ′ , σ ′ , Pr′ ) steps backward to (Pg, ρ, σ , Pr)
+in the same way.
+We explain the SOS rules in figure 2. AssVar and AssArr present the update behavior. The exchange
+behavior is presented by SwapVarVar, SwapVarArr, SwapArrVar, and SwapArrArr. SwapVarArr
+and SwapArrVar are reversible since y is evaluated to the same value on both sides of ↽
+⇀. SwapVarVar
+and SwapArrArr are clearly reversible. Skip presents the skip behavior. Assert presents the assertion
+behavior, which stops when e is evaluated to 0.
+V-op and P-op present the behavior of V x and P x for synchronization by x shared among concurrent
+processes. In forward execution, V x sets x = 1 when x = 0, and waits otherwise. In backward execution,
+V x sets x = 0 when x = 1, and waits otherwise. P behaves in a symmetrical fashion. By the pair of V x
+and P x, x can be used as a semaphore to implement the mutual exclusion for both directions of execution.
+Inst presents the one-step behavior of a basic block. The instruction updates ρ and σ and the entry
+and exit points give the status of the process. The process is running if stage is run. the process is at the
+initial block or at the final block, if stage is begin or end. The transition label Rd is read(b) and the
+transition label Wt is write(b).
+CallFork presents that a call statement forks subprocesses. When p executes a call statement
+call l1 , · · · ,ln forwards, it forks subprocesses labeled by l1 , · · · , ln and p stores the label for returning the controls in Pr. Note that the process map is changed to Pr′ with subprocesses after forking
+′ , p) does not hold, p does not pass the control to the next block until all
+subprocesses. Since isleaf(Pract
+the subprocesses are merged. CallMerge works dually to CallFork. In a forward execution, when all
+subprocesses reach the end stage, all subprocesses are set to inactive and p resumes to pass the control
+to the next basic block. In a backward execution, CallFork behaves as CallMerge of forward execution
+and vice versa for CallMerge.
+
+154
+
+CRIL: A Concurrent Reversible Intermediate Language
+Expressions:
+k is a constant
+Con
+(ρ, σ) ▷ k ; k
+
+(ρ[x 7→ m], σ) ▷ x ; m
+
+Var
+
+(ρ[x 7→ m1 ], σ[m1 7→ m2 ]) ▷ M [x] ; m2
+
+(ρ, σ) ▷ right1 ; m1
+(ρ, σ) ▷ right2 ; m2
+(ρ, σ) ▷ right1 right2 ; m3
+(ρ, σ) ▷ right ; 0
+Exp2
+(ρ, σ) ▷ !right ; 1
+
+m3 = m1
+
+m2
+
+Mem
+
+Exp1
+
+(ρ, σ) ▷ right ; m
+m 6= 0
+Exp3
+(ρ, σ) ▷ !right ; 0
+
+Instructions:
+(ρ, σ) ▷ e ; m3
+m2 = m1 ⊕ m3
+AssVar
+x ⊕= e ▷ (ρ[x 7→ m1 ], σ) ↽
+⇀ (ρ[x 7→ m2 ], σ)
+(ρ, σ) ▷ e ; m3
+m2 = m1 ⊕ m3
+AssArr
+M[x] ⊕= e ▷ (ρ[x 7→ m4 ], σ[m4 7→ m1 ]) ↽
+⇀ (ρ[x 7→ m4 ], σ[m4 7→ m2 ])
+x <-> y ▷ (ρ[x, y 7→ m1 , m2 ], σ) ↽
+⇀ (ρ[x, y 7→ m2 , m1 ], σ)
+
+SwapVarVar
+
+x <-> M[y] ▷ (ρ[x, y 7→ m1 , m3 ], σ[m3 7→ m2 ]) ↽
+⇀ (ρ[x, y 7→ m2 , m3 ], σ[m3 7→ m1 ])
+
+SwapVarArr
+
+M[y] <-> x ▷ (ρ[x, y 7→ m1 , m3 ], σ[m3 7→ m2 ]) ↽
+⇀ (ρ[x, y 7→ m2 , m3 ], σ[m3 7→ m1 ])
+
+SwapArrVar
+
+M[x] <-> M[y] ▷ (ρ[x, y 7→ m3 , m4 ], σ[m3 , m4 7→ m1 , m2 ]) ⇀
+↽ (ρ[x, y 7→ m3 , m4 ], σ[m3 , m4 7→ m2 , m1 ])
+V x ▷ (ρ[x 7→ 0], σ) ↽
+⇀ (ρ[x 7→ 1], σ)
+skip ▷ (ρ, σ) ↽
+⇀ (ρ, σ)
+
+V-op
+
+P x ▷ (ρ[x 7→ 1], σ) ↽
+⇀ (ρ[x 7→ 0], σ)
+
+SwapArrArr
+
+P-op
+
+(ρ, σ) ▷ e ; m
+m 6= 0
+Assert
+assert e ▷ (ρ, σ) ↽
+⇀ (ρ, σ)
+
+Skip
+
+Entry and exit points:
+begin l ` (ρ, σ, l, begin)
+
+l <- ` (ρ, σ, l, run)
+
+ρσ▷e;0
+l1 ;l2 <- e ` (ρ, σ, l2 , run)
+
+ρσ▷e;m
+m 6= 0
+l1 ;l2 <- e ` (ρ, σ, l1 , run)
+
+end l a (ρ, σ, l, end)
+
+-> l a (ρ, σ, l, run)
+
+ρσ▷e;0
+e -> l1 ;l2 a (ρ, σ, l2 , run)
+
+ρσ▷e;m
+m 6= 0
+e -> l1 ;l2 a (ρ, σ, l1 , run)
+
+Basic Blocks:
+isleaf(P ract , p)
+
+b ∈ Pg
+
+entry(b) ` (ρ, σ, l, stage)
+
+inst(b) ▷ (ρ, σ) ↽
+⇀ (ρ′ , σ ′ )
+
+exit(b) a (ρ′ , σ ′ , l′ , stage′ )
+
+p,read(b),write(b)
+
+Inst
+
+−
+⇀
+(P g, ρ, σ, P r[p 7→ (l, stage)]) −
+↽
+−−
+−−
+−−
+−−
+−−
+−−
+−−
+−−
+−
+− (P g, ρ′ , σ ′ , P r[p 7→ (l′ , stage′ )])
+prog
+
+isleaf(P ract , p)
+
+(l′ <-, call l1 , · · · ,ln , -> l′′ ) ∈ P g
+
+p,∅,∅
+
+−
+⇀
+(P g, ρ, σ, P r[p 7→ (l′ , run)]) −
+↽
+−−
+−−
+−
+− (P g, ρ, σ, P r[p 7→ (l′′ , run), p · 1 7→ (l1 , begin), · · · , p · n 7→ (ln , begin)])
+
+CallFork
+
+prog
+
+isleaf(P ract , p)
+
+(l′ <-, call l1 , · · · ,ln , -> l′′ ) ∈ P g
+p,∅,∅
+
+−
+⇀
+(P g, ρ, σ, P r[p 7→ (l′′ , run), p · 1 7→ (l1 , end), · · · , p · n 7→ (ln , end)]) −
+↽
+−−
+−−
+−
+− (P g, ρ, σ, P r[p 7→ (l′′ , run)])
+prog
+
+Figure 2: The basic operational semantics
+
+CallMerge
+
+S. Oguchi & S. Yuen
+
+155
+
+In a program configuration of CRIL, there is no stack as in RIL to store the return label for subroutine
+calls. The process map stores the return label, which is not available until isleaf(Pract , p) holds, where it
+checks if the label is on the stack.
+Figure3 shows an example of CRIL program Pg. There are four process blocks {b1 , b2 , b3 },{b4 , b5 },
+{b6 }, and {b7 }. A process map assigns ε to {b1 , b2 , b3 }. In the following execution, it assigns 1 to
+{b4 , b5 }, 2 to {b6 }, and 3 to {b7 }.
+begin main
+An example of the transitions for Pg is as follows:
+(Pg, ρ0 , σ0 , [ε 7→ (main, begin)])
+
+b1
+
+ε,∅,∅
+
+−
+−
+⇀
+↽
+−−
+−
+− (Pg, ρ0 , σ0 , [ε 7→ (l1, run)])
+prog
+ε,∅,∅
+
+[ε 7→ (l2, run), 1 7→ (begin, sub0),
+−
+−
+⇀
+↽
+−−
+−
+− (Pg, ρ0 , σ0 , 2 7→ (sub1, begin), 3 7→ (sub2, begin)] )
+
+b2
+
+prog
+1,{x},{x}
+
+[ε 7→ (l2, run), 1 7→ (l3, run),
+−
+−
+⇀
+↽
+−−
+−−
+−−
+−
+− (Pg, ρ1 , σ0 , 2 7→ (sub1, begin), 3 7→ (sub2, begin)] ) b3
+prog
+
+where ρ1 = ρ0 [x 7→ 1]
+2,{x,y},{x}
+[ε 7→ (l2, run), 1 7→ (l3, run),
+−
+−
+⇀
+↽
+−−
+−−
+−−
+−−
+−
+− (Pg, ρ2 , σ0 , 2 7→ (sub1, end), 3 7→ (sub2, begin)] )
+prog
+b4
+where ρ2 = ρ2 [y 7→ 1]
+3,{x,z},{z}
+[ε 7→ (l2, run), 1 7→ (l3, run),
+−
+−
+⇀
+↽
+−−
+−−
+−−
+−−
+−
+− (Pg, ρ3 , σ0 , 2 7→ (sub1, end), 3 7→ (sub2, end)] )
+b5
+prog
+where ρ3 = ρ1 [z 7→ 1]
+1,{x},{x}
+[ε 7→ (l2, run), 1 7→ (sub0, end),
+−
+−
+⇀
+↽
+−−
+−−
+−−
+−
+− (Pg, ρ4 , σ0 , 2 7→ (sub1, end), 3 7→ (sub2, end)] )
+prog
+b6
+where ρ4 = ρ3 [x 7→ 2]
+ε,∅,∅
+
+−
+−
+⇀
+↽
+−−
+−
+− (Pg, ρ4 , σ0 , [ε 7→ (l2, run)])
+prog
+ε,∅,∅
+
+−
+−
+⇀
+↽
+−−
+−
+− (Pg, ρ4 , σ0 , [ε 7→ (main, end)])
+prog
+
+b7
+
+skip
+-> l1
+l1 <call sub0 , sub1 , sub2
+-> l2
+l2 <skip
+end main
+
+begin sub0
+x += 1
+-> l3
+l3 <x += 1
+end sub0
+begin sub1
+y += x
+end sub1
+begin sub2
+z += x
+end sub2
+
+This forward execution ends with x = 2, y = 1, z = 1.
+The operational semantics show that the computation may
+Figure 3: A CRIL program Pg
+be reversed to (Pg, ρ0 , σ0 , [ε 7→ (main, begin)]). However,
+it is possible to reverse to a different configuration such as x = 0, y = −1, z = −1 if the call statement
+is reversed in a different order. Thus, this operational semantics is not reversible. In the next section,
+we will combine an annotation for the dependency information as DAG to make the basic properties for
+reversibility as well as Causal Safety and Causal Liveness.
+
+3
+
+Reversibility of CRIL
+
+Table 1 (a) shows the transitions of store ρ by the sequence of basic blocks in the forward computation
+p,Rd,Wt
+
+of the example in the previous section. Process p makes the forward (left-to-right) transition of −
+↽−
+−−
+−−
+−⇀
+−.
+prog
+
+The program configuration at the end is (Pg, [x 7→ 2, y 7→ 1, z 7→ 1], σ0 , [ε 7→ (main, end)]. The conp,Rd,Wt
+
+figuration may lead to a different store by the backward (right-to-left) transitions of −
+↽−
+−−
+−−
+−⇀
+− as shown
+prog
+
+in table 1 (b). Although each step of the operational semantics keeps the local reversibility, it does not
+p,Rd,Wt
+
+preserve the causality of shared memory. The forward step of −
+↽−
+−−
+−−
+−⇀
+− updates Wt reading Rd making
+prog
+
+the causality from Rd to Wt. Our idea is to control processes to keep the causality by observing Rd and
+Wt being combined with the operational semantics.
+
+156
+
+CRIL: A Concurrent Reversible Intermediate Language
+
+x
+0
+
+y
+0
+
+z
+0
+
+b1 ∈ PB(ε)
+
+x
+2
+
+y
+1
+
+z
+1
+
+2
+
+1
+
+1
+
+2
+
+1
+
+1
+
+2
+
+−1
+
+1
+
+2
+
+−1
+
+−1
+
+1
+
+−1
+
+−1
+
+0
+
+−1
+
+−1
+
+0
+
+−1
+
+−1
+
+0
+
+−1
+
+−1
+
+b3 ∈ PB(ε)
+0
+
+0
+
+0
+
+b2 ∈ PB(ε)
+
+b2 ∈ PB(ε)
+0
+
+0
+
+0
+
+b4 ∈ PB(1)
+
+b7 ∈ PB(3)
+1
+
+0
+
+0
+
+b6 ∈ PB(2)
+
+b6 ∈ PB(2)
+1
+
+1
+
+0
+
+b7 ∈ PB(3)
+
+b5 ∈ PB(1)
+1
+
+1
+
+1
+
+2
+
+1
+
+1
+
+b5 ∈ PB(1)
+
+b4 ∈ PB(1)
+
+b2 ∈ PB(ε)
+
+b2 ∈ PB(ε)
+2
+
+1
+
+1
+
+b3 ∈ PB(ε)
+
+b1 ∈ PB(ε)
+2
+
+1
+
+1
+
+(a) A forward Execution
+
+(b) The corresponding backward execution
+
+b1
+b2
+b3
+b4
+b5
+b6
+b7
+
+read
+∅
+∅
+∅
+{x}
+{x}
+{x, y}
+{x, z}
+
+write
+∅
+∅
+∅
+{x}
+{x}
+{y}
+{z}
+
+Table 2: read and write for basic blocks
+Table 2 presents read and write for each
+basic block. In the backward execution,
+after reversing b3 b2 , CallMerge works as
+a forking of three processes in backward.
+At this point, b5 , b6 , and b7 are possible by using the rule backward. Since
+write(b5 ) = {x} and both read(b6 ) and
+read(b7 ) contain x, the order between b5
+
+Table 1: Store changes in executions
+and b6 , and the order between b5 and b6 affect the causality. We say bi conflicts with b j where i ̸= j if
+read(bi ) ∩ write(b j ) ̸= ∅ or read(b j ) ∩ write(bi ) ̸= ∅. Since b6 and b7 do not conflict with each other,
+the order between b6 and b7 does not affect the causality. Thus, for the forward execution in table 1 (a),
+the reversed execution b3 b2 b3 b6 b7 b4 b2 b1 reaches ρ0 as a legitimate reversed computation.
+
+3.1
+
+Annotation DAG
+
+We shall present a data structure called ‘annotation DAG’ (Directed Acyclic Graph) that keeps the conflicting information in forward execution and controls the backward execution by matching the causality,
+observing the memory Wt updated by reading the memory Rd.
+Definition 1. An annotation DAG is A = (V, ER , EW ) satisfying the following conditions:
+1. V ⊆ (PID × N) ∪ {⊥} where N is the set of natural numbers, ⊥ ∈ V , and if (p, n) ∈ V then for all
+n′ ≤ n, (p, n′ ) ∈ V ;
+2. ER , EW ⊆ V × R ×V where (v′ , r, v), (v′′ , r, v) ∈ ER ∪ EW implies v′ = v′′ ;
+3. ER ∩ EW = ∅ and (V, ER ⊎ EW ) is a DAG with the finite set of nodes V ;
+4. (v′ , r, v) ∈ EW and v′ ̸= ⊥ imply (v′′ , r, v′ ) ∈ EW ; and
+5. (v, r, v′ ), (v, r, v′′ ) ∈ EW implies v′ = v′′
+A is the set of all annotation DAGs, and Ainit is ({⊥}, ∅, ∅).
+r
+
+r
+
+We write v → v′ for (v, r, v′ ) ∈ EW and v 99K v′ for (v, r, v′ ) ∈ ER . Condition 5 with conditions 3
+r
+and 2 ensures that when v′ → v, there is a unique sequence of EW with the label of r from ⊥ to v:
+r
+r
+r
+⊥ → v1 → · · · → vn = v. last(r, EW ) denotes the last node v of such sequence. When last(r, EW ) = v ̸= ⊥,
+r
+
+r
+
+v′ → v for a unique v′ and v ̸→ v′′ for all v′′ . last(r, ∅) = ⊥ for all r ∈ R. Since V is finite, for (p, n) ∈ V
+
+S. Oguchi & S. Yuen
+
+157
+
+there is the maximum number for process p if such (p, n) exists. Given V ⊆ PID × N ∪ {⊥}, we write
+max p (V ) for max(p,n)∈V n for some (p, n) ∈ V . max p (V ) = −1 when (p, n) ∈
+/ V for all n.
+p,Rd,Wt
+
+Definition 2. For A1 , A2 ∈ A , A1 = (V1 , ER1 , EW 1 ) −
+↽−
+−−
+−−
+−⇀
+− A2 = (V2 , ER2 , EW 2 ) if
+ann
+
+1. V2 = V1 ∪ {v};
+2. ER2 = ER1 ∪ {newedge(r, EW 1 , v) | r ∈ Rd −Wt};and
+3. EW 2 = EW 1 ∪ {newedge(r, EW 1 , v) | r ∈ Wt}
+where v = (p, max p (V1 ) + 1) and newedge(r, EW , v) = (last(r, EW ), r, v).
+O +
+
+⇀
+Given O ⊆ PID × 2R × 2R , A −
+↽
+− A′ when for some (pi , Rdi ,Wti ) ∈ O, there exists a sequence of Ai
+p1 ,Rd1 ,Wt1
+
+ann
+pn ,Rdn ,Wtn
+
+O ∗
+
+ann
+
+ann
+
+ann
+
+O +
+
+⇀
+⇀
+−
+⇀
+−
+⇀
+such that A0 −
+↽
+− A′ .
+↽
+− A′ if A = A′ or A −
+↽
+−−
+−−
+−−
+−−
+−
+− An = A′ . We write A −
+↽
+−−
+−−
+−−
+−−
+−
+− A1 · · · −
+ann
+
+p,Rd,Wt
+
+Intuitively, the forward (left-to-right) relation of A1 = (V1 , ER1 , EW 1 ) −
+↽−
+−−
+−−
+−⇀
+− A2 is to add a fresh node
+ann
+v and edges newedge(r, EW 1 , v) for r ∈ Rd ∪ Wt to A1 for process p to execute forwards a basic block
+b ∈ PB(p) with read(b) = Rd and write(b) = Wt. v presents the new causality created by executing
+process p in the forward direction. The new node has the causality to update Wt from (p, max p (V1 )) that
+presents the newest causality in A1 by p in forward. To update the causality, the edges newedge(r, EW 1 , v)
+for r ∈ Wt are added to EW 1 . The edges newedge(r, EW 1 , v) for r ∈ Rd − Wt from the newest causality
+for r at that moment are added to ER1 to show that the update for v depends on such r.
+The backward (right-to-left) relation is to remove a node and edges from A2 . The node v to be
+removed has to be the newest causality of a process and does not depend on other causalities. It is shown
+O +
+
+⇀
+that such a node always exists in an annotation DAG in {A | Ainit −
+↽
+− A} as below.
+ann
+
+r
+
++
+
+−
+⇀
+Proposition 1. For (V, ER , EW ) ∈ {A | Ainit −
+↽
+−
+− A}, there exists a node v ∈ V such that v′ 99K v implies
+ann
+
+v′ = last(r, EW ); and no outgoing edge from v.
+O ∗
+
+p,Rd,Wt
+
+O
+⇀
+Moreover, Acomp
+= {A | Ainit −
+↽
+− A} is closed by −
+↽−
+−−
+−−
+−⇀
+− where (p, Rd,Wt) ∈ O. Obviously, A ∈
+
+ann
+ann
+p,Rd,Wt
+′
+O
+′
+Acomp implies A ∈ Acomp when A −
+↽−
+−−
+−−
+−⇀
+− A for some (p, Rd,Wt) ∈ O by definition.
+ann
+p,Rd,Wt
+O + ′
+O
+⇀
+Proposition 2. For A ∈ {A′ | Ainit −
+such that A′′ −
+↽−
+−−
+−−
+−⇀
+− A with (p, Rd,Wt)
+↽
+− A }, there exists A′′ ∈ Acomp
+ann
+ann
+
+∈ O.
+
+3.2
+
+Operational semantics controlled by Annotation DAG
+
+Definition 3. The operational semantics controlled by annotation DAG over program configurations
+p,Rd,Wt
+
+(C, A) −
+↽−
+−−
+−−
+−⇀
+− (C′ , A′ ) is defined by:
+p,Rd,Wt
+
+C−
+↽−
+−−
+−−
+−⇀
+− C′
+prog
+
+p,Rd,Wt
+
+p,Rd,Wt
+
+A−
+↽−
+−−
+−−
+−⇀
+− A′
+ann
+
+ProgAnn
+
+(C, A) −−−−⇀ (C′ , A′ )
+↽−−−−
+
+where p ∈ PID and Rd,Wt ⊆ R.
+pi ,Rdi ,Wti
+
+−
+⇀
+The program computation with annotation is a sequence of (Ci , Ai ) −
+↽
+−−
+−−
+−−
+−
+− (Ci+1 , Ai+1 ) (i ≥ 0)
+beginning with (C0 , A0 ) = (Cinit , Ainit ).
+
+158
+
+CRIL: A Concurrent Reversible Intermediate Language
+
+We illustrate the behavior controlled by the annotation DAG for the simple example of the previous
+section. Starting from the initial configuration,(C0 , A0 ) = ((Pg, ρ0 , σ0 , [(ε 7→ (main, begin))]), ({⊥}, ∅,
+∅)), it ends up with (C8 , A8 ) = (Pg , [x, y, z 7→ 2, 1, 1], σ0 , [ε 7→ (main, end)]).
+Forward accumulation of causality We present the construction of annotation DAGs as follows:
+(F1) After process ε executes b1 and b2 , A2 = ({⊥, (ε, 0), (ε, 1)}, ∅, ∅);
+(F2) The call statement in b2 forks three subprocesses. Then, process 1 executes b4 , (1, 0) is added to
+x
+V and ⊥ → (1, 0) is added since read(b4 ) = write(b4 ) = {x} to make A3 , meaning x is updated by the
+initial x, and the store is updated as [x, y, z 7→ 1, 0, 0].
+2,{x,y},{y}
+
+−
+⇀
+(F3) Next, process 2 executes b6 where read(b6 ) = {x, y} and write(b6 ) = {y}. −
+↽
+−−
+−−
+−−
+−−
+−
+− adds a fresh
+ann
+
+x
+
+y
+
+node (2, 0), ⊥ → (2, 0), and (1, 0) 99K (2, 0). The causality of (2, 0) means y is updated by the initial y
+and x of (1, 0) to make A4 .
+3,{x,z},{z}
+
+−
+⇀
+(F4) Then, process 3 executes b7 where read(b7 ) = {x, z} and write(b7 ) = {z}. −
+↽
+−−
+−−
+−−
+−−
+−
+− adds (3, 0),
+ann
+
+x
+
+z
+
+⊥ → (3, 0), and (1, 0) 99K (3, 0), to make A5 shown in figure 4 (a), meaning the causality at (3, 0) to
+update the initial z using the initial z and x of (1, 0).
+1,{x},{x}
+
+−
+⇀
+(F5) At last, process 1 executes b5 where read(b5 ) = write(b5 ) = {x}. −
+↽
+−−
+−−
+−−
+−
+− just adds (1, 1) and
+ann
+
+x
+
+(1, 0) → (1, 1) to form A6 shown in figure 4 (b), meaning x is updated by x of (1, 0).
+(F6) No more causality is created after merging the subprocesses. Just the relation adds (ε, 2) and (ε, 3)
+with no edges to form A8 shown in figure 4 (c).
+
+(ε, 0)
+(ε, 1)
+
+⊥
+
+(ε, 0)
+(ε, 1)
+
+x
+
+⊥
+
+(1, 0)
+
+(2, 0)
+y
+x
+
+(ε, 0)
+(ε, 1)
+
+x
+⊥
+
+(1, 0)
+
+(2, 0)
+y
+x
+
+x
+(1, 0)
+
+z
+)
+
+(a) A3
+
+)
+
+x
+(3, 0)
+
+(b) A4
+
+(ε, 0)
+(ε, 1)
+
+(c) A5
+
+⊥
+
+(2, 0)
+y
+x
+
+z
+
+(ε, 0)
+(ε, 1)
+
+x
+(1, 0)
+
+x
+
+x
+
+(1, 1)
+
+⊥
+
+(2, 0)
+y
+x
+
+(ε, 2) z
+(ε, 3)
+
+(3, 0)
+
+x
+(1, 0)
+
+x
+
+(1, 1)
+
+x
+(3, 0)
+
+(d) A6
+
+(e) A8
+
+Figure 4: Annotation DAGs along with forward execution
+Backward rollback of causality The following is the summary of the corresponding backward execution.
+(B1) The removable nodes of A8 are {(ε, 3), (1, 1)}. Here, C8 specifies ε to remove (ε, 3) followed by removing (ε, 2) back to (C6 , A6 ), where C6 = (Pg, [x, y, z 7→ 2, 1, 1], σ0 , [ε 7→ (l2, run), 1 7→ (sub0, end), 2
+7→ (sub1, end), 3 7→ (sub2, end)])
+p,Rd,Wt
+
+(B2) C6 may reverse any subprocess, but A6 allows only to remove (1, 1) by −
+↽−
+−−
+−−
+−⇀
+− to obtain A5 .
+ann
+
+x
+
+(B3) After removing (1, 1) and (1, 0) → (1, 1) from A6 , we obtain A5 whose removable nodes are (2, 0)
+and (3, 0). (1, 0) is not removable since (1, 0) has two outgoing edges, although (1, 0) = last(x, EW ).
+
+S. Oguchi & S. Yuen
+
+159
+
+(B4) C5 may reverse either process 2 or process 3, and let process 2 reverse to become C4′ . Then, remove
+x
+y
+⊥ → (2, 0) and (1, 0) 99K (2, 0) to obtain A′4 and [x, y, z 7→ 1, 0, 1] as the store ρ. Note that (C4′ , A′4 ) did
+not appear in the forward execution.
+x
+
+z
+
+(B5) From (C4′ , A′4 ), process 3 is reversed to remove (3, 0), ⊥ → (3, 0), and (1, 0) 99K (3, 0) to obtain A3
+and [x, y, z 7→ 1, 0, 0].
+x
+
+(B6) Then, process 1 is reversed by removing (1, 0) and ⊥ → (1, 0) to obtain A2 = ({⊥, (ε, 0), (ε, 1)}, ∅,
+∅).
+(B7) At last, process ε reverses b2 and b1 to obtain (Cinit , Ainit ).
+In (B4) step, there are two possibilities of reversing process 3 or process 2. In the above, A5 is reversed
+by process 2 to A′4 followed by process 3.
+For a CRIL program Pg, let B
+be the basic blocks in Pg. Let O =
+S
+S
+PID × b∈B read(b) × b∈B write(b).
+Proposition 2 ensures there is always
+a removable node along with removable edges.
+
+A4
+(ε, 0)
+(ε, 1)
+
+A3
+
+(2, 0)
+y
+
+x
+
+2,{x,y},{y}
+
+3,{x,z},{z}
+
+−
+−
+⇀
+↽
+−−
+−−
+−−
+−−
+−−
+−
+−
+
+ann
+
+(ε, 0)
+(ε, 1)
+⊥
+
+x
+
+A5
+
+⊥
+
+x
+
+⊥
+
+x
+
+−
+−
+⇀
+↽
+−−
+−−
+−−
+−−
+−−
+−
+−
+(1, 0)
+
+⊥
+(1, 0)
+z
+
+ann
+
+(ε, 0)
+(ε, 1)
+
+−
+−
+⇀
+↽
+−−
+−−
+−−
+−−
+−−
+−
+−
+x
+
+y
+x
+
+x
+(1, 0)
+
+z
+
+2,{x,y},{y}
+
+−
+−
+⇀
+↽
+−−
+−−
+−−
+−−
+−−
+−
+−
+
+(2, 0)
+
+ann
+
+(1, 0)
+3,{x,z},{z}
+
+(ε, 0)
+(ε, 1)
+
+x
+
+ann
+
+(3, 0)
+(3, 0)
+
+A′4
+
+Figure 5: Annotation DAGs in backward execution
+
+3.3
+
+Properties for reversibility
+
+We show that the operational semantics controlled by annotation DAG has proper properties for reversibility. We focus on the following two properties that are considered fundamental properties for
+reversibility [13].
+Causal Safety (CS): An action can not be reversed until any actions caused by it have been reversed.
+Causal Liveness (CL): We should allow actions to reverse in any order compatible with Causal Safety,
+not necessarily the exact inverse of the forward order.
+[13] shows that those properties hold in an LTSI (LTS with Independence) provided that a small
+p,Rd,Wt
+
+number of axioms are valid in the LTSI. We shall follow this approach by defining LTS from −
+↽−
+−−
+−−
+−⇀
+−
+and add the independence relation to have the LTSI for the CRIL behavior. We will then show that the
+axioms for CS and CL hold.
+Definition 4. (C × A , Lab, ⇀) is the forward LTS for CRIL where:
+• Lab = PID × 2R × 2R ; and
+p,Rd,Wt
+
+(p,Rd,Wt)
+
+• (C, A) −−−−−⇀ (C′ , A′ ) if (C, A) −
+↽−
+−−
+−−
+−⇀
+− (C′ , A′ )
+Definition 5. The (combined) LTS for CRIL is (C × A , Lab ⊎ Lab, →) where:
+• Lab = {(p, Rd,Wt) | (p, Rd,Wt) ∈ Lab}; and
+a
+
+a
+
+a
+
+a
+
+• For a ∈ Lab, (C, A) → (C′ , A′ ) iff (C, A) −
+⇀ (C′ , A′ ), and (C, A) → (C′ , A′ ) iff (C′ , A′ ) → (C, A).
+
+160
+
+CRIL: A Concurrent Reversible Intermediate Language
+
+Lab ⊎ Lab is ranged over by α, β , · · · , and Lab by a, b, · · · . und : Lab ⊎ Lab → Lab where und(a) = a
+a
+a
+and und(a) = a. a = a. Given t : P → Q, t is for Q → P.
+For CRIL, the independence of transitions is defined as the independent memory update among
+concurrent processes. The processes running concurrently are not in the subprocess relation. Note that
+as pid p · 1, p · 2, · · · are assigned to the subprocesses of the process with pid of p. The process with the
+pid of p is concurrent to the process with the pid of q if p ̸⪯ q and q ̸⪯ p. Hence, we give the dependence
+relation for labels as follows.
+Definition 6. For α, β ∈ Lab ⊎ Lab such that und(α) = (p1 , Rd1 ,Wt1 ) and und(β ) = (p2 , Rd2 ,Wt2 ),
+α ιlab β iff
+p1 ̸⪯ p2 ∧ p2 ̸⪯ p1 ∧ Rd1 ∩Wt2 = ∅ ∧ Rd2 ∩Wt1 = ∅
+The independence of transitions in LTS is defined as the transitions with independent labels. We
+define the Labeled Transition System with Independent transitions as the operational semantics of CRIL.
+β
+
+α
+
+Definition 7. For t : (C1 , A1 ) −
+→ (C1′ , A′1 ) and u : (C2 , A2 ) −
+→ (C2′ , A′2 ) in the combined LTS for CRIL, t
+and u are independent of each other, written as t ι u if α ιlab β .
+(C × A , Lab ⊎ Lab, →, ι) is the LTS of CRIL with independence.
+In the sequel, we write ‘LTSICRIL ’ for the LTS of CRIL with independence.
+3.3.1
+
+Basic properties for reversibility
+
+We take the axiomatic approach of [13], where the combination of the basic properties gives the proper
+reversibility. The first step is to show that the LTSICRIL is pre-reversible. For this purpose, we show
+LTSICRIL satisfies the following axioms: “Square Property (SP)”, “Backward Transitions are Independent (BTI)”, “Well-Foundedness (WF)”, and “Coinitial Propagation of Independence (CPI)”.
+a
+
+a
+
+a
+
+−
+⇀
+Square Property(SP) For a ∈ Lab, when C −
+↽
+−
+− C′ , we write C → prog C′ and C′ → prog C. Simia
+
+prog
+a
+
+a
+
+−
+⇀
+larly, when A −
+↽
+−
+− A′ , we write A → ann A′ and A′ → ann A.
+ann
+
+α
+
+By the definition of the independence transitions, the square property of the → prog is immediately
+shown.
+α
+
+β
+
+Proposition 3. Suppose C −
+→prog C′ , C −
+→prog C′′ , and α ιlab β . Then there are the cofinal transitions
+β
+
+α
+
+C′ −
+→prog C′′′ and C′′ −
+→prog C′′′ .
+α
+
+For annotation DAGs, we need to trace the difference of nodes and edges added or deleted by →ann
+to show the square property. We use the following notation to present differences in annotation DAGs:
+(
+(V ′ −V, ER′ − ER , EW′ − EW ) if α ∈ Lab,
+α
+′
+′
+′
+For o : (V, ER , EW ) →ann (V , ER , EW ), diff(o) =
+(V −V ′ , ER − ER′ , EW − EW′ ) if α ∈ Lab
+(
+(V ∪ ∆V, ER ∪ ∆ER , EW ∪ ∆EW ) if α ∈ Lab,
+(V, ER , EW ) ⊙α (∆V, ∆ER , ∆EW ) =
+(V − ∆V, ER − ∆ER , EW − ∆EW ) if α ∈ Lab
+α
+
+β
+
+Proposition 4. Let diff(A →ann A′ ) = (∆V α , ∆ERα , ∆EWα ) and diff(A →ann A′′ ) = (∆V β , ∆ER , ∆EW ) with
+β
+β
+α ιlab β . Then, ∆V α ∩ ∆V β = ∆ERα ∩ ∆ER = ∆EWα ∩ ∆EW = ∅.
+β
+
+β
+
+S. Oguchi & S. Yuen
+
+161
+
+Proof. For some vα and vβ , ∆V α = {vα } and ∆V β = {vβ }. α ιlab β implies vα ̸= vβ . All the edges
+β
+
+β
+
+of ∆ERα ⊎ ∆EWα come into vα and all the edges of ∆ER ⊎ ∆EW come into vβ . Therefore, ∆V α ∩ ∆V β =
+β
+
+β
+
+∆ERα ∩ ∆ER = ∆EWα ∩ ∆EW = ∅.
+a
+
+a
+
+β
+
+Proposition 5. Suppose A →ann A′ and A →ann A′′ with a ιlab β . Then there is A′′′ such that A′′ →ann A′′′
+a
+a
+and diff(A →ann A′ ) = diff(A′′ →ann A′′′ ).
+a
+
+Proof. Assume A = (V, ER , EW ), A′′ = (V ′′ , ER′′ , EW′′ ), and a = (pa , Rda ,Wta ). A′′ →ann A′′′ for some A′′′
+since a ∈ Lab. a ιlab β implies that max pa (A) = max pa (A′′ ) and last(r, EW ) = last(r, EW′′ ) for r ∈ Rda .
+a
+a
+Therefore, diff(A →ann A′ ) = diff(A′′ →ann A′′′ ).
+a
+
+a
+
+β
+
+Proposition 6. Suppose A →ann A′ and A →ann A′′ with a ιlab β . Then there is A′′′ such that A′′ →ann A′′′
+a
+a
+and diff(A →ann A′ ) = diff(A′′ →ann A′′′ ).
+β
+
+Proof. Assume diff(A →ann A′′ ) = (∆V β , ∆ER , ∆EW ), and a = (pa , Rda ,Wta ). Let v = (pa , max pa (V )).
+r
+β
+β
+a ιlab β implies that no edges in ∆ER ⊎ ∆EW go out from v and v′ such that v′ 99K v in A. Therefore,
+a
+a
+a
+A′′ →ann A′′′ for some A′′′ . a ιlab β and a ∈ Lab derive diff(A →ann A′ ) = diff(A′′ →ann A′′′ ).
+β
+
+β
+
+β
+
+α
+
+α
+
+Proposition 7. Suppose A →ann A′ and A →ann A′′ with α ιlab β . Then A′′ →ann A′′′ , where A′′′ = A′′ ⊙α
+α
+diff(A →ann A′ ).
+α
+
+Proof. Proposition 5 and 6 derive A′′ →ann A′′′ .
+β
+
+α
+
+Proposition 8. Suppose A −
+→ann A′ , A −
+→ann A′′ , and α ιlab β . Then there are the cofinal transitions
+β
+
+α
+
+A′ −
+→ann A′′′ and A′′ −
+→ann A′′′ .
+α
+
+β
+
+β
+
+α
+
+Proof. By proposition 4, diff(A →ann A′ ) and diff(A →ann A′′ ) are disjoint if α ιlab β . Hence, the order
+α
+of addition and deletion to/from A does not affect the result. Therefore, (A ⊙α diff(A →ann A′ )) ⊙β
+β
+
+α
+
+diff(A →ann A′′ ) = (A ⊙β diff(A →ann A′′ )) ⊙α diff(A →ann A′ ) = A′′′ . By proposition 7, we have A →ann
+β
+
+β
+
+α
+
+A′ →ann A′′′ and A →ann A′′ →ann A′′′ hold for such A′′′ .
+Combining proposition 3 with proposition 8 by ProgAnn, the square property holds.
+β
+
+α
+
+Lemma 1 (Square Property). Whenever t : (CP , AP ) −
+→ (CQ , AQ ), u : (CP , AP ) −
+→ (CR , AR ), and t ι u, then
+β
+
+α
+
+there are cofinal transitions u′ : (CQ , AQ ) −
+→ (CS , AS ), and t ′ : (CR , AR ) −
+→ (CS , AS ).
+Backward Transitions are Independent (BTI) BTI is useful for reversibility because an available
+backward transition does not depend on any other backward transition. In CRIL, a label of LTSICRIL
+gives the information to establish BTI.
+a
+
+b
+
+Lemma 2 (Backward Transitions are Independent). Whenever t : (CP , AP ) −
+→ (CQ , AQ ), u : (CP , AP ) −
+→
+(CR , AR ), and t ̸= u, then t ι u.
+
+162
+
+CRIL: A Concurrent Reversible Intermediate Language
+
+Proof. Assume AP = (V, ER , EW ), a = (pa , Rda ,Wta ), and b = (pb , Rdb ,Wtb ). Let va = (pa , max pa (V ))
+and vb = (pb , max pb (V )).
+Assume pa ⪯ pb . Then pa = pb holds from the operational semantics. pa = pb derives t = u, which
+contradicts t ̸= u. Therefore, pa ̸⪯ pb holds. Similarly, pb ̸⪯ pa also holds.
+Assume Rda ∩Wtb ̸= ∅. There exists r ∈ Rda ∩Wtb . If r ∈ Wta , then last(r, EW ) = va and last(r, EW ) =
+r
+vb . Therefore pa = pb , however it contradicts pa ̸⪯ pb . If r ̸∈ Wta , then last(r, EW ) 99K va ∈ ER . r ∈ Wtb
+r
+derives last(r, EW ) = vb . Therefore vb 99K va ∈ ER , however it contradicts that no edges go out from vb
+derived from u. Therefore Rda ∩Wtb = ∅. Similarly, Rdb ∩Wta = ∅ also holds.
+a
+
+Well-Foundedness (WF) For a backward transition (C, A) → (C′ , A′ ), the number of nodes of A′ is
+strictly less than that of A. Since the number of vertices of annotation DAG is finite, it is not possible to
+remove vertices infinitely.
+Coinitial Propagation of Independence (CPI) Given a commuting square with independence at one
+corner, CPI allows us to deduce independence between coinitial transitions at the other three corners.
+β
+
+α
+
+Lemma 3 (Coinitial Propagation of Independence). Suppose t : (CP , AP ) −
+→ (CQ , AQ ), u : (CP , AP ) −
+→
+β
+
+α
+
+(CR , AR ), u′ : (CQ , AQ ) −
+→ (CS , AS ), t ′ : (CR , AR ) −
+→ (CS , AS ), and t ι u. Then u′ ι t.
+Proof. t ι u implies α ιlab β . Since β ιlab α, u′ ι t.
+3.3.2
+
+Events
+
+The properties above make LTSICRIL pre-reversible. Next, we check if LTSICRIL can derive events for establishing reversibility. Following [13], events in LTSICRIL are derived as an equivalence over transitions.
+α
+Definition 8. Let ∼ be the smallest equivalence relation on transitions satisfying: if t : (CP , AP ) −
+→
+β
+
+β
+
+α
+
+(CQ , AQ ), u : (CP , AP ) −
+→ (CR , AR ), u′ : (CQ , AQ ) −
+→ (CS , AS ), t ′ : (CR , AR ) −
+→ (CS , AS ), and t ι u, then t ∼ t ′ .
+a
+The equivalence classes of forward transitions [(CP , AP ) → (CQ , AQ )], are the events. The equivalence
+a
+classes of backward transitions [(CP , AP ) → (CQ , AQ )], are the reverse events.
+α
+
+α
+
+Given γ = α1 · · · αn ∈ (Lab ⊎ Lab)∗ , a sequence of transitions (C0 , A0 ) →1 · · · →n (Cn , An ) is written as
+γ
+s : (C0 , A0 ) →∗ (Cn , An ).
+α
+Since the transitions of program configurations in LTSICRIL →prog have no control for reversibility,
+events are substantially derived from the operations of annotation DAGs.
+Definition 9. Let ∼ann be the smallest equivalence relation over operations of annotation DAGs satisfyα
+
+β
+
+β
+
+α
+
+ing: if o1 : AP −
+→ann AQ , o2 : AP −
+→ann AR , o′2 : AQ −
+→ann AS , o′1 : AR −
+→ann AS , and α ιlab β , then o1 ∼ o′1 .
+a
+a
+[A →ann A′ ]ann and [A →ann A′ ]ann are the forward and backward equivalence classes by ∼ann .
+α
+
+α
+
+Proposition 9. For t : (CP , AP ) −
+→ (CQ , AQ ) and t ′ : (CR , AR ) −
+→ (CS , AS ), the following holds.
+γ
+α
+α
+′
+′
+t ∼ t iff o ∼ann o and ∃γ.(CP , AP ) →∗ (CR , AR ) where o : AP →ann AQ and o′ : AR →ann AS .
+Intuitively, operations for annotation DAGs are independent if they add or remove nodes and edges
+at unrelated places. If o1 ∼ann o2 , then o1 and o2 add or remove the same fragment of annotation DAGs
+to or from the nodes of the same causality. In LTSICRIL , the equivalence over operations of annotation
+DAGs is considered as an event. This shows that events for reversibility are consistently defined over
+LTSICRIL , meaning the operational semantics is detailed enough to give the IRE property as follows,
+which is necessary for our objectives.
+
+S. Oguchi & S. Yuen
+
+163
+
+Independence Respects Events (IRE)
+Lemma 4 (Independence Respects Events). Suppose t ∼ t ′ ι u. Then t ι u.
+Proof. If t ∼ t ′ , t has the same label as t ′ . Then, t ι u.
+3.3.3
+
+Causal Safety and Causal Liveness
+a
+
+a
+
+Let ♯(s, [A → A′ ]ann ) be the number of occurrences of transitions t in s such that t ∈ [(C, A) → (C′ , A′ )],
+a
+minus the number of occurrences of transitions t in s such that t ∈ [(C, A) → (C′ , A′ )].
+Using the result of [13], the properties of SP(Lemma 1), BTI(Lemma 2), WF, CPI(Lemma 3), and
+IRE (Lemma 4) make Causal Safety (CS) and Causal Liveness (CL) hold. Due to the fact that the
+causality is stored in the annotation DAGs, the properties can be stated in LTSICRIL as below.
+a
+
+a
+
+γ
+
+Theorem 1 (Causal Safety). Whenever (CP , AP ) −
+→ (CQ , AQ ), s : (CQ , AQ ) −
+→∗ (CR , AR ) with ♯(s, [AP →
+a
+a
+a
+AQ ]ann ) = 0, and (CS , AS ) −
+→ (CR , AR ) then (CP , AP ) → (CQ , AQ ) ι t for all t in s such that ♯(s, [AP →
+AQ ]ann ) > 0.
+a
+
+a
+
+γ
+
+Theorem 2 (Causal Liveness). Whenever (CP , AP ) −
+→ (CQ , AQ ), s : (CQ , AQ ) −
+→∗ (CR , AR ), ♯(s, [AP →
+a
+
+b
+
+a
+
+AQ ]) = 0, and (CP , AP ) → (CQ , AQ ) ι t : (C, A) → (C′ , A′ ) for all t in s such that ♯(s, [A → A′ ]) > 0
+a
+a
+a
+a
+with (CP , AP ) → (CQ , AQ ) ∼ (CS , AS ) → (CR , AR ), then we have (CS , AS ) −
+→ (CR , AR ) with (CP , AP ) →
+a
+(CQ , AQ ) ∼ (CS , AS ) → (CR , AR ).
+Based on these properties, LTSICRIL can be implemented correctly with the pointers for processes
+managed by a process map along with annotation DAGs as the operational semantics of CRIL.
+
+4
+
+Example: Airline ticketing
+
+We show a version of the airline ticketing program [5] in CRIL in figure 6. Two agents attempt to sell
+three seats of an airline. This program has a data race for variable seats of
+the remaining seats because two agents may check the remaining seats simulbasic block seats agent1 agent2
+taneously before making sales. Since the data race does not always happen, (ε, 0) b1 3
+0
+0
+0
+0
+it is useful to roll back to the point where checking remaining seats is insuf- (ε, 1) b2 3
+(1, 0) b4
+3
+0
+0
+ficient. Here, agent1 and agent2 are used to record the number of tickets (2, 0) b
+3
+0
+0
+9
+sold by each agent.
+(1, 1) b5
+3
+0
+0
+b1
+
+b2
+
+b3
+
+begin main
+seats += 3
+-> l1
+l1 <call sub1 , sub2
+-> l2
+l2 <skip
+end main
+
+b4
+
+b5
+
+b6
+
+b7
+
+b8
+
+begin sub1
+skip
+-> l3
+l3 ; l4 <- agent1 ==0
+skip
+seats >0 -> l5 ; l7
+l5 <seats -= 1
+-> l6
+l6 <agent1 += 1
+-> l4
+l7 < skip
+end sub1
+
+b9
+
+b10
+
+b11
+
+b12
+
+b13
+
+begin sub2
+skip
+-> l8
+l8 ; l9 <- agent2 ==0
+skip
+seats >0 -> l10 ; l12
+l10 <seats -= 1
+-> l11
+l11 <agent2 += 1
+-> l9
+l12 < skip
+end sub2
+
+Figure 6: An airline ticketing program in CRIL
+
+(1, 2)
+(1, 3)
+(2, 1)
+(2, 2)
+(2, 3)
+(2, 4)
+(1, 4)
+(2, 5)
+(1, 5)
+(2, 6)
+(2, 7)
+(2, 8)
+(1, 6)
+(1, 7)
+(1, 8)
+(ε, 2)
+(ε, 3)
+
+b6
+b7
+b10
+b11
+b12
+b10
+b5
+b11
+b6
+b12
+b10
+b13
+b7
+b5
+b8
+b2
+b3
+
+2
+2
+2
+1
+1
+1
+1
+0
+-1
+-1
+-1
+-1
+-1
+-1
+-1
+-1
+-1
+
+0
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1
+2
+2
+2
+2
+2
+
+0
+0
+0
+0
+1
+1
+1
+1
+1
+2
+2
+2
+2
+2
+2
+2
+2
+
+Table 3: A faulty execution
+
+164
+
+CRIL: A Concurrent Reversible Intermediate Language
+
+Table 3 shows a forward execution that ends seats = −1. Figure 7 is the annotation DAG when
+terminated at ‘end main’ in b3 . To investigate the cause of the data race, we focus on the edges labeled
+with seats. The solid edges indicate that seats is written in (ε, 0), (1, 2), (2, 2), (2, 5), and (1, 5).
+In particular, seats defined at (2, 2) is used to update by proagent2
+agent1
+cesses 2 and 3 to cause the data race. (The steps in bold are
+⊥
+agent1
+agent2
+involved in the problem.) To resolve the data race, each value
+seats
+seats
+of seats should be checked exactly once, except for the last
+(ε, 0)
+(1, 1)
+(2, 1)
+seats
+value of seats.
+seats
+(1, 2)
+Figure 8 shows the airline program where sub1 and sub2
+(2, 3)
+(1, 3)
+agent2 seats
+agent1
+are replaced by those with the V-P operations. The parameter of
+seats
+seats
+(2, 4)
+(2, 2)
+(1, 4)
+the V-P operations works as a semaphore to check and update
+agent2
+agent1
+seats
+seats as a critical region. Figure 9 is the annotation DAG by
+(2, 5)
+the forward execution with sub1 done first once and then sub2
+(2, 6)
+(1, 6)
+seats
+done twice. Process 1 executes b′5 setting semaphore = 1 at
+agent2
+agent1
+(1, 5)
+(2, 7)
+(1, 7)
+seats
+seats
+(1, 1) first. (sem is for semaphore in the figure.) This pre′
+vents process 2 executing b10 at (2, 1) since semaphore must
+(ε, 1) (ε, 2) (ε, 3) (1, 0) (2, 0) (1, 8) (2, 8)
+be 0. Backwards, b′14 and b′15 work as V semaphore. In the
+backward execution, the order of basic blocks is stored in the Figure 7: The annotation DAG after the
+forward execution with the data race
+annotation DAG. It works as follows:
+sem
+
+sem
+
+• The sequence of → is alternatively from V and P operations in the forward execution. ⊥ −−→ (1, 1)
+sem
+sem
+sem
+is by b′5 and (1, 1) −−→ (1, 3) by b′14 , · · · , (1, 3) −−→ (2, 1) by b′10 , (2, 1) −−→ (2, 3) by b′15 ,· · · .
+• When seats = 0, semaphore is released with no operation.
+sem
+sem
+sem
+sem
+(2, 7) −−→ (1, 5) −−→ (1, 6) by b′5 and b′8 and (1, 6) −−→ (2, 9) −−→ (2, 10) by b′10 and b′13 .
+• In backward, sub2 is ready since (2, 10) is
+last(EW , sem).
+• Then, sub1 is done with no operation and (2, 7) is P
+in sub2. The order of V and P is kept until reaching
+⊥.
+b′4
+b′5
+b′6
+b′14
+b′7
+b′8
+
+begin sub1
+skip
+-> l3
+l3 ; l4 <- agent1 ==0
+V semaphore
+seats >0 -> l5 ; l7
+l5 <seats -= 1
+-> l13
+l13 <P semaphore
+-> l6
+l6 <agent1 += 1
+-> l4
+l7 < P semaphore
+end sub1
+
+b′9
+b′10
+b′11
+b′15
+b′12
+b′13
+
+begin sub2
+skip
+-> l8
+l8 ; l9 <- agent2 ==0
+V semaphore
+seats >0 -> l10 ; l12
+l10 <seats -= 1
+-> l14
+l14 <P semaphore
+-> l11
+l11 <agent2 += 1
+-> l9
+l12 < P semaphore
+end sub2
+
+Figure 8: An airline ticketing with semaphore
+
+agent2
+
+⊥
+agent1 sem
+
+seats
+
+agent2
+
+seats
+(1, 1)
+(ε, 0)
+sem
+(1, 3)
+seats
+sem
+seats
+(2, 1)
+(1, 2)
+agent1
+sem
+(2, 3)
+seats
+sem
+agent2
+seats
+(2, 4)
+(2, 5)
+(2, 2)
+sem
+(2, 7)
+seats
+sem
+agent1
+seats
+(1, 4)
+(1, 5)
+(2, 6)
+sem
+agent2
+(1, 6)
+seats
+sem
+agent2
+(2, 8)
+(2, 9)
+(ε, 1) (1, 0)
+sem
+(2, 0) (ε, 2)
+(2, 10)
+(ε, 3)
+
+Figure 9: The annotation DAG after the
+forward execution with semaphore
+
+S. Oguchi & S. Yuen
+
+5
+
+165
+
+Concluding remarks
+
+We have proposed CRIL as a reversible concurrent intermediate language. CRIL is an extension of RIL
+[16] to enable running multiple subroutines as processes running in parallel. CRIL is intended to be fairly
+low-level in that each instruction is at a level similar to the three-address codes to mediate the translation
+from a high-level program to a machine-oriented code. The operational semantics of CRIL defined as
+LTSICRIL is shown to have the properties of Causal Safety and Causal Liveness under the independence
+of concurrent processes and shared memory update. By the result of [13], LTSICRIL also satisfies other
+properties: Parabolic lemma, Causal Consistency, Unique Transition, and Independence of Diamonds.
+As related work, [1] provides a compiler from ROOPL++ to PISA [22] with no intermediate language, where the translation from an object-oriented source program to the low-level PISA code is a big
+task. [6] proposes an annotation to a concurrent imperative program while executing forward, where
+the annotation is attached directly to the source program for reversing the execution. [7] investigates
+its properties of reversibility. CRIL uses a similar idea as Hoey’s, but CRIL is at a rather lower level
+to provide a finer granularity for detailed analysis in translation, such as optimization. [8] presents a
+collection of simple stack machines with a fork and merge mechanism, where the causality is embedded
+in the runtime.
+For future work, we have focused only on the fundamental properties. We will investigate further
+how more properties in reversibility contribute to behavioral analysis for concurrent programs. Currently,
+the dependency of the heap memory M is treated as one memory resource. More detailed dependency
+is necessary for practical use. Deriving the optimization technique in the front-end part of compilers is
+future work via the reversible version of SSA, such as RSSA [17] for concurrent imperative programs.
+CRIL is based on the shared memory model. Incorporating channel-based communications is also future
+work to use for the message-passing model like Erlang [12].
+Acknowledgement We thank Dr. Irek Ulidowski of the University of Leicester for giving valuable
+suggestions to the draft. We also thank Prof. Nobuko Yoshida of the University of Oxford, Prof. Hiroyuki
+Seki, Prof. Koji Nakazawa, and Prof. Yuichi Kaji of Nagoya University for fruitful discussions. We thank
+the anonymous reviewers for providing fruitful comments. This work is supported by JSPS Kakenhi
+21H03415.
+
+References
+[1] Martin Holm Cservenka, Robert Glück, Tue Haulund & Torben Ægidius Mogensen (2018): Data Structures
+and Dynamic Memory Management in Reversible Languages. In: Reversible Computation - 10th International Conference, RC 2018, Leicester, UK, September 12-14, 2018, Proceedings, Lecture Notes in Computer
+Science 11106, Springer, pp. 269–285, doi:10.1007/978-3-319-99498-7 19.
+[2] Vincent Danos & Jean Krivine (2004): Reversible Communicating Systems. In: CONCUR 2004 - Concurrency Theory, 15th International Conference, London, UK, August 31 - September 3, 2004, Proceedings,
+Lecture Notes in Computer Science 3170, Springer, pp. 292–307, doi:10.1007/978-3-540-28644-8 19.
+[3] Niklas Deworetzki, Martin Kutrib, Uwe Meyer & Pia-Doreen Ritzke (2022): Optimizing Reversible Programs. In: RC 2022, Lecture Notes in Computer Science 13354, Springer, pp. 224–238, doi:10.1007/978-3031-09005-9 16.
+[4] Lasse Hay-Schmidt, Robert Glück, Martin Holm Cservenka & Tue Haulund (2021): Towards a Unified
+Language Architecture for Reversible Object-Oriented Programming. In: Reversible Computation - 13th
+
+166
+
+CRIL: A Concurrent Reversible Intermediate Language
+International Conference, RC 2021, Virtual Event, July 7-8, 2021, Proceedings, Lecture Notes in Computer
+Science 12805, Springer, pp. 96–106, doi:10.1007/978-3-030-79837-6 6.
+
+[5] James Hoey, Ivan Lanese, Naoki Nishida, Irek Ulidowski & Germán Vidal (2020): A Case Study for Reversible Computing: Reversible Debugging of Concurrent Programs. In: Reversible Computation: Extending
+Horizons of Computing - Selected Results of the COST Action IC1405, Lecture Notes in Computer Science
+12070, Springer, pp. 108–127, doi:10.1007/978-3-030-47361-7 5.
+[6] James Hoey & Irek Ulidowski (2022): Reversing an imperative concurrent programming language. Sci.
+Comput. Program. 223, p. 102873, doi:10.1016/j.scico.2022.102873.
+[7] James Hoey & Irek Ulidowski (2022): Towards Causal-Consistent Reversibility of Imperative Concurrent
+Programs. In: Reversible Computation - 14th International Conference, RC 2022, Urbino, Italy, July 5-6,
+2022, Proceedings, Lecture Notes in Computer Science 13354, Springer, pp. 213–223, doi:10.1007/978-3031-09005-9 15.
+[8] Takashi Ikeda & Shoji Yuen (2020): A Reversible Runtime Environment for Parallel Programs. In: RC 2020,
+Lecture Notes in Computer Science 12227, Springer, pp. 272–279, doi:10.1007/978-3-030-52482-1 18.
+[9] Martin Kutrib, Uwe Meyer, Niklas Deworetzki & Marc Schuster (2021): Compiling Janus to RSSA. In: Reversible Computation - 13th International Conference, RC 2021, Virtual Event, July 7-8, 2021, Proceedings,
+Lecture Notes in Computer Science 12805, Springer, pp. 64–78, doi:10.1007/978-3-030-79837-6 4.
+[10] Ivan Lanese, Doriana Medic & Claudio Antares Mezzina (2021): Static versus dynamic reversibility in CCS.
+Acta Informatica 58(1-2), pp. 1–34, doi:10.1007/s00236-019-00346-6.
+[11] Ivan Lanese, Claudio Antares Mezzina & Jean-Bernard Stefani (2010): Reversing Higher-Order Pi. In:
+CONCUR 2010, Lecture Notes in Computer Science 6269, Springer, pp. 478–493, doi:10.1007/978-3-64215375-4 33.
+[12] Ivan Lanese, Naoki Nishida, Adrián Palacios & Germán Vidal (2018): A theory of reversibility for Erlang. J.
+Log. Algebraic Methods Program. 100, pp. 71–97, doi:10.1016/j.jlamp.2018.06.004.
+[13] Ivan Lanese, Iain C. C. Phillips & Irek Ulidowski (2020): An Axiomatic Approach to Reversible Computation.
+In: Proceedings of FOSSACS 2020, Lecture Notes in Computer Science 12077, Springer, pp. 442–461,
+doi:10.1007/978-3-030-45231-5 23. (The full version is at https://arxiv.org/abs/2307.13360.).
+[14] Chris Lattner & Vikram S. Adve (2004): LLVM: A Compilation Framework for Lifelong Program Analysis & Transformation. In: 2nd IEEE / ACM International Symposium on Code Generation and Optimization (CGO 2004), 20-24 March 2004, San Jose, CA, USA, IEEE Computer Society, pp. 75–88,
+doi:10.1109/CGO.2004.1281665.
+[15] Hernán C. Melgratti, Claudio Antares Mezzina & G. Michele Pinna (2021): A distributed operational view of
+Reversible Prime Event Structures. In: 36th Annual ACM/IEEE Symposium on Logic in Computer Science,
+LICS 2021, Rome, Italy, June 29 - July 2, 2021, IEEE, pp. 1–13, doi:10.1109/LICS52264.2021.9470623.
+[16] Torben Ægidius Mogensen (2015): Garbage Collection for Reversible Functional Languages. In: Reversible
+Computation - 7th International Conference, RC 2015, Grenoble, France, July 16-17, 2015, Proceedings,
+Lecture Notes in Computer Science 9138, Springer, pp. 79–94, doi:10.1007/978-3-319-20860-2 5.
+[17] Torben Ægidius Mogensen (2015): RSSA: A Reversible SSA Form. In: Perspectives of System Informatics
+- 10th International Andrei Ershov Informatics Conference, PSI 2015, Lecture Notes in Computer Science
+9609, Springer, pp. 203–217, doi:10.1007/978-3-319-41579-6 16.
+[18] Iain Phillips & Irek Ulidowski (2014): Event Identifier Logic.
+doi:10.1017/S0960129513000510.
+
+Math. Struct. Comput. Sci. 24(2),
+
+[19] Iain Phillips & Irek Ulidowski (2015): Reversibility and asymmetric conflict in event structures. J. Log.
+Algebraic Methods Program. 84(6), pp. 781–805, doi:10.1016/j.jlamp.2015.07.004.
+[20] Iain C. C. Phillips & Irek Ulidowski (2007): Reversing algebraic process calculi. J. Log. Algebraic Methods
+Program. 73(1-2), pp. 70–96, doi:10.1016/j.jlap.2006.11.002.
+
+S. Oguchi & S. Yuen
+
+167
+
+[21] Irek Ulidowski, Iain Phillips & Shoji Yuen (2018): Reversing Event Structures. New Gener. Comput. 36(3),
+pp. 281–306, doi:10.1007/s00354-018-0040-8.
+[22] Carlin Vieri (1999): Reversible computer engineering and architecture. Ph.D. thesis, Massachusetts Institute
+of Technology, Cambridge, MA, USA. Available at https://hdl.handle.net/1721.1/80144.
+[23] Tetsuo Yokoyama (2010): Reversible Computation and Reversible Programming Languages. Electron. Notes
+Theor. Comput. Sci. 253(6), pp. 71–81, doi:10.1016/j.entcs.2010.02.007.
+[24] Tetsuo Yokoyama, Holger Bock Axelsen & Robert Glück (2011): Towards a Reversible Functional Language. In: RC 2011, Lecture Notes in Computer Science 7165, Springer, pp. 14–29, doi:10.1007/978-3-64229517-1 2.
+
+

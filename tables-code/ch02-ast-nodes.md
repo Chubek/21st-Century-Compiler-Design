@@ -1,0 +1,41 @@
+# Abstract syntax tree nodes of Mini with the data each node carries and its evaluation rule.
+
+- Source file: `chapters/ch02.tex`
+- Original label: `tab:ch02-ast-nodes`
+- Original caption (verbatim):
+
+> Abstract syntax tree nodes of Mini with the data each node carries and its evaluation rule.
+
+| Node | Fields | Evaluation rule |
+| --- | --- | --- |
+| Num | integer value | yields the value |
+| Var | variable name | looks the name up |
+| Add, Sub, Mul, Div | left, right | evaluates both, combines |
+| Lt, Gt, Eq | left, right | evaluates both, compares |
+| Let | name, value, body | binds the name, evaluates the body |
+| Assign | name, value | updates the name, yields nothing |
+| If | test, then, else | evaluates one branch |
+| While | test, body | repeats the body while true |
+| Seq | first, second | evaluates both in order |
+| Print | expression | evaluates, appends to output |
+
+<!-- Original LaTeX -->
+
+```latex
+\begin{tabular}{lll}
+\toprule
+Node & Fields & Evaluation rule \\
+\midrule
+Num & integer value & yields the value \\
+Var & variable name & looks the name up \\
+Add, Sub, Mul, Div & left, right & evaluates both, combines \\
+Lt, Gt, Eq & left, right & evaluates both, compares \\
+Let & name, value, body & binds the name, evaluates the body \\
+Assign & name, value & updates the name, yields nothing \\
+If & test, then, else & evaluates one branch \\
+While & test, body & repeats the body while true \\
+Seq & first, second & evaluates both in order \\
+Print & expression & evaluates, appends to output \\
+\bottomrule
+\end{tabular}
+```

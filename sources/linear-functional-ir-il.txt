@@ -1,0 +1,1188 @@
+A Linear First-Order Functional
+Intermediate Language for Verified
+Compilers
+Sigurd Schneider, Gert Smolka, Sebastian Hack
+
+arXiv:1503.08665v2 [cs.PL] 4 Jun 2015
+
+Saarland University, Saarbrücken, Germany
+
+Friday 24th August, 2018
+
+We present the linear first-order intermediate language IL for verified compilers. IL is a functional language with calls to a nondeterministic environment. We give IL terms a second, imperative semantic interpretation and
+obtain a register transfer language. For the imperative interpretation we
+establish a notion of live variables. Based on live variables, we formulate
+a decidable property called coherence ensuring that the functional and the
+imperative interpretation of a term coincide.
+We formulate a register assignment algorithm for IL and prove its correctness. The algorithm translates a functional IL program into an equivalent
+imperative IL program. Correctness follows from the fact that the algorithm
+reaches a coherent program after consistently renaming local variables. We
+prove that the maximal number of live variables in the initial program bounds
+the number of different variables in the final coherent program. The entire
+development is formalized in Coq.
+
+1 Introduction
+We study the intermediate language IL for verified compilers. IL is a linear functional
+language with calls to a nondeterministic environment.
+We are interested in translating IL to a register transfer language. To this end, we give
+IL terms a second, imperative interpretation called IL/I. IL/I interprets variable binding as assignment, and function application as goto, where parameter passing becomes
+parallel assignment.
+For some IL terms the functional interpretation coincides with the imperative interpretation. We call such terms invariant. We develop an efficiently decidable property we
+call coherence that is sufficient for invariance. To translate IL to IL/I, translating to the
+
+1
+
+1 Introduction
+coherent subset of IL suffices, i.e. the entire translation can be done in the functional
+setting.
+The notion of a live variable is central to the definition of coherence. Liveness analysis
+is a standard technique in compiler construction to over-approximate the set of variables
+the evaluation of a program depends on. Coherence is defined relative to the result of a
+liveness analysis.
+let i = 1 in
+fun f (j,p) =
+3
+let c = p <= m in
+4
+if c then
+5
+let k = p * j in
+6
+let m = p + 1 in
+7
+f (k,m)
+8
+else
+9
+j
+10 in f (i,n)
+
+i := 1;
+fun f (i,n) =
+3
+c := n <= m;
+4
+if c then
+5
+i := n * i;
+6
+n := n + 1;
+7
+f (i,n)
+8
+else
+9
+i
+10 in f (i,n)
+
+1
+
+1
+
+2
+
+2
+
+Figure 1: Program (a) and (b) computing F (n, m) := n ∗ (n + 1) ∗ . . . ∗ m
+Inspired by the correspondence between SSA [8] and functional programming [10, 2],
+we formulate a register assignment algorithm [9] for IL and show that it realizes the
+translation to IL/I. For example, the algorithm translates program (a) to program (b).
+Correctness follows from two facts: First, register assignment consistently renames program (a) such that the variable names correspond to program (b). Second, program (b)
+is coherent, hence let binding and imperative assignment behave equivalently. Parameter
+passing in IL/I can be eliminated by inserting parallel assignments [9]. In program (b),
+all parameters i, n can simply be removed, as they constitute self-assignments.
+A key property of SSA-based register assignment is that the number of imperative
+registers required after register assignment is bounded by the maximal number of simultaneously live variables [9], which allows register assignment to be considered separate
+from spilling. We show that our algorithm provides the same bound on the number of
+different variable names in the resulting IL/I term.
+
+1.1 Related Work
+Correspondences between imperative and functional languages were investigated already
+by Landin [11]. The correspondence between SSA and functional programming is due to
+Appel [2] and Kelsey [10] and consists of a translation from SSA programs to functional
+programs in continuation passing style (CPS) [15, 1]. Chakravarty et al. [6] reformulate SSA-based sparse conditional constant propagation on a functional language in
+administrative normal form (ANF) [16]. Our intermediate language IL is in ANF, and a
+sub-language (up to system calls) of the ANF language presented in Chakravarty et al.
+[6].
+Two major compiler verification projects using SSA exist. CompCertSSA [3] integrates
+SSA-based optimization passes into CompCert [13]. VeLLVM [18, 17] is an ongoing effort
+
+2
+
+2 IL
+to verify the production compiler LLVM [12]. Both projects use imperative languages
+with φ-functions to enable SSA, and do not consider a functional intermediate language.
+As of yet, neither of the projects verifies register assignment in the SSA setting. In the
+non-SSA setting, a register allocation algorithm, which also deals with spilling, has been
+formally verified [5].
+Beringer et al. [4] use a language with a functional and imperative interpretation for
+proof carrying code. They give a sufficient condition for the two semantics to coincide which they call Grail normal form (GNF). GNF requires functions to be closure
+converted, i.e. all variables a function body depends on must be parameters.
+Chlipala [7] proves correctness for a compiler from Mini-ML to assembly including
+mutable references, but without system calls. Register assignment uses an interference
+graph constructed from liveness information. Chlipala restricts functions to take exactly
+one argument and requires the program to be closure converted prior to register assignment. This means liveness coincides with free variables and values shared or passed
+between functions reside in an (argument) tuple in the heap: Effectively, register assignment is function local. Chlipala does not prove bounds on the number of different
+variables used after register assignment and does not investigate the relationship to
+α-equivalence.
+
+1.2 Contributions and Outline
+• We formally define the functional intermediate language IL and its imperative
+interpretation, IL/I. We establish the notion of live variables via an inductive
+definition. We identify terms for which both semantic interpretations coincide via
+the decidable notion of coherence.
+• Inspired by SSA-based register allocation, we formulate a register assignment algorithm for IL and prove that it realizes an equivalence preserving transformation
+to IL/I. We show the size of the maximal live set bounds the number of names
+after register assignment.
+• All results in this paper have formal Coq proofs, and the development is available
+online (see Section 9). We omit proofs in the paper for space reasons. This version
+contains an appendix.
+The paper is structured as follows: We introduce the languages in Section 2 and Section 3.
+Program equivalence is defined in Section 4. We define invariance in Section 5, establish a notion of live variables in Section 6, and present coherence in Section 7. Register
+assignment is treated in Section 8.
+
+2 IL
+Values, Variables, and Expressions We assume a set V of values and a function β :
+V → {0, 1} that we use to simplify the semantic rule for the conditional. By convention,
+
+3
+
+2 IL
+
+η ::= e | α
+
+extended expression
+
+Term ∋ s, t ::= let x = η in s
+
+variable binding
+
+| if e then s else t
+
+conditional
+
+|e
+
+value
+
+| fun f x = s in t
+
+function definition
+
+|fe
+
+application
+Figure 2: Syntax of IL
+
+v ranges over V. We use the countably-infinite alphabet V for names x, y, z of values,
+which we call variables.
+We assume a type Exp of expressions. By convention, e ranges over Exp. Expressions
+are pure, their evaluation is deterministic and may fail, hence expression evaluation is
+a function J·K : Exp → (V → V⊥ ) ⇀ V⊥ . Environments are of type V → V⊥ to
+track uninitialized variables. We assume a function fv : Exp → set V such that for all
+environments V, V ′ that agree on fv(e) we have JeK V = JeK V ′ . We lift J·K pointwise to
+lists of expressions in a strict fashion: JeK yields a list of values if none of the expressions
+in e failed, and ⊥ otherwise.
+Syntax IL is a functional language with a tail-call restriction and system calls. IL
+syntactically enforces a first-order discipline by using a separate alphabet F for names
+f, g of function type, which we call labels. IL uses a third alphabet A for names α which
+we call actions. The term let x = α in . . . is like a system call α that non-deterministically
+returns a value. The formal development treats system calls with arguments. Their
+treatment is straightforward and omitted here for the sake of simplicity.
+IL allows function definitions, but does not allow mutually recursive definitions. The
+syntax of IL is given in Figure 2.
+Semantics The semantics of IL is given as small-step relation −→ in Figure 3. Note
+that the tail-call restriction ensures that no call stack is required. The reduction relation
+−→ operates on configurations of the form (F, V, s) where s is the IL term to be
+evaluated. The semantics does not rely on substitution, but uses an environment V :
+V → V⊥ for variable definitions and a context F for function definitions. Transitions
+in −→ are labeled with events φ. By convention, ψ ranges over events different from τ .
+E ∋ φ ::= τ | v = α
+A context is a list of named definitions. A definition in a context may refer to previous
+definitions and itself. Notationally, we use contexts like functions: If a context F can be
+decomposed as F1 ; f : a; F2 where f 6∈ dom F2 , we write F f for a and F f for F1 ; f : a.
+
+4
+
+3 Imperative Interpretation of IL: IL/I
+Op
+
+Cond
+
+JeK V = v
+F
+τ
+−→ F
+
+|V
+| let x = e in s
+| V [x 7→ v] | s
+
+JeK V = v
+
+β(v) = i
+
+|V
+|V
+
+| if e then s0 else s1
+| si
+
+F
+τ
+−→ F
+
+Extern
+
+v∈V
+v=α
+F | V | let x = α in s −→ F | V [x 7→ v] | s
+App
+Let
+
+F
+|V
+−→ F ; f : (V, x, s) | V
+τ
+
+| fun f x = s in t
+|t
+
+JeK V = v
+
+F f = (V ′ , x, s)
+
+F
+−→ F f
+
+|V
+|f e
+′
+| V [x 7→ v] | s
+
+τ
+
+Figure 3: Semantics of IL
+Otherwise, F f = ⊥. To ease presentation of partial functions, we treat f : ⊥ as if f was
+not defined, i.e. f 6∈ dom (f : ⊥). We write ∅ for the empty context.
+A closure is a tuple (V, x, s) ∈ C consisting of an environment V , a parameter list
+x, and a function body s. Since a function f in a context F ; f : . . . ; F ′ can refer to
+function definitions in F (and to itself), the first-order restriction allows the closures to
+be non-recursive: function closures do not need to close under labels. An application f e
+causes the function context F to rewind to F f , i.e. up to the definition of f (rule App).
+In contrast to higher-order formulations, we do not define closures mutually recursively
+with the values of the language.
+A system call let x = α in s invokes a function α of the system, which is not assumed
+to be deterministic. This reflects in the rule Extern, which does not restrict the result
+value of the system call other than requiring that it is a value. The semantic transition
+records the system call name α and the result value v in the event v = α.
+IL is linear in the sense that the execution of each term either passes control to a
+strict subterm, or applies a function that never returns. This ensures no run-time stack
+is required to manage continuations. While, by contrast, uses sequentialization ; to
+manage a stack of continuations.
+
+3 Imperative Interpretation of IL: IL/I
+We are interested in a translation of IL to an imperative language that does not require
+function closures at run-time. We introduce a second semantic interpretation for IL
+which we call IL/I to investigate this translation. IL/I is an imperative language, where
+variable binding is interpreted as imperative assignment. Function application becomes a
+goto, and parameter passing is a parallel assignment to the parameter names. Closures
+are replaced by blocks (x, s) ∈ B and blocks do not contain variable environments.
+
+5
+
+4 Program Equivalence
+Consequently, a called function can see all previous updates to variables. For example,
+the following two programs each return 5 in IL/I, but evaluate to 7 in IL:
+let x = 7 in
+fun f () = x in
+3 fun g x = f() in
+4 let y = 5 in g y
+1
+
+let x = 7 in
+2 fun f () = x in
+3 let x = 5 in f ()
+1
+
+2
+
+To obtain the IL/I small-step relation −→I , we replace the rules F-Let and F-App
+by the following rules:
+I-App
+I-Let
+
+L
+|V
+L; f : (x, s) | V
+
+τ
+
+−→I
+
+| fun f x = s in t
+|t
+
+JeK V = v
+
+Lf = (x, s)
+
+L
+Lf
+
+|V
+|f e
+| V [x 7→ v] | s
+
+τ
+
+−→I
+
+4 Program Equivalence
+To relate programs from different languages, we abstract from a configuration’s internal
+behavior and only consider interactions with the environment (via system calls) and
+termination behavior. IL’s reduction relation forms a labeled transition system (LTS)
+over configurations.
+Definition 1 A reduction system (RS) is a tuple (Σ, E, −→, τ, res), s.t.
+(1) (Σ, E, −→) is a LTS
+
+(3) res : Σ → V⊥
+
+(2) τ ∈ E
+
+(4) res σ = v ⇒ σ −→-terminal
+
+An internally deterministic reduction system (IDRS) additionally satisfies
+φ
+
+φ
+
+φ
+
+τ
+
+(5) σ −→ σ1 ∧ σ −→ σ2 ⇒ σ1 = σ2
+
+action-deterministic
+
+(6) σ −→ σ1 ∧ σ −→ σ2 ⇒ φ = τ
+
+τ -deterministic
+
+4.1 Partial Traces
+We consider two configurations in an IDRS equivalent, if they produce the same partial
+traces. A partial trace π adheres to the following grammar:
+Π ∋ π ::= ǫ | v | ⊥ | ψπ
+We inductively define the relation ⊲ ⊆ Σ × Π such that σ ⊲ π whenever σ produces the
+trace π. In the following, we write trace for partial trace.
+Tr-Tau
+τ
+
+σ −→ σ ′
+σ⊲π
+
+Tr-End
+
+Tr-Trm
+
+σ⊲ǫ
+
+σ −→-terminal
+σ ⊲ res σ
+
+σ′ ⊲ π
+
+6
+
+Tr-Evt
+ψ
+
+σ −→ σ ′
+σ′ ⊲ π
+σ ⊲ ψ, π
+
+4 Program Equivalence
+The traces a configuration produces are given as Pσ = {π | σ ⊲ π}.
+Definition 2 (Trace Equivalence) σ ≃ σ ′ : ⇐⇒ Pσ = Pσ ′
+Lemma 1 σ silently diverges if and only if Pσ = {ǫ}.
+
+4.2 Bisimilarity
+We give a sound and complete characterization of trace equivalence via bisimilarity.
+Bisimilarity enables coinduction as proof method for program equivalence, which is more
+concise than arguing about traces directly. We say a configuration σ is ready if the next
+φ
+
+φ
+
+R
+
+step is a system call. We write σ2
+σ1 for ∀σ1′ , σ1 −→ σ1′ ⇒ ∃σ2′ , σ2 −→ σ2′ ∧ σ1′ R σ2′ .
+We write σ ⇓ w (where w ∈ V⊥ ) if σ −→∗ σ ′ such that σ ′ is −→-terminal and res(σ ′ ) =
+w.
+Definition 3 (Bisimilarity) Let (S, E, −→, res, τ ) be an IDRS. Bisimilarity ∼ ⊆ S ×S
+is coinductively defined as the greatest relation closed under the following rules:
+Bisim-Silent
+
+σ1 −→+ σ1′
+
+σ2 −→+ σ2′
+σ1 ∼ σ2
+
+σ1′ ∼ σ2′
+
+Bisim-Term
+
+σ1 ⇓ w
+σ2 ⇓ w
+σ1 ∼ σ2
+
+Bisim-Extern
+
+σ1 −→∗ σ1′
+
+σ2 −→∗ σ2′
+
+σ1′ , σ2′ ready
+σ1 ∼ σ2
+
+σ1′
+
+∼
+
+σ2′
+
+σ2′
+
+∼
+
+σ1′
+
+Bisim-Silent allows to match finitely many steps on both sides, as long as all transitions
+are silent. This makes sense for IDRS, but would not yield a meaningful definition
+otherwise. Bisim-Extern ensures that every external transition of σ1′ is matched by
+the same external transition of σ2′ , and vice versa. This ensures that if two programs
+are in relation, they react to every possible result value of the external call in a bisimilar
+way. The premises that σ1′ , σ2′ are ready is there to simplify case distinctions by ensuring
+that the next event cannot be τ .
+Theorem 1 (Soundness and Completeness) Let (S, E, −→, res, τ ) be an IDRS and
+σ, σ ′ ∈ S. Then: σ ∼ σ ′ ⇐⇒ σ ≃ σ ′
+The semantics of IL and of IL/I each forms an IDRS. We define res such that res(σ) =
+v if σ is of the form (F, V, e) and JeK V = v. Otherwise, res(σ) = ⊥. The definitions for
+IL/I are analogous. To relate configurations IL to IL/I, we form a reduction system on
+the sum ΣF + ΣI of the configurations and lift −→ and res accordingly. It is easy to see
+that the resulting reduction system is internally deterministic. If not clear from context,
+we use an index σF , σI to indicate which language a configuration belongs to.
+
+7
+
+5 Invariance
+
+5 Invariance
+We call a term invariant if it has the same traces in both the functional and the imperative interpretation.
+Definition 4 (Invariance) A closed program s is invariant if
+∀ V, (∅, V, s)F ≃ (∅, V, s)I
+Invariance is undecidable. We develop a syntactic, efficiently decidable criterion sufficient
+for invariance, which we call coherence. Coherence simplifies the translation between IL
+and IL/I.
+Coherence is based on the observation that some IL programs do not really depend
+on information from the closure. Assume F f = (V ′ , x, s) and consider the following IL
+reduction according to rule App:
+(F, V, f e) −→ (F f , V ′ [x 7→ v], s)
+If V agrees with V ′ on all variables X that s depends on, then the configuration could
+have equivalently reduced to (F f , V [x 7→ v], s). This reduction does not require the
+closure V ′ and is similar in spirit to the rule I-App. Coherence is a syntactic criterion
+that ensures V and V ′ agree on a suitable set X at every function application. We
+proceed in two steps:
+1. Section 6 introduces the notion of live variables, which identifies a set that contains
+all variables a program depends on.
+2. Section 7 gives the inductive definition of coherence and shows that coherent programs are invariant.
+
+6 Liveness
+A variable x is significant to a program s and a context L, if there is an environment V
+and a value v such that (L, V, s)I 6≃ (L, V [x 7→ v], s)I . Significance is not decidable, as
+it is a non-trivial semantic property.
+Liveness analysis is a standard technique in compiler construction to over-approximate
+the set of variables significant to the evaluation of an imperative program. While usual
+characterizations of live variables rely on data-flow equations [14], we define liveness
+inductively on the structure of IL’s syntax. To the best of our knowledge, such an
+inductive definition is not in literature. The inductive definition factorizes the correctness
+aspect from the algorithmic aspect of liveness analysis.
+We embed liveness information in the syntax of IL by introducing annotations for
+function definitions: The term fun f x : X = s in t is annotated with a set of variables
+X.
+
+8
+
+6 Liveness
+
+6.1 Inductive Definition of the Liveness Judgment
+We define inductively the judgment live, which characterizes sound results of a liveness
+analysis.
+Λ ⊢ live s : X
+
+where
+
+Λ
+X
+s
+
+: context (set V)
+: set V
+: Exp
+
+liveness for functions
+live variables
+expression
+
+The predicate Λ ⊢ live s : X can be read as X contains all variables significant to s in
+any context satisfying the assumptions Λ. The context Λ records for every function f a
+set of variables X that we call the globals of f . Assuming x are the parameters of f ,
+we will arrange things such that the set X ∪ x contains all variables significant for the
+body of f , but never a parameter of f : X ∩ x = ∅. Throughout the paper, Λ is always
+a (partial) mapping from labels to globals, and X denotes a set of variables.
+Live-Op
+
+fv(η) ⊆ X
+x ∈ X′
+′
+X \ {x} ⊆ X
+Λ ⊢ live s : X ′
+Λ ⊢ live let x = η in s : X
+
+Live-Exp
+
+Live-App
+
+fv(e) ⊆ X
+Λ ⊢ live e : X
+
+X1 ⊆ X
+fv(e) ⊆ X
+′
+Λ; f : X1 ; Λ ⊢ live f e : X
+
+Live-Cond
+
+Live-Fun
+
+fv(e) ⊆ X
+Λ ⊢ live s1 : X1
+Λ ⊢ live s2 : X2
+X1 ∪ X2 ⊆ X
+Λ ⊢ live if e then s1 else s2 : X
+
+Λ; f : X1 ⊢ live s1 : X1 ∪ x
+X1 ∩ x = ∅
+Λ; f : X1 ⊢ live s2 : X2
+X2 ⊆ X
+Λ ⊢ live fun f x : X1 = s1 in s2 : X
+
+Figure 4: Liveness: An approximation of the significant variables for IL/I
+
+6.1.1 Description of the Rules.
+Live-Op ensures that all variables free in η are live. Every live variable of the continuation s except x must be live at the assignment. We require x to be live in the
+continuation. Live-Cond ensures that the live variables of a conditional at least contain the free variables of the condition, and the variables live in the consequence and
+alternative. Live-Exp ensures that for programs consisting of a single expression e at
+least the free variables of e are live. Live-App ensures that the free variables of every
+argument are live, and that the globals X1 of f are live at the call site. Live-Fun
+records the annotation X1 as globals for f in Λ, ensures that X1 ∪ x is a large enough
+live set for the function body, and that X1 does not contain parameters of f . The live
+variables X2 of the continuation t must be live at the function definition.
+Theorem 2 (Liveness is Decidable) For all Λ, X and annotated s, it is efficiently
+decidable whether Λ ⊢ live s : X holds.
+
+9
+
+7 Coherence
+The proof of Theorem 2 is constructive and yields an efficient, extractable decision procedure. The decision procedure recursively descends on the program structure, checking
+the conditions of the appropriate rule in every step.
+
+6.2 Liveness Approximates Significance
+We show that the live variables approximate the significant variables. We write L |= Λ
+if a context L satisfies the assumptions Λ, and define:
+LiveCtx1
+
+L |= Λ
+
+X ∩x=∅
+Λ; f : X ⊢ live s : X ∪ x
+L; f : (x, s) |= Λ; f : X
+
+LiveCtx2
+
+∅ |= ∅
+
+LiveCtx1 ensures that X does not contain parameters and that X ∪ x is a large enough
+live set for the function body s under the context Λ; f : X.
+We can now formally state the soundness of the live predicate. We prove that if
+Λ ⊢ live s : X, then X contains at least the significant variables of s in every context L
+that satisfies the assumptions Λ. We write V =X V ′ if V and V ′ agree on X, that is if
+∀x ∈ X, V x = V ′ x.
+Theorem 3 For every program s, if Λ ⊢ live s : X and L |= Λ and V =X V ′ , then
+(L, V, s)I ≃ (L, V ′ , s)I .
+
+7 Coherence
+Coherence is a syntactic condition that ensures that a program is invariant. Coherence
+is defined relative to liveness information Λ ⊢ live s : X.
+In the following programs, the set of globals of f is {x}. The program on the left is
+not invariant, while the program on the right is coherent.
+let x = 7 in
+fun f () : {x} = x in
+3 let x = 5 in f ()
+
+let x = 7 in
+fun f () : {x} = x in
+3 let y = 5 in f ()
+
+1
+
+1
+
+2
+
+2
+
+In the program on the left in line 3, the value of x is 5 and disagrees with the value of
+x in the closure of f . In the program on the right, x was not redefined, hence both IL
+and IL/I will compute 7. We say a function f is available as long as none of f ’s globals
+were redefined. The inductive definition of coherence ensures only available functions
+are applied.
+
+7.1 Inductive Predicate
+The coherence judgment is of the form Λ ⊢ coh s , where s is an annotated program
+and Λ is similar to the context in the liveness judgment. We exploit that contexts realize
+a partial mapping, and maintain the invariant that Λ maps only available functions to
+
+10
+
+7 Coherence
+their globals, and all other functions to ⊥. The inductive definition given below ensures
+that only available functions are applied.
+Coh-Op
+⌊Λ⌋V\{x} ⊢ coh s
+Λ ⊢ coh let x = η in s
+Coh-Cond
+Λ ⊢ coh s
+Λ ⊢ coh t
+Λ ⊢ coh if x then s else t
+
+Coh-Exp
+Λ ⊢ coh e
+
+Coh-App
+Λf 6= ⊥
+Λ ⊢ coh f y
+
+Coh-Fun
+Λ; f : X ⊢ coh t
+⌊Λ; f : X⌋X ⊢ coh s
+Λ ⊢ coh fun f x : X = s in t
+
+7.1.1 Description of the Rules.
+Coh-Op deals with binding a variable x. Every function that has x as a global (i.e.
+x ∈ Λf ) becomes unavailable, and must be removed from Λ. We write ⌊Λ⌋X to remove
+all definitions from Λ that require more globals than X. Trivally, ⌊Λ⌋V = Λ. To remove
+all definitions from Λ that use x as global, we use ⌊Λ⌋V\{x} .
+Formally, the definition of ⌊Λ⌋X exploits the list structure of contexts:
+⌊∅⌋X = ∅
+⌊Λ; f : ⊥⌋X = ⌊Λ⌋X ; f : ⊥
+
+⌊Λ; f : X ′ ⌋X = ⌊Λ⌋X ; f : X ′
+
+X′ ⊆ X
+
+⌊Λ; f : X ′ ⌋X = ⌊Λ⌋X ; f : ⊥
+
+X ′ 6⊆ X
+
+Coh-App ensures only available functions can be applied, since Λ maps functions that
+are not available to ⊥. Coh-Fun deals with function definitions. When the definition of
+a function f is encountered, its globals X according to the annotation are recorded in Λ.
+In the function body s, only functions that require at most X as globals are available,
+so the context is restricted to ⌊Λ; f : X⌋X .
+Theorem 4 (Coherence is Decidable) For all Λ and annotated s, it is efficiently
+decidable whether Λ ⊢ coh s holds.
+
+7.2 Coherent Programs are Invariant
+Given a configuration (F, V, t) such that F f = (V ′ , x, s), the agreement invariant
+describes a correspondence between the values of variables in the function closure V ′
+and the environment V . If the closure of f is available, the closure environment V ′
+agrees with the primary environment V on f ’s globals X: V ′ =X V . We write F, V |= Λ
+if ∀f ∈ dom F ∩ dom Λ, V ′ =X V (where Λf = X and F f = (V ′ , x, s)).
+Function application continues evaluation with the function body from the closure.
+Assume F f = (V ′ , x, s) and consider the IL reduction:
+(F, V, f e) −→ (F f , V ′ [x 7→ v]a, s)
+If coherence is to be preserved, s must be coherent under suitable assumptions. We say
+Λ approximates Λ′ if whenever Λf is defined, it agrees with Λ′ and define Λ  Λ′ : ⇐⇒
+∀f ∈ dom Λ, Λf = Λ′ f . The context coherence predicate Λ ⊢ coh F ensures that all
+function bodies in closures are coherent. It is defined inductively on the context:
+
+11
+
+8 Translating from IL/F to IL/I via Coherence
+CohC-Con
+CohC-Emp
+
+CohC-Bot
+
+∅ ⊢ coh ∅
+
+Λ ⊢ coh F
+Λ; f : ⊥ ⊢ coh F ; f : b
+
+Λ′ ⊢ live s : X ∪ x Λ; f : X  Λ′
+⌊Λ; f : X⌋X ⊢ coh s Λ ⊢ coh F
+Λ, f : X ⊢ coh F ; f : (V, x, s)
+
+CohC-Con encodes two requirements: First, the body of f must be coherent under the
+context restricted to the globals X of f (cf. Coh-Fun). Second, X ∪ x must suffice
+as live variables for the function body s under some assumptions Λ′ such that Λ; f : X
+approximates Λ′ . Approximation ensures stability under restriction: Λ ⊢ coh F ⇒
+⌊Λ⌋X ⊢ coh F .
+We define strip(V, x, s) = (x, s) and lift strip pointwise to contexts.
+Theorem 5 (Coherence implies Invariance) Let Λ ⊢ coh s and Λ ⊢ coh F and
+Λ′ ⊢ live s : X such that Λ  Λ′ . Then for all V =X V ′ such that F, V |= Λ, it holds
+(F, V, s)F ≃ (strip F, V ′ , s)I .
+Theorem 5 reduces the problem of translating between IL/I and IL to the problem
+of establishing coherence. For the translation from IL to IL/I, it suffices to establish
+coherence while preserving IL semantics. Since SSA and functional programming correspond [10, 2], the translation from IL/I to IL can be seen as SSA construction [8], and
+the translation from IL to IL/I, which we treat in the next section, as SSA destruction.
+
+8 Translating from IL/F to IL/I via Coherence
+The simplest method to establish coherence while preserving IL semantics is α-renaming
+the program apart. A renamed-apart program (for formal definition see Subsection 11.3)
+is coherent, since every function is always available. The properties of α-conversion
+ensure semantic equivalence.
+We present an algorithm that establishes coherence and uses no more different names
+than the maximal number of simultaneously live variables in the program. This algorithm corresponds to the assignment phase of SSA-based register allocation [9]. The
+algorithm requires a renamed-apart program as input to ensure that every consistent
+renaming can be expressed as a function from V → V. We proceed in two steps:
+1. We define the notion of local injectivity for a function ρ : V → V. We show that
+renaming with a locally injective ρ yields an α-equivalent and coherent program
+ρ s.
+2. We give an algorithm rassign and show that it constructs a locally injective ρ that
+uses the minimal number of different names.
+We introduce more liveness annotations before every term in the syntax, i.e. wherever a term s appeared before, now a term hXi s appears that annotates s with the set
+X. From now on, s, t range over such annotated terms. We define the projection
+[hXi s] = X. The annotation corresponds directly to the live set parameter X of the
+relation Λ ⊢ live s : X, hence it suffices to write Λ ⊢ live s for annotated programs.
+
+12
+
+8 Translating from IL/F to IL/I via Coherence
+
+8.1 Local Injectivity
+We define inductively a judgment ρ ⊢ inj s where ρ : V → V and s is an annotated
+program. We use the following notation for injectivity on X:
+f ֌ X : ⇐⇒ ∀x y ∈ X, f x = f y =⇒ x = y
+The rules defining the judgement are given below and require ρ to be injective on every
+live set X annotating any subterm:
+Inj-Op
+ρ֌X
+ρ ⊢ inj s
+ρ ⊢ inj hXi let x = η in s
+
+Inj-Val
+ρ֌X
+ρ ⊢ inj hXi e
+
+Inj-App
+ρ֌X
+ρ ⊢ inj hXi f y
+
+Inj-Fun
+ρ֌X
+ρ ⊢ inj s
+ρ ⊢ inj t
+ρ ⊢ inj hXi fun f x : X1 = s in t
+
+Inj-Cond
+ρ֌X
+ρ ⊢ inj s
+ρ ⊢ inj t
+ρ ⊢ inj hXi if x then s else t
+
+Let VB (s) be the set of variables that occur in a binding position in s, and fv(s) be
+the set of free variables of s. For our theorems, several properties are required:
+(1) The program must be without unreachable code, i.e. in every subterm fun f x =
+s in t it must be the case that f is applied in t.
+(2) A variable in VB (s) must not occur in a set of globals in Λ. We define Λ ⊆ U :
+⇐⇒ ∀f ∈ dom Λ, Λ f ⊆ U .
+(3) A variable in VB (s) must not occur in the annotation [s]. We write s ⊆ U if for
+every subterm t of s it holds that every x ∈ [t] is either in U or bound at t in s.
+For renamed-apart programs, these conditions ensure that the live set X in Inj-Fun
+always contains the globals X1 of f (cf. Live-App).
+Theorem 6 Let s be a renamed-apart program without unreachable code such that
+Λ ⊢ live s, Λ ⊆ fv(s) and s ⊆ fv(s). Then
+ρ ⊢ inj s =⇒ ρ (⌊Λ⌋[s] ) ⊢ coh (ρ s)
+Theorem 6 states that the renamed program ρ s is coherent under the assumptions
+ρ (⌊Λ⌋[s] ), i.e. the point-wise image of ⌊Λ⌋[s] under ρ.
+Renaming with a locally injective renaming produces an α-equivalent program (for
+formal definition see Subsection 11.2), and hence preserves program equivalence:
+Theorem 7 Let s be a renamed-apart program without unreachable code such that
+Λ ⊢ live s, Λ ⊆ fv(s) and s ⊆ fv(s). Let ρ, d : V → V such that ρ is the inverse of d on
+fv(s). Then ρ ⊢ inj s =⇒ ρ, d ⊢ ρ s ∼α s
+
+13
+
+9 Formal Coq Development
+
+8.2 A Simple Register Assignment Algorithm
+The algorithm rassign is parametrized by a function fresh : set V → V of which we
+require freshX 6∈ X for all finite sets of variables X. Based on fresh, we define a function
+freshlist X n that yields a list of n pairwise-distinct variables such that (freshlist X n) ∩
+X = ∅. The SSA algorithm must process the program in an order compatible with the
+dominance order to work [9]. In our case it suffices to simply recurse on s as follows:
+rassign ρ (hXi let x = η in s)
+=
+where y = fresh (ρ([s] \ {x}))
+rassign ρ (hXi if e then s else t)
+=
+rassign ρ (hXi e)
+=
+=
+rassign ρ (hXi f e)
+rassign ρ (hXi fun f x : X ′ = s in t) =
+where y = freshlist (ρ([s] \ x)) |x|
+
+rassign (ρ[x 7→ y]) s
+rassign (rassign ρ s) t
+ρ
+ρ
+rassign (rassign (ρ[x 7→ y]) s) t
+
+We prove in Theorem 8 that the algorithm is correct for any choice of fresh and
+freshlist , as long as they satisfy the specifications above.
+Theorem 8 Let s be renamed-apart such that Λ ⊢ live s, Λ ⊆ fv(s) and s ⊆ fv(s). Let
+ρ be injective on [s]. Then: rassign ρ s ⊢ inj s.
+Our implementation of fresh implements the heuristic of simply choosing the smallest
+unused variable. Theorem 9 shows that for this choice of fresh, the largest live set
+determines the number of required names. We use S(k) to denote the set of the k
+smallest variables, and VO (s) to denote the set of variables occurring (free or in a binding
+position) in s.
+Theorem 9 Assume fresh X yields a variable less or equal to |X|. Let s be renamedapart such that Λ ⊢ live s, Λ ⊆ fv(s) and s ⊆ fv(s). Let k be the size of the largest
+set of live variables in s, and rassign ρ s = ρ′ . If ρ(fv(s)) ⊆ S(n) then ρ′ (VO (s)) ⊆
+S(max {n, k}).
+We prove a slightly generalized version of Theorem 9 by induction on s.
+
+9 Formal Coq Development
+Each theorem and lemma in this paper is proven as part of a larger Coq development,
+which is available online1 . The development extracts to a simple compiler that, for
+instance, produces program (b) when given program (a) from the introduction as input.
+The formalization uses De-Bruijn representation for labels, and named representation
+for variables. Notable differences to the paper presentation concern the treatment of
+annotations, the technical realization of the definition of liveness, and the inductive
+generalizations of Theorems 6-9.
+1
+
+http://www.ps.uni-saarland.de/~ sdschn/publications/lvc15
+
+14
+
+10 Conclusion
+
+10 Conclusion
+We presented the functional intermediate language IL and developed the notion of coherence, which provides for a canonical and verified translation between functional and
+imperative programs. We formulated an register assignment algorithm by recursion on
+the structure of IL that achieves the same bound on the number of required registers
+as SSA-based register assignment. Coherence allowed us to justify correctness without
+directly arguing about program semantics by proving that the algorithm α-renames to
+a coherent program.
+
+11 Appendix
+11.1 Table of Variable Names and Types
+Variable
+V
+β
+v
+Exp
+V
+e
+x, y, z
+F
+f, g
+A
+η
+α
+Term
+s, t
+V
+C
+F
+E
+φ
+τ
+B
+L
+Σ
+σ
+Π
+π
+ǫ
+
+Type
+set
+V → {0, 1}
+V
+set
+set
+Exp
+V
+set
+F
+set
+Exp + A
+A
+set
+Term
+V → V⊥
+set
+context of C
+set
+E
+E
+set
+context of B
+set
+Σ
+set
+Π
+Π
+
+comment
+set of values
+conversion to truth value
+value
+set of expressions
+set of variables
+expression
+variables
+set of lables
+labels
+set of actions
+extended expression
+action
+set of terms
+terms
+environment
+set of closures
+set of events
+event
+silent event
+set of blocks
+set of states (LTS)
+state, configuration
+set of partial traces
+partial trace
+empty trace
+
+15
+
+11 Appendix
+
+11.2 α-Equivalence
+We formalize a generalization of alpha equivalence as an inductively defined judgment
+ρ, d ⊢ s ∼α t where ρ, d : V → V and s, t are terms. The mapping ρ describes how the
+free variables of s map to free variables of t, and d describes how the free variables of t
+map to free variables of s. If ρ, d ⊢ s ∼α t holds, then d is the inverse of ρ on fv(s), i.e.
+∀x ∈ fv(s), d(ρ x) = x
+Symmetrically, ρ is the inverse of d on fv(t).
+The formalization assumes a similar judgment ρ, d ⊢Exp e ∼α e′ for α-equivalence of
+expressions. The variable case of judgment for expressions explains how ρ and d are
+used:
+Alpha-Var
+
+ρx = y
+dy = x
+ρ, d ⊢Exp x ∼α y
+Alpha-Var ensures that ρ maps x to y and d maps y to x.
+The other rules of the expression judgment are structurally recursive and we omit
+them.
+Alpha-Op
+
+Alpha-Val
+
+ρ, d ⊢Exp η ∼α η ′
+ρ[x 7→ x′ ], d[x′ 7→ x] ⊢ s ∼α s′
+ρ, d ⊢ let x = η in s ∼α let x′ = η ′ in s′
+
+ρ, d ⊢Exp e ∼α e′
+ρ, d ⊢ e ∼α e
+
+Alpha-Cond
+Alpha-App
+
+∀i, ρ, d ⊢Exp ei ∼α e′i
+ρ, d ⊢ f e ∼α f e′
+
+ρ, d ⊢ s ∼α s′
+ρ, d ⊢ t ∼α t′
+ρ, d ⊢Exp e ∼α e′
+ρ, d ⊢ if e then s else t ∼α if e′ then s′ else t′
+
+Alpha-Fun
+
+ρ[x 7→ x′ ], d[x′ 7→ x] ⊢ s ∼α s′
+
+ρ, d ⊢ t ∼α t′
+
+|x| = |x′ |
+
+ρ, d ⊢ fun f x = s in t ∼α fun f x′ = s′ in t′
+Figure 5: Inductive judgment generalizing α-equivalence
+The relation has several pleasant properties.
+Lemma 2 (Reflexivity) id , id ⊢ s ∼α s
+Lemma 3 (Symmetry) ρ, d ⊢ s ∼α s′ ⇒ d, ρ ⊢ s′ ∼α s
+Lemma 4 (Transitivity) ρ1 , d1 ⊢ s ∼α s′ ⇒ ρ2 , d2 ⊢ s′ ∼α s′′ ⇒ ρ1 ◦ ρ2 , d2 ◦ d1 ⊢
+s ∼α s′
+
+16
+
+11 Appendix
+We validate our definition and prove soundness with respect to trace equivalence ≃.
+We define
+V =ρ,d V ′ : ⇐⇒ ∀xy, ρx = y ⇒ dy = x ⇒ V x = V ′ y
+We relate two closures in the following way:
+(V, x, s) =α (V ′ , x′ , s′ )
+: ⇐⇒ |x| = |x′ | ∧ ∃ρ d, V =ρ,d V ′ ∧ ρ[x 7→ x′ ], d[x′ 7→ x] ⊢ s ∼α s′
+We then lift =α point-wise to contexts of the same length.
+Theorem 10 If F =α F ′ and V =ρ,d V ′ then (F, V, s) ≃ (F ′ , V ′ , s′ ).
+In the formal development we have an additional formalization of IL which uses DeBruijn representation also for variables (and not just for labels). We give a translation
+from the named IL to De-Bruijn IL, and prove this translation correct with respect
+to trace equivalence. We then show that terms that are α-equivalent by our inductive
+definition translate to identical terms in De-Bruijn representation.
+
+11.3 Definition of Renamed Apart
+A program is renamed apart, if every variable x occurring in a binding position does not
+occur free and x is different from every variable occurring in a different binding position.
+We formulate an inductive predicate X ⊢ s apart X ′ that ensures this property. The
+predicate maintains the invariant that all free variables of s are in X, and that X ′
+contains exactly the variables occurring in binding positions in s.
+Apart-Op
+
+Apart-Val
+
+fv(e) ⊆ X
+X ∪ {x} ⊢ s apart X ′
+X ⊢ let x′ = η ′ in s′ apart X ′ ∪ {x}
+
+fv(e) ⊆ X
+X ⊢ e apart ∅
+
+Apart-Cond
+Apart-App
+
+fv(e) ⊆ X
+X ⊢ f e apart ∅
+
+fv(e) ⊆ X
+X ⊢ s apart Xs
+Xs ∩ Xt = ∅
+X ⊢ t apart Xt
+X ⊢ if e then s else t apart Xs ∪ Xt
+
+Apart-Fun
+
+X ⊢ t apart Xt
+x∩X =∅
+unique x
+(Xs ∪ x) ∩ Xt = ∅
+X ∪ x ⊢ s apart Xs
+X ⊢ fun f x = s in t apart Xs ∪ Xt ∪ x
+Figure 6: Inductive definition of renamed apart
+Lemma 5 (Disjoint) If X ⊢ s apart X ′ then X ∩ X ′ = ∅.
+Lemma 6 (Relation to free and bound variables) If X ⊢ s apart X ′ and then fv(s) ⊆
+X and X ′ = VB (s).
+
+17
+
+11 Appendix
+
+11.4 A Procedure to Rename Apart
+We define the procedure
+apart : (V → V) → (set V) → Exp → (set V) × Exp
+such that apart ρ X s = (X, s′ ) ensures s′ is renamed apart and α-equivalent to s. X ′
+contains the newly chosen variables now occurring in binding positions in s′ . Theorem 11
+and Theorem 12 make these claims precise.
+apart ρ X (let x = η in s)
+= (X ′ ∪ {y}, let y = ρ η in s′ )
+′
+′
+where (X , s ) = apart (ρ[x 7→ y]) (X ∪ {y}) s
+where y = fresh X
+apart ρ X (if e then s else t) = (Xs ∪ Xt , if (ρ e) then s′ else t′ )
+where (Xs , s′ ) = apart ρ X s
+where (Xt , t′ ) = apart ρ (X ∪ Xs ) t
+apart ρ X e
+= (∅, ρe)
+= (∅, f (ρ e))
+apart ρ X (f e)
+apart ρ X (fun f x = s in t) = (Xs ∪ Xt ∪ y, fun f y = s′ in t′ )
+where y = freshlist X |x|
+where (Xs , s′ ) = apart (ρ[x 7→ y]) (X ∪ y) s
+where (Xt , t′ ) = apart ρ (X ∪ Xs ∪ y) t
+Theorem 11 (apart renames apart) Let s be a program such that ρ(fv(s)) ⊆ X and
+apart ρ X s = (X ′ , s′ ). Then: X ⊢ s′ apart X ′ .
+Theorem 12 (Renaming apart respects α-conversion) Let s be a program such
+that ρ(fv(s)) ⊆ X and apart ρ X s = (X ′ , s′ ) and let d be inverse to ρ on fv(s). Then
+ρ, d ⊢ s ∼α s′ .
+
+11.5 Joining the Parts
+This section describes how the theorems proven in this paper fit together in a compiler.
+Assume that the compiler uses IL as an intermediate language, and now wants to produce
+code for an IL program s. The compiler procedes as follows:
+1. Rename s1 apart, obtaining an α-equivalent program s2 (Theorem 12).
+2. Run the algorithm rassign on s2 to obtain a register assignment ρ. Theorem
+Theorem 8 ensures ρ is locally injective.
+3. Rename s2 accoding to ρ and obtain s3 , which is α-equivalent (Theorem 7) and
+coherent (Theorem 6) because ρ is locally injective.
+4. Theorem Theorem 5 ensures that s3 can be seen equivalently as an IL/I program,
+hence the functional program s1 has been translated to an imperative program s3 .
+
+18
+
+References
+
+References
+1. A. W. Appel. Compiling with Continuations. Cambridge, England: Cambridge University
+Press, 1992.
+2. A. W. Appel. “SSA is Functional Programming”. In: SIGPLAN Not. 33.4 (1998), pp. 17–
+20.
+3. G. Barthe, D. Demange, and D. Pichardie. “A Formally Verified SSA-Based Middle-End
+- Static Single Assignment Meets CompCert”. In: ESOP. Ed. by H. Seidl. Springer, 2012,
+pp. 47–66.
+4. L. Beringer, K. MacKenzie, and I. Stark. “Grail: a Functional Form for Imperative Mobile
+Code”. In: ENTCS 85.1 (2003), pp. 3–23.
+5. S. Blazy, B. Robillard, and A. W. Appel. “Formal Verification of Coalescing GraphColoring Register Allocation”. In: ESOP. Ed. by A. D. Gordon. Springer, 2010, pp. 145–
+164.
+6. M. M. T. Chakravarty, G. Keller, and P. Zadarnowski. “A Functional Perspective on SSA
+Optimisation Algorithms”. In: ENTCS 82.2 (2003), pp. 347–361.
+7. A. Chlipala. “A verified compiler for an impure functional language”. In: POPL. Ed. by
+M. V. Hermenegildo and J. Palsberg. ACM, 2010, pp. 93–106.
+8. R. Cytron, J. Ferrante, B. K. Rosen, M. N. Wegman, and F. K. Zadeck. “Efficiently Computing Static Single Assignment Form and the Control Dependence Graph”. In: TOPLAS
+13.4 (1991), pp. 451–490.
+9. S. Hack, D. Grund, and G. Goos. “Register Allocation for Programs in SSA-Form”. In:
+CC. Ed. by A. Mycroft and A. Zeller. Springer, 2006, pp. 247–262.
+10. R. A. Kelsey. “A correspondence between continuation passing style and static single
+assignment form”. In: SIGPLAN Not. 30 (3 1995), pp. 13–22.
+11. P. J. Landin. “Correspondence between ALGOL 60 and Church’s Lambda-notation: part
+I”. In: CACM 8.2 (1965), pp. 89–101.
+12. C. Lattner and V. S. Adve. “LLVM: A Compilation Framework for Lifelong Program
+Analysis & Transformation”. In: CGO. IEEE Computer Society, 2004, pp. 75–88.
+13. X. Leroy. “Formal Verification of a Realistic Compiler”. In: CACM 52.7 (2009), pp. 107–
+115.
+14. T. Nipkow and G. Klein. Concrete Semantics: With Isabelle/HOL. Springer Publishing
+Company, Incorporated, 2014.
+15. J. C. Reynolds. “The Discoveries of Continuations”. In: LSC 6.3-4 (1993), pp. 233–248.
+16. A. Sabry and M. Felleisen. “Reasoning about Programs in Continuation-Passing Style”.
+In: LSC 6.3-4 (1993), pp. 289–360.
+17. J. Zhao, S. Nagarakatte, M. M. K. Martin, and S. Zdancewic. “Formal Verification of
+SSA-based Optimizations for LLVM”. In: PLDI. Ed. by H.-J. Boehm and C. Flanagan.
+ACM, 2013, pp. 175–186.
+18. J. Zhao, S. Nagarakatte, M. M. K. Martin, and S. Zdancewic. “Formalizing LLVM Intermediate Representation for Verified Program Transformations”. In: POPL. Ed. by J. Field
+and M. Hicks. ACM, 2012, pp. 427–440.
+
+19
+
+
