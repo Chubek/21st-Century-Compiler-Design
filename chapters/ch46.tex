@@ -1,0 +1,437 @@
+\chapter{Model-Checking Algorithms}
+\label{ch:model-checking-algorithms}
+
+A temporal specification becomes useful when a checker can either establish it or return a diagnostic that an engineer can replay.
+For a finite protocol, reachability is the first useful checker: enumerate states, stop at a bad state, and retain the route that led there.
+Branching-time checking extends this idea by computing sets of states that satisfy subformulas.
+Symbolic methods change the representation of those sets, while abstraction changes which states the checker distinguishes.
+Each change has a separate correctness obligation.
+
+Throughout this chapter, $K=(S,I,R,AP,L)$ is a finite Kripke structure with the totalized transition relation of Section~\ref{sec:ch45-deadlocks}.
+There are no fairness restrictions unless explicitly stated.
+Write $V=|S|$ and $E=|R|$.
+State identifiers are dense integers, adjacency lists enumerate all successors, and label tests take constant time.
+These representation assumptions make the graph bounds below meaningful; generating successors from a program may have substantial additional cost.
+
+\section{Reachability with a shortest witness}
+\label{sec:ch46-reachability}
+
+Figure~\ref{fig:ch46-work-graph} models a compilation job.
+State $s_0$ dispatches it, $s_1$ waits for a resource and may retry, $s_2$ has prepared installation metadata, and $s_3$ has installed the code.
+An alternative dispatch reaches $s_4$, an invalid allocation outcome, and then the explicit error state $s_5$.
+We use $I=\{s_0\}$, $\mathit{installed}$ at $s_3$, and $\mathit{error}$ at $s_5$.
+Normal completion and error have self-loops.
+This is a deliberately faulty protocol: the checker should find the allocation-failure route even though a successful route also exists.
+
+\begin{figure}[tbp]
+\centering
+\input{figures/model-work-graph.tex}
+\caption{A successful installation route and an allocation-error route coexist in one finite model.}
+\label{fig:ch46-work-graph}
+\end{figure}
+
+Let $B\subseteq S$ be the bad states, here $\{s_5\}$.
+The invariant that no initial execution visits $B$ is equivalent to $\mathrm{Reach}(I)\cap B=\emptyset$.
+Algorithm~\ref{alg:ch46-bfs} uses \term{breadth-first search} (BFS) and records one parent when a state is first discovered.
+All initial states enter the queue before exploration, so the witness is shortest from the entire initial set, not merely from the first initial state considered.
+The parent marker $\bot$ marks a root and is not a state identifier.
+
+\begin{algorithm}[tbp]
+\caption{Search for a bad state and retain a shortest transition witness.}
+\label{alg:ch46-bfs}
+\begin{pseudocode}
+\Require finite graph with complete adjacency lists, initial set $I$, bad set $B$
+\Ensure a shortest path from $I$ to $B$, or proof that no such path exists
+\State $D\gets\emptyset$; $W\gets$ empty FIFO queue
+\ForAll{$s\in I$}
+  \State $D\gets D\cup\{s\}$; $\mathit{parent}[s]\gets\bot$; enqueue $s$ in $W$
+\EndFor
+\While{$W\neq\emptyset$}
+  \State $s\gets$ dequeue from $W$
+  \If{$s\in B$}
+    \State \Return reverse of the parent chain from $s$ to $\bot$
+  \EndIf
+  \ForAll{$t\in\Succ(s)$}
+    \If{$t\notin D$}
+      \State $D\gets D\cup\{t\}$; $\mathit{parent}[t]\gets s$; enqueue $t$ in $W$
+    \EndIf
+  \EndFor
+\EndWhile
+\State \Return unreachable
+\end{pseudocode}
+\end{algorithm}
+
+The discovery invariant is that every state in $D$ has a parent chain beginning in $I$ and following actual edges.
+The FIFO queue processes nondecreasing distances, so first discovery gives a minimum edge count.
+Marking a state when enqueuing it, rather than when removing it, prevents many predecessors from inserting duplicate queue entries.
+Cycles and terminal self-loops therefore cause no special difficulty.
+If the queue empties, $D$ contains $I$ and is closed under successors, which proves that no reachable bad state was missed.
+
+For dense identifiers and adjacency lists, each state is enqueued once and each outgoing edge of an explored state is scanned once.
+Worst-case time is $O(V+E)$, with $O(V)$ auxiliary memory for the queue, discovery flags, and parents, in addition to the $O(V+E)$ graph.
+Reconstructing a returned path takes time proportional to its length, at most $V-1$ edges for a shortest nontrivial witness.
+For an implicit graph, charge separately for successor generation, canonicalization, and state comparison.
+Hash tables give expected constant-time lookup under suitable assumptions, not a representation-independent worst-case linear bound.
+
+Table~\ref{tab:ch46-bfs-levels} computes the BFS layers with successors listed in numeric order.
+The checker returns $s_0,s_4,s_5$, a two-transition witness.
+The installation state at depth three is irrelevant to this violation.
+The displayed layers describe a complete BFS traversal; an early-stopping implementation need not finish discovering the last layer before reporting the error.
+
+\begin{table}[tbp]
+\centering
+\caption{BFS distances distinguish the shortest error route from the longer successful route.}
+\label{tab:ch46-bfs-levels}
+\begin{tabular}{cll}
+\toprule
+Distance & Newly reached states & Recorded parents \\
+\midrule
+0 & $\{s_0\}$ & $s_0:\bot$ \\
+1 & $\{s_1,s_4\}$ & $s_1:s_0,\ s_4:s_0$ \\
+2 & $\{s_2,s_5\}$ & $s_2:s_1,\ s_5:s_4$ \\
+3 & $\{s_3\}$ & $s_3:s_2$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A witness should include enough decoded state to explain the failed condition.
+For a cache model, pin ownership and reclamation status matter more than a raw state number.
+If several actions connect the same pair of states, retain the generating action alongside the parent.
+Otherwise the displayed state path may be valid while its claimed explanation names the wrong operation.
+Chapter~\ref{ch:model-checker-case-study} provides a companion implementation of finite reachability and CTL checking.
+
+\section{CTL as set computation}
+\label{sec:ch46-ctl-sets}
+
+For a CTL state formula $\varphi$, write
+\[
+ \llbracket\varphi\rrbracket_K=\{s\in S\mid K,s\models\varphi\}.
+\]
+We omit the subscript when the model is fixed.
+Boolean cases are set operations: negation is complement relative to $S$, conjunction is intersection, and an atomic proposition is its label set.
+Define the existential predecessor operation
+\[
+ \operatorname{Pre}_{\exists}(X)=\{s\in S\mid\exists t\in X:(s,t)\in R\}.
+\]
+Then $\llbracket\mathrm{EX}\varphi\rrbracket=\operatorname{Pre}_{\exists}(\llbracket\varphi\rrbracket)$ and $\llbracket\mathrm{AX}\varphi\rrbracket=S\setminus\operatorname{Pre}_{\exists}(S\setminus\llbracket\varphi\rrbracket)$.
+Evaluating subformulas from the leaves upward turns temporal nesting into ordinary dependencies between set computations.
+
+\subsection{Until is a least fixed point}
+\label{sec:ch46-eu}
+
+Let $P=\llbracket\varphi\rrbracket$ and $Q=\llbracket\psi\rrbracket$.
+A witness for $\mathrm{E}[\varphi\,\mathrm{U}\,\psi]$ either starts in $Q$, or starts in $P$ and takes a step to a shorter witness.
+Consequently,
+\[
+ \llbracket\mathrm{E}[\varphi\,\mathrm{U}\,\psi]\rrbracket
+ =\mu X.\bigl(Q\cup(P\cap\operatorname{Pre}_{\exists}(X))\bigr).
+\]
+Here $\mu$ denotes the least fixed point under set inclusion.
+Iterating from $\emptyset$ first yields $Q$; equivalently, start at $X_0=Q$ and repeatedly apply the displayed function.
+Then $X_j$ contains exactly the states with an until witness reaching $Q$ in at most $j$ transitions.
+Induction on that length proves both directions of the characterization.
+Monotonicity and finiteness imply stabilization after at most $V$ strict state additions, although a round can add many states.
+
+The least fixed point matters.
+If $u\in P\setminus Q$ has only $u\to u$, it must not satisfy strong until.
+Starting from all states can leave $u$ in a larger fixed point even though no target is ever reached.
+Reaching $Q$ immediately, however, imposes no requirement that the current state also belong to $P$.
+This zero-step case is a frequent implementation bug.
+
+Algorithm~\ref{alg:ch46-eu-worklist} uses reverse edges instead of rescanning the graph in every round.
+For each newly admitted predecessor it records a successor already known to reach $Q$.
+These pointers lead to a target because they decrease discovery rank, even if the original graph contains cycles.
+
+\begin{algorithm}[tbp]
+\caption{Compute existential until by backward propagation from its target set.}
+\label{alg:ch46-eu-worklist}
+\begin{pseudocode}
+\Require finite graph with predecessor lists; state sets $P$ and $Q$
+\Ensure $X=\llbracket\mathrm{E}[P\,\mathrm{U}\,Q]\rrbracket$ and witness pointers outside $Q$
+\State $X\gets Q$; $W\gets$ FIFO queue containing every state of $Q$
+\While{$W\neq\emptyset$}
+  \State $t\gets$ dequeue from $W$
+  \ForAll{$s\in\Pred(t)$}
+    \If{$s\in P$ and $s\notin X$}
+      \State $X\gets X\cup\{s\}$; $\mathit{next}[s]\gets t$; enqueue $s$ in $W$
+    \EndIf
+  \EndFor
+\EndWhile
+\State \Return $X,\mathit{next}$
+\end{pseudocode}
+\end{algorithm}
+
+Each admitted state is processed once, and each incoming edge of an admitted state is examined once.
+The worst-case time is $O(V+E)$; auxiliary storage is $O(V)$ beyond the forward and reverse graph.
+Constructing reverse adjacency lists also costs $O(V+E)$ time and space.
+A full-round implementation of the mathematical recurrence can instead require $O(V(V+E))$ time.
+The fixed-point equation alone therefore does not establish a linear implementation bound.
+
+On Figure~\ref{fig:ch46-work-graph}, take $P=\{s_0,s_1,s_2,s_4\}$ and $Q=\{s_3\}$.
+Table~\ref{tab:ch46-fixpoint-rounds} shows the full-round sequence for explanatory purposes.
+State $s_4$ never enters: its only successor is the error state, which has no route to installation.
+At $s_1$, the self-loop does not prevent existential until from holding; the witness chooses the edge to $s_2$.
+The universal claim that every run eventually installs is nevertheless false.
+
+\subsection{Always on some path is a greatest fixed point}
+\label{sec:ch46-eg}
+
+To satisfy $\mathrm{EG}\varphi$, a state must belong to $P=\llbracket\varphi\rrbracket$ and have a successor that can continue satisfying the same obligation.
+Thus
+\[
+ \llbracket\mathrm{EG}\varphi\rrbracket
+ =\nu X.\bigl(P\cap\operatorname{Pre}_{\exists}(X)\bigr),
+\]
+where $\nu$ denotes the greatest fixed point.
+Start at $Y_0=P$ and repeatedly remove states having no successor in the current set.
+The sequence descends and stabilizes.
+Every retained state in the final set has a retained successor, so choosing successors indefinitely constructs a path entirely within $P$.
+Conversely, no state on such a path can be removed: its next path state survives each round by induction.
+This proves exactness.
+
+For the same $P$ used in the until example, the right column of Table~\ref{tab:ch46-fixpoint-rounds} removes $s_2$ and $s_4$ immediately.
+Their successors lie outside $P$.
+States $s_0$ and $s_1$ survive because $s_0$ can move to $s_1$ and $s_1$ can repeat forever.
+Starting this computation at $\emptyset$ would remain empty and miss both states.
+
+\begin{table}[tbp]
+\centering
+\caption{Opposite initialization directions separate finite until witnesses from infinite stay-within-set witnesses.}
+\label{tab:ch46-fixpoint-rounds}
+\begin{tabular}{cll}
+\toprule
+Round & Until: $X_0=\{s_3\}$ & Always: $Y_0=P$ \\
+\midrule
+0 & $\{s_3\}$ & $\{s_0,s_1,s_2,s_4\}$ \\
+1 & $\{s_2,s_3\}$ & $\{s_0,s_1\}$ \\
+2 & $\{s_1,s_2,s_3\}$ & $\{s_0,s_1\}$ (fixed) \\
+3 & $\{s_0,s_1,s_2,s_3\}$ & $\{s_0,s_1\}$ \\
+4 & $\{s_0,s_1,s_2,s_3\}$ (fixed) & $\{s_0,s_1\}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A linear-time implementation stores, for each state in $P$, the number of successors currently retained.
+Initialize these counts by scanning edges, queue all zero-count states, and mark them removed when enqueuing.
+When removing $t$, decrement the count of each still-retained predecessor for the edge to $t$; enqueue a predecessor when its count reaches zero.
+Every state is removed at most once and every relevant edge is processed at most once, giving $O(V+E)$ time.
+If adjacency lists contain duplicate edges, counts and decrements must use the same multiplicity convention.
+After pruning, retain one successor within the result at each surviving state.
+Following these pointers eventually repeats a state, yielding a finite prefix and a nonempty repeating cycle.
+
+Equivalently, restrict the graph to $P$, find its strongly connected components, retain components with a directed cycle, and propagate backward within $P$.
+A singleton component needs a self-loop to be cyclic.
+The normal and error terminal loops inserted by totalization count as cycles; whether they satisfy $\mathrm{EG}\varphi$ depends on their labels.
+For example, the error terminal satisfies $\mathrm{EG}\mathit{error}$ and fails $\mathrm{EG}\neg\mathit{error}$.
+
+Boolean operations, $\mathrm{EX}$, existential until, and $\mathrm{EG}$ suffice for CTL.
+Useful dualities include $\mathrm{AF}\varphi=\neg\mathrm{EG}\neg\varphi$ and $\mathrm{AG}\varphi=\neg\mathrm{EF}\neg\varphi$.
+Universal until additionally excludes infinite postponement:
+\[
+ \mathrm{A}[\varphi\,\mathrm{U}\,\psi]
+ =\neg\bigl(\mathrm{E}[\neg\psi\,\mathrm{U}\,(\neg\varphi\land\neg\psi)]
+       \lor\mathrm{EG}\neg\psi\bigr).
+\]
+With linear graph routines and shared subformula results, checking a formula of size $|\varphi|$ takes $O(|\varphi|(V+E))$ time on the explicit model~\cite{baier-2008-model-checking}.
+Storing every subformula's satisfaction set takes $O(|\varphi|V)$ bits in a bit-vector implementation, in addition to graph and worklist storage.
+Some CTL failures require branching explanations; a single linear trace is not a universal diagnostic format for arbitrarily nested formulas.
+
+\section{Symbolic sets and bounded paths}
+\label{sec:ch46-symbolic}
+
+\subsection{Boolean decision diagrams represent sets, not individual visits}
+\label{sec:ch46-bdd}
+
+Encode a state using Boolean variables $x=(x_1,\ldots,x_n)$.
+A characteristic formula $X(x)$ denotes a state set, and $T(x,x')$ denotes the transition relation between current and next variables.
+Let $D(x)$ describe valid state encodings; unused bit patterns must not become extra states.
+The predecessor equation becomes
+\[
+ \operatorname{Pre}_{\exists}(X)(x)
+ =D(x)\land\exists x'.\bigl(T(x,x')\land X(x')\bigr).
+\]
+The relation must constrain both ends to valid encodings, either internally or through explicit domain conjuncts.
+Complement is $D\land\neg X$, not necessarily Boolean negation over every bit pattern.
+
+A reduced ordered \term{binary decision diagram} (BDD) shares identical Boolean subfunctions under one fixed variable order.
+Canonical representation for that order makes equality testing of normalized diagrams cheap and allows fixed-point iteration without enumerating each state.
+For a two-bit state $(p,r)$ recording a pin and resident code, the safety set is $\neg p\lor r$.
+It contains encodings $00,01,11$ and excludes $10$ when bits are ordered as $(p,r)$.
+The set has a compact Boolean description despite containing several states.
+The symbolic algorithm computes the same predecessor and fixed-point sets as the explicit algorithm; it changes their representation.
+
+Compactness is not guaranteed.
+Variable order can drastically change a BDD's size, and intermediate conjunctions or quantified results can be large even when the input diagrams are small.
+Partitioning a transition relation and interleaving current and next variables are engineering choices to measure, not proofs of polynomial space.
+A symbolic checker can avoid explicit enumeration on a favorable protocol and still exhaust memory on another with the same number of state bits~\cite{clarke-2018-handbook}.
+
+\subsection{SAT unrolling asks a bounded reachability question}
+\label{sec:ch46-bmc}
+
+For a bad-state predicate $B$, an initial predicate $I$, and a transition formula $T$, define
+\[
+ \Phi_k=I(x_0)\land
+       \bigwedge_{i=0}^{k-1}T(x_i,x_{i+1})\land
+       \bigvee_{i=0}^{k}B(x_i).
+\]
+Each $x_i$ is a fresh copy of the state bits.
+A satisfying assignment gives a length-$k$ execution with a bad state at some position at most $k$.
+The formula must include the chosen arithmetic semantics, valid encodings, and all initial constraints.
+In particular, mathematical integer arithmetic is not a substitute for wrapping machine arithmetic when overflow affects the protocol.
+
+Because the transition relation is total, any shorter bad-reaching prefix extends to length $k$.
+Thus this formula detects every bad state reachable within $k$ transitions.
+On the six-state job model, $\Phi_0$ and $\Phi_1$ are unsatisfiable, while $\Phi_2$ is satisfiable with $s_0,s_4,s_5$.
+Those first two UNSAT answers are correct and still do not establish safety.
+They exclude only witnesses within their respective bounds.
+
+For an explicitly known finite model with $V$ states, every reachable state has a simple shortest route of at most $V-1$ edges from some initial state.
+Consequently, an exact UNSAT result at $k=V-1$ for this invariant query is complete.
+This is a completeness argument tied to a particular state bound and property, not a general interpretation of bounded UNSAT.
+An encoded model with $n$ bits may have up to $2^n$ states, making that bound unusable in practice.
+Inductive invariants, diameter arguments, and other complete procedures can supply stronger certificates, but require their own checks.
+
+\subsection{A lasso must satisfy the property automaton's acceptance condition}
+\label{sec:ch46-lassos}
+
+The retry counterexample $s_0s_1^\omega$ is a \term{lasso}: a finite prefix followed by a nonempty closed walk repeated forever.
+For finite-state LTL checking, translate the negated property into an automaton over infinite label sequences and explore its product with the model.
+A counterexample exists exactly when an accepting infinite run exists in that product; if one exists, an ultimately periodic witness can be chosen~\cite{baier-2008-model-checking}.
+The repeated object is a product state containing both the system state and the automaton state.
+Repetition of a system state alone does not establish that the pending temporal obligations repeat compatibly.
+
+For ordinary B\"uchi acceptance, the repeated part must visit an accepting state.
+For generalized B\"uchi acceptance, it must visit every required acceptance set.
+Additional fairness requirements must also be satisfied.
+A strongly connected region containing representatives of several required sets may supply a closed walk visiting them all, but no single simple cycle need do so.
+Conversely, an arbitrary reachable cycle can be nonaccepting and prove nothing about the queried formula.
+
+In a bounded lasso encoding with states $z_0,\ldots,z_k$, one convention chooses $\ell\in\{0,\ldots,k\}$ and requires a closing transition $z_k\to z_\ell$.
+The repeated positions are $z_\ell,\ldots,z_k$; for B\"uchi acceptance at least one must be accepting.
+Choosing $\ell=k$ requires a genuine self-loop.
+An alternative convention repeats an equal endpoint and uses different indices; mixing the conventions can admit a zero-edge \enquote{cycle} that is not an infinite execution.
+Finite bad prefixes suffice for invariants, while general temporal counterexamples need the appropriate acceptance test.
+Neither all cycles nor all infinite paths are fair accepting witnesses.
+
+\section{Abstraction and spurious traces}
+\label{sec:ch46-abstraction}
+
+Abstraction can make a protocol finite or make a finite protocol tractable.
+It also introduces choices that may not compose into a concrete execution.
+The soundness pattern resembles the over-approximate analyses of Chapter~\ref{ch:ch11-abstract-interpretation}, but now the abstraction must cover transitions as well as state facts~\cite{cousot-1977-abstract}.
+
+Let $C$ and $A$ be concrete and abstract structures, and let $H\subseteq S_C\times S_A$ be a \term{forward simulation}.
+Every concrete initial state must relate to an abstract initial state.
+For every $(c,a)\in H$, labels must agree on the propositions used in the property, and every concrete transition $c\to c'$ must have a matching abstract transition $a\to a'$ with $(c',a')\in H$.
+The abstract system may have additional transitions.
+These conditions give a matching abstract path for every concrete path, with the same relevant labels.
+Therefore universal LTL truth transfers from the abstract system to the concrete one, under the common infinite-path semantics.
+They also preserve the universal fragment of CTL in the corresponding direction, but not arbitrary mixed existential and universal formulas~\cite{baier-2008-model-checking}.
+
+This particular statement uses one abstract step per concrete step and exact agreement on relevant labels.
+If states are merged despite differing labels, one needs a sound treatment of uncertain propositions rather than choosing convenient truth values.
+If transitions are collapsed, next-time properties require special care.
+If checking only fair abstract paths, every relevant fair concrete path must have a fair abstract match; ordinary simulation alone does not provide that extra condition.
+
+Figure~\ref{fig:ch46-abstraction} gives a small counterexample to trusting an abstract error trace.
+In the concrete pass protocol, $i\to u\to d$, and $d$ repeats forever.
+State $w$ is unreachable from $i$, but has $w\to e$, and $e$ repeats forever.
+States $u$ and $w$ share the visible phase \enquote{pending}; their hidden mode bits are 0 and 1, respectively.
+Only $e$ has the proposition $\mathit{error}$.
+Merge $u$ and $w$ into abstract state $A$, retaining other states as singleton blocks $I,D,E$.
+An abstract edge exists whenever any pair of concrete representatives supplies it.
+Then $I\to A\to E$ is an abstract error trace: its first edge uses $u$ and its second uses $w$.
+There is no concrete execution that switches representatives this way.
+
+\begin{figure}[tbp]
+\centering
+\input{figures/model-abstraction-splice.tex}
+\caption{Merging pending states splices edges from incompatible concrete histories into an abstract error trace.}
+\label{fig:ch46-abstraction}
+\end{figure}
+
+To validate an abstract trace $a_0,\ldots,a_k$, propagate concrete sets along the whole prefix:
+\[
+ C_0=I_C\cap\gamma(a_0),\qquad
+ C_{j+1}=\operatorname{Post}_C(C_j)\cap\gamma(a_{j+1}).
+\]
+Here $\gamma(a)$ is the concrete block represented by $a$, and $\operatorname{Post}_C$ takes concrete successors.
+For an abstract bad endpoint that is only a possible error, intersect the final set with the actual concrete bad set as well.
+Table~\ref{tab:ch46-spurious} computes the sets for $I,A,E$.
+Checking only that each adjacent pair has some concrete transition would incorrectly accept the trace.
+The shared intermediate state must satisfy both steps in one consistent execution.
+
+\begin{table}[tbp]
+\centering
+\caption{Prefix propagation rejects the abstract error trace when the concrete representative cannot continue.}
+\label{tab:ch46-spurious}
+\begin{tabular}{clll}
+\toprule
+Position & Abstract state & Concretization & Feasible prefix endpoint set \\
+\midrule
+0 & $I$ & $\{i\}$ & $\{i\}$ \\
+1 & $A$ & $\{u,w\}$ & $\{u\}$ \\
+2 & $E$ & $\{e\}$ & $\emptyset$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\term{Counterexample-guided abstraction refinement} (CEGAR) alternates abstract checking, concrete trace validation, and refinement of the distinctions responsible for a spurious result.
+Here splitting $A$ by the hidden mode bit separates $u$ from $w$.
+The refined reachable graph is $I\to U\to D$, with the terminal loop at $D$; $W\to E$ remains present but unreachable.
+The abstract error disappears without deleting a real concrete transition.
+Deleting the edge $A\to E$ without splitting or another sound argument would lose the behavior of $w$ and could invalidate the simulation contract.
+
+For a finite concrete graph, repeated proper partition refinement can eventually reach singleton blocks, so this exact refinement scheme terminates if it always splits a block and never merges it again.
+That statement is not a termination guarantee for general program CEGAR over unbounded stores.
+Nor does feasibility of every finite unfolding of a proposed abstract loop by itself provide a concrete infinite fair witness under arbitrary abstraction.
+Temporal counterexamples require validation of their looping and acceptance obligations as well as their finite prefix.
+
+In a compiler workflow, a trace validator should distinguish a real protocol failure, an infeasible abstraction artifact, and an inconclusive solver result.
+Only the first justifies reporting a concrete bug.
+Only a completed sound check, with its modeling assumptions recorded, justifies the corresponding proof claim.
+Reachability, temporal fixed points, symbolic encodings, and refinement are complementary components of that evidence chain.
+
+\section{Exercises}
+\label{sec:ch46-exercises}
+
+\begin{enumerate}
+\item\label{ex:ch46-multiple-initial}
+On the six-state job model, change the initial set to $\{s_0,s_4\}$.
+Find a shortest error witness and its length.
+Explain why running BFS from $s_0$ to completion before considering $s_4$ does not implement multi-source shortest search.
+
+\item\label{ex:ch46-until-zero}
+Use the job model with $P=\{s_0,s_1\}$ and $Q=\{s_2,s_3\}$.
+Compute $\mathrm{E}[P\,\mathrm{U}\,Q]$ by rounds starting at $Q$.
+Which returned states do not belong to $P$, and why must they remain in the result?
+
+\item\label{ex:ch46-eg-pruning}
+Compute $\mathrm{EG}\neg\mathit{error}$ and $\mathrm{AF}\mathit{installed}$ at every state of the job model without fairness.
+Give a nonterminating path explaining the answer at $s_1$.
+Then remove only the edge $s_1\to s_1$ and recompute $\mathrm{AF}\mathit{installed}$.
+
+\item\label{ex:ch46-bounded-unsat}
+A total graph is a chain $t_0\to t_1\to t_2\to t_3\to t_4$ followed by $t_4\to t_4$.
+Only $t_0$ is initial and only $t_4$ is bad.
+For which nonnegative bounds $k$ is $\Phi_k$ satisfiable?
+What would an UNSAT result at bound three justify?
+
+\item\label{ex:ch46-accepting-walk}
+A reachable strongly connected graph has edges $h\to u$, $u\to h$, $h\to v$, and $v\to h$.
+Generalized B\"uchi acceptance requires infinitely many visits to both $\{u\}$ and $\{v\}$.
+Find an accepting closed walk and explain why reporting either simple cycle alone would fail the acceptance test.
+
+\item\label{ex:ch46-refinement}
+For Figure~\ref{fig:ch46-abstraction}, validate the trace $I,A,D$ and then add $i\to w$ to the concrete graph.
+Revalidate $I,A,E$ after that change.
+Does splitting the pending block still eliminate the error, or does it expose a real witness?
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch46-reading}
+
+Baier and Katoen give correctness arguments for explicit CTL algorithms, automata-based LTL checking, and simulation-based abstraction~\cite{baier-2008-model-checking}.
+Huth and Ryan provide a set-based account of CTL fixed points that is useful when implementing the recurrences directly~\cite{huth-2004-logic}.
+The \emph{Handbook of Model Checking} covers symbolic, SAT-based, and abstraction-refinement methods in greater implementation depth~\cite{clarke-2018-handbook}.
+Cousot and Cousot provide the abstract-interpretation foundation for reasoning about sound approximations rather than treating merged states as exact executions~\cite{cousot-1977-abstract}.

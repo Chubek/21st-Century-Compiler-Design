@@ -1,0 +1,330 @@
+\chapter{Predictive Parsing and Grammar Design}
+\label{ch:predictive-grammar}
+
+An identifier can begin an assignment, a call, or a bare expression.
+A parser that selects the first plausible production can discover its mistake only after consuming a shared prefix.
+One response is to retain alternatives and backtrack.
+Another is to design a grammar whose alternatives can be selected before any of them runs.
+This chapter makes the second response mechanical: compute what may begin a production, what may follow it, and whether those sets determine a unique choice.
+The result is both an implementation recipe and a diagnostic for the grammar author.
+
+\section{A lookahead decision is a proof obligation}
+\label{sec:ch50-lookahead}
+
+We use token kinds rather than source characters in this chapter.
+Let the grammar describe a bracketed list of identifiers:
+\begin{align*}
+ S&\to [\ I\ ],\\
+ I&\to \mathit{id}\ T\mid\epsilon,\\
+ T&\to ,\ \mathit{id}\ T\mid\epsilon.
+\end{align*}
+The symbols \code{[}, \code{]}, and \code{,} are terminals; $S,I,T$ are nonterminals.
+The external end marker $\$$ is not a grammar token that the lexer can emit in the middle of a list.
+The language contains \code{[]}, \code{[id]}, and \code{[id,id]}, but excludes \code{[id,]}.
+
+At $I$, an identifier selects the nonempty alternative.
+A closing bracket selects the empty alternative because it belongs to the caller.
+An unrelated token must not select epsilon merely because the parser cannot begin the nonempty alternative.
+Doing so loses the distinction between a legal empty list and an error.
+Figure~\ref{fig:ch50-lookahead} draws the decision at that boundary.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=15mm and 20mm]
+\node[basic block] (i) {parse I};
+\node[basic block,below left=of i] (id) {id T};
+\node[basic block,below=of i] (empty) {epsilon};
+\node[basic block,below right=of i] (error) {error};
+\draw[cfg edge] (i)--node[left,font=\small] {\code{id}}(id);
+\draw[cfg edge] (i)--node[right,font=\small] {\code{]}}(empty);
+\draw[back edge] (i)--node[right,font=\small] {other}(error);
+\end{tikzpicture}
+\caption{Epsilon is selected by the caller's permitted follower, not by a catch-all failure branch.}
+\label{fig:ch50-lookahead}
+\end{figure}
+
+An \term{LL(1) grammar} permits left-to-right scanning and a leftmost derivation with one token of lookahead, under the usual predictive table construction.
+The qualification concerns the grammar, not only its language: a language may have both a convenient LL(1) grammar and another grammar with conflicts.
+Increasing lookahead is also not equivalent to ignoring conflicts and hoping the first rule works~\cite{grune-2008-parsing}.
+
+\section{Compute nullable and FIRST monotonically}
+\label{sec:ch50-first}
+
+A nonterminal is \term{nullable} when it derives the empty string.
+The set $\operatorname{FIRST}(X)$ contains terminals that can begin a nonempty string derived from $X$.
+We keep nullability separate, so epsilon is never accidentally used as a token-table column.
+For a sequence, inspect its symbols from left to right, adding their FIRST sets until reaching a nonnullable symbol.
+The empty sequence is nullable and has an empty FIRST set.
+
+Algorithm~\ref{alg:ch50-first} handles both properties in one monotone iteration.
+For a terminal $a$, initialize $\operatorname{FIRST}(a)=\{a\}$ and mark it nonnullable.
+For nonterminals, initialize both properties to empty or false.
+The algorithm must revisit a production when a symbol later becomes nullable; a single textual pass is insufficient.
+
+\begin{algorithm}[htbp]
+\caption{Compute nullable flags and terminal FIRST sets to a fixed point.}
+\label{alg:ch50-first}
+\begin{pseudocode}
+\Require finite grammar with defined symbols
+\Ensure nullable and FIRST for every nonterminal, excluding epsilon from FIRST
+\State initialize terminal facts; initialize nonterminal facts to empty/false
+\Repeat
+  \State $changed\gets false$
+  \ForAll{productions $A\to X_1\cdots X_k$}
+    \State $all\gets true$
+    \For{$j=1,\ldots,k$}
+      \State union $\operatorname{FIRST}(X_j)$ into $\operatorname{FIRST}(A)$
+      \If{$X_j$ is not nullable}
+        \State $all\gets false$; \Break
+      \EndIf
+    \EndFor
+    \If{$all$}
+      \State mark $A$ nullable
+    \EndIf
+    \State record whether any set or flag changed
+  \EndFor
+\Until{nothing changed}
+\end{pseudocode}
+\end{algorithm}
+
+There are at most $N(t+1)$ facts for $N$ nonterminals and $t$ terminal kinds.
+Every changing sweep adds a fact.
+If $P$ is the number of productions, $L$ the total number of RHS symbol occurrences, and $W$ the machine-word count of a terminal bitset, a direct implementation costs at most $O((N(t+1)+1)(P+LW))$ word operations.
+The $P$ term covers empty productions too.
+Dependency worklists can improve this coarse full-sweep bound.
+
+The proof follows derivation trees.
+Each inserted fact has a finite justification using productions and facts already known.
+Conversely, induction on the height of a finite derivation eventually inserts its nullability or first-token fact.
+Recursive rules with no terminating derivation do not acquire facts simply by referring to themselves.
+For $A\to A$, the result is neither nullable nor able to start with any terminal.
+
+\section{FOLLOW carries the caller's obligations}
+\label{sec:ch50-follow}
+
+The set $\operatorname{FOLLOW}(A)$ contains terminal kinds, or the end marker, that may appear immediately after an occurrence of $A$ in a derivation from the start symbol.
+For the standard table construction, unreachable productions can be removed first; otherwise the usual equations may include conservative extra context from unreachable rules.
+Seed $\operatorname{FOLLOW}(S)$ with the end marker.
+An occurrence $B\to\alpha A\beta$ contributes $\operatorname{FIRST}(\beta)$ to $\operatorname{FOLLOW}(A)$.
+If $\beta$ is nullable, it also contributes $\operatorname{FOLLOW}(B)$.
+Algorithm~\ref{alg:ch50-follow} makes both contributions explicit.
+
+\begin{algorithm}[htbp]
+\caption{Propagate followers through nullable suffixes.}
+\label{alg:ch50-follow}
+\begin{pseudocode}
+\Require reachable grammar, completed nullable/FIRST facts, start $S$
+\Ensure FOLLOW sets including the external end marker
+\State initialize all FOLLOW sets empty; insert end marker in $\operatorname{FOLLOW}(S)$
+\Repeat
+  \ForAll{nonterminal occurrences $B\to\alpha A\beta$}
+    \State union $\operatorname{FIRST}(\beta)$ into $\operatorname{FOLLOW}(A)$
+    \If{$\beta$ is nullable}
+      \State union $\operatorname{FOLLOW}(B)$ into $\operatorname{FOLLOW}(A)$
+    \EndIf
+  \EndFor
+\Until{no set changed}
+\end{pseudocode}
+\end{algorithm}
+
+Precompute suffix FIRST sets and nullable flags by right-to-left scans of each RHS.
+Then a sweep needs $O(LW)$ word operations rather than repeatedly rescanning long suffixes.
+With at most $N(t+1)$ follower memberships, the analogous full-sweep bound is $O((N(t+1)+1)LW)$ after preprocessing.
+Table~\ref{tab:ch50-sets} gives the exact facts for our list grammar.
+The closing bracket flows from $S$ to $I$, then through the nullable suffix of $I\to\mathit{id}\ T$ to $T$.
+The comma belongs to FIRST of $T$, not FOLLOW of $I$.
+
+\begin{table}[htbp]
+\caption{The list grammar separates nonempty beginnings from legal empty returns.}
+\label{tab:ch50-sets}
+\centering
+\begin{tabular}{llll}
+\toprule
+Nonterminal & Nullable & FIRST & FOLLOW \\
+\midrule
+$S$ & no & $\{[\}$ & $\{\$\}$ \\
+$I$ & yes & $\{\mathit{id}\}$ & $\{]\}$ \\
+$T$ & yes & $\{,\}$ & $\{]\}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Construct the table and expose conflicts}
+\label{sec:ch50-table}
+
+For each production $A\to\alpha$, its selection set is
+\[
+ \operatorname{SELECT}(A\to\alpha)=\operatorname{FIRST}(\alpha)
+ \cup
+ \begin{cases}
+ \operatorname{FOLLOW}(A),&\alpha\text{ nullable},\\
+ \emptyset,&\text{otherwise}.
+ \end{cases}
+\]
+Insert the production into every table cell $(A,a)$ named by that set.
+A cell with two distinct productions is a conflict to report, not an invitation to overwrite the earlier entry.
+Table~\ref{tab:ch50-table} lists all populated cells; all other cells are errors.
+
+\begin{table}[htbp]
+\caption{Every populated predictive-table cell contains exactly one production.}
+\label{tab:ch50-table}
+\centering
+\begin{tabular}{lll}
+\toprule
+Nonterminal & Lookahead & Production \\
+\midrule
+$S$ & \code{[} & $S\to[\ I\ ]$ \\
+$I$ & identifier & $I\to\mathit{id}\ T$ \\
+$I$ & \code{]} & $I\to\epsilon$ \\
+$T$ & \code{,} & $T\to,\ \mathit{id}\ T$ \\
+$T$ & \code{]} & $T\to\epsilon$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two different failure modes matter.
+Alternatives $A\to\mathit{id}\ =\ E\mid\mathit{id}\ (\ Args\ )$ share FIRST and need factoring or more lookahead.
+In $A\to B\mid\epsilon$ with $B$ starting in a token also in FOLLOW of $A$, the conflict involves the empty return path.
+Factoring a common nonempty prefix does not automatically remove this second kind of conflict.
+
+Left factoring rewrites the first example as $A\to\mathit{id}\ R$ with $R\to=\ E\mid(\ Args\ )$.
+The decision moves to the point after the identifier.
+Figure~\ref{fig:ch50-factoring} makes that relocation visible.
+It preserves recognition, but the semantic action building the assignment or call must now obtain the identifier from the outer context.
+Grammar rewriting without corresponding tree-construction changes can preserve accepted strings and still build wrong ASTs.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=24mm,y=12mm]
+\node[basic block] (old) at (0,1) {A};
+\node[basic block] (o1) at (2,2) {id = E};
+\node[basic block] (o2) at (2,0) {id (Args)};
+\draw[cfg edge] (old)--(o1); \draw[cfg edge] (old)--(o2);
+\node[basic block] (new) at (0,-2) {A: id R};
+\node[basic block] (n1) at (2,-1) {R: = E};
+\node[basic block] (n2) at (2,-3) {R: (Args)};
+\draw[cfg edge] (new)--node[above,font=\small] {lookahead =}(n1);
+\draw[cfg edge] (new)--node[below,font=\small] {lookahead (}(n2);
+\node[font=\small,anchor=west] at (3,1) {same first token};
+\node[font=\small,anchor=west] at (3,-2) {decision after id};
+\end{tikzpicture}
+\caption{Factoring delays a choice until the distinguishing token is visible, while the shared identifier is consumed once.}
+\label{fig:ch50-factoring}
+\end{figure}
+
+\section{Drive an explicit predictive stack}
+\label{sec:ch50-driver}
+
+A recursive-descent implementation can encode each table row as a switch.
+An explicit stack instead stores the unprocessed sentential suffix.
+Algorithm~\ref{alg:ch50-driver} gives a recognizer; AST construction adds reduction markers carrying children and source spans.
+The grammar must be well formed and have a conflict-free predictive table, without useless nonprogress cycles.
+
+\begin{algorithm}[htbp]
+\caption{Recognize with a conflict-free predictive table.}
+\label{alg:ch50-driver}
+\begin{pseudocode}
+\Require token sequence with one end marker, start $S$, predictive table $M$
+\Ensure accept exactly when the entire sequence derives from $S$
+\State stack $\gets [S,end]$, with top at the left; cursor $i\gets0$
+\While{stack is nonempty}
+  \State $X\gets$ pop stack; $a\gets$ lookahead at $i$
+  \If{$X$ is a terminal or end marker}
+    \If{$X\neq a$} \State \Return syntax error \EndIf
+    \State $i\gets i+1$
+  \Else
+    \If{$M[X,a]$ is empty} \State \Return syntax error \EndIf
+    \State push the selected RHS in reverse order, omitting epsilon
+  \EndIf
+\EndWhile
+\State \Return accept
+\end{pseudocode}
+\end{algorithm}
+
+On \code{[id,id]}, the stack begins $[S,\$]$.
+After expanding $S$ and matching the opening bracket it is $[I,],\$]$.
+Selecting and matching the first identifier leaves $[T,],\$]$.
+The comma selects $T\to,\ \mathit{id}\ T$; after those two terminals the same stack shape recurs with a closing-bracket lookahead.
+The epsilon production pops $T$, then the bracket and end marker match.
+The expansion sequence is $S$, nonempty $I$, nonempty $T$, empty $T$.
+The cursor never moves backward.
+
+For a fixed suitable grammar, predictive parsing takes linear time in the token count: each expansion contributes bounded grammar work, and nonprogress expansion chains have a grammar-dependent bound.
+When grammar size is also variable, state the bound as token matches plus the total length of expanded right-hand sides, rather than hiding large productions in a constant.
+AST storage is proportional to the nodes actually constructed; the explicit pending-symbol stack can still grow with input nesting.
+
+\section{Associativity lives in the AST construction}
+\label{sec:ch50-associativity}
+
+The grammar $E\to E-\mathit{num}\mid\mathit{num}$ is directly left recursive.
+A naive top-down function calls itself before consuming input.
+The language-equivalent form $E\to\mathit{num}\ R$, $R\to-\mathit{num}\ R\mid\epsilon$ terminates predictively, but its right-recursive concrete tree does not prescribe a right-associative AST.
+Build an initial numeric node and fold each encountered subtraction into a new left child/root pair.
+For \code{20-6-3}, the left fold computes $(20-6)-3=11$.
+A right-associated AST computes $20-(6-3)=17$.
+Figure~\ref{fig:ch50-assoc} shows why recognition alone cannot test the transformation.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=11mm,y=11mm]
+\node[basic block] (l) at (0,0) {Sub};
+\node[basic block] (ll) at (-1.5,-1.5) {Sub};
+\node (a) at (-2.5,-3) {20}; \node (b) at (-0.5,-3) {6}; \node (c) at (1.5,-1.5) {3};
+\draw[cfg edge] (l)--(ll); \draw[cfg edge] (ll)--(a); \draw[cfg edge] (ll)--(b); \draw[cfg edge] (l)--(c);
+\node[basic block] (r) at (6,0) {Sub};
+\node (d) at (4.5,-1.5) {20}; \node[basic block] (rr) at (7.5,-1.5) {Sub};
+\node (e) at (6.5,-3) {6}; \node (f) at (8.5,-3) {3};
+\draw[cfg edge] (r)--(d); \draw[cfg edge] (r)--(rr); \draw[cfg edge] (rr)--(e); \draw[cfg edge] (rr)--(f);
+\node at (0,-4) {left fold: $11$}; \node at (6,-4) {right grouping: $17$};
+\end{tikzpicture}
+\caption{The same token sequence permits different results unless AST construction preserves the intended associativity.}
+\label{fig:ch50-assoc}
+\end{figure}
+
+Precedence layers similarly encode which subparser may consume which operators.
+Pratt parsing and precedence climbing express this through binding powers rather than separate grammar functions.
+Either approach needs explicit policies for equal precedence, prefix operators, postfix operators, and nonassociative comparisons.
+Test tree shapes, not just whether a string was accepted.
+
+\section{Recovery must preserve progress and report damage}
+\label{sec:ch50-recovery}
+
+On \code{[id,]}, the comma has already committed the parser to another identifier.
+The mismatch at the bracket is therefore an expected-identifier error, not permission to return from the tail.
+For a compiler continuing after errors, one possible policy inserts an error-node identifier before that bracket and lets the caller consume the bracket normally.
+The recovered tree is marked invalid for code generation.
+It is not a successful parse of the original grammar.
+
+\begin{algorithm}[htbp]
+\caption{Synchronize a failed nonterminal without consuming a caller's delimiter.}
+\label{alg:ch50-recover}
+\begin{pseudocode}
+\Require failed nonterminal $A$, token cursor, synchronization set containing end
+\Ensure invalid placeholder and progress by popping $A$ or consuming input
+\State emit one diagnostic at the current token
+\While{lookahead is not in the synchronization set}
+  \State consume one token
+\EndWhile
+\State discard the pending expansion of $A$
+\State return an error node without consuming the synchronization token
+\end{pseudocode}
+\end{algorithm}
+
+Algorithm~\ref{alg:ch50-recover} terminates because the end marker belongs to its stop set.
+The caller must actually remove the failed stack frame; retrying the same expansion on the same delimiter would loop.
+FOLLOW sets provide candidate synchronization tokens, but nesting and language-specific statement boundaries often require a more selective policy.
+Diagnostic suppression for cascades is an interface decision and must not silently turn a damaged tree into a valid compilation unit.
+
+\section{Exercises}
+\label{sec:ch50-exercises}
+\begin{enumerate}
+\item\label{ex:ch50-three} Trace \code{[id,id,id]} with Algorithm~\ref{alg:ch50-driver}. Count production expansions and terminal matches, including end.
+\item\label{ex:ch50-conflict} For $S\to A\ \mathit{id}$ and $A\to\mathit{id}\mid\epsilon$, compute SELECT of both $A$ productions and identify the conflicting cell.
+\item\label{ex:ch50-fold} Compute left and right groupings of \code{30-8-5}; describe the accumulator update that selects the left grouping.
+\item\label{ex:ch50-recovery} On \code{[id,,id]}, synchronize at comma, bracket, or end. Explain why popping the failed identifier obligation is necessary before leaving the comma unconsumed.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch50-reading}
+Grune and Jacobs compare grammar transformations and predictive methods, emphasizing the difference between a grammatical language and a parsing strategy~\cite{grune-2008-parsing}.
+Hopcroft, Motwani, and Ullman supply the context-free grammar and pushdown-machine background~\cite{hopcroft-2007-automata}.

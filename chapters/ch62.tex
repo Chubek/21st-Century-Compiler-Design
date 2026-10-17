@@ -1,0 +1,215 @@
+\chapter{Declarative Optimization and Equality Saturation}
+\label{ch:equality-saturation}
+
+Simplifying an expression can expose one optimization while hiding another.
+Expanding $a(b+c)$ reveals separate products; factoring $ab+ac$ reveals a shared multiplier.
+A destructive rewrite chooses one representation and discards the other unless it keeps an explicit history.
+An equality-based optimizer can retain both and postpone selection until it knows more about the target cost.
+The difficulty moves from choosing rewrite order to controlling search, proving each equality, and extracting a realizable program.
+
+\section{A rule is a semantic claim}
+\label{sec:ch62-rules}
+
+Our runnable example uses total, pure arithmetic modulo $256$.
+Every addition and multiplication returns its low eight bits, variables denote byte values, and evaluating an operand has no side effects or traps.
+Under this contract, $x+0=x$, $x\cdot1=x$, and $x\cdot0=0$ hold for every input.
+The last rule is not a general license to erase an effectful operand: evaluating \code{read()} and multiplying its result by zero still consumes input.
+
+A declarative rule has a pattern, a replacement, and semantic conditions.
+Those conditions may involve types, arithmetic flags, alias facts, or effect summaries.
+Table~\ref{tab:ch62-legality} contrasts the byte model with richer IRs.
+Rules do not acquire validity from looking algebraic.
+Floating-point reassociation, for example, changes rounding and may interact with NaNs and signed zero.
+
+\begin{table}[htbp]
+\caption{Rewrite legality depends on the operation's full contract.}
+\label{tab:ch62-legality}
+\centering
+\begin{tabular}{ll}
+\toprule
+Candidate & Required justification \\
+\midrule
+$x+0 \to x$ & correct numeric and exceptional semantics \\
+$x\cdot0 \to0$ & discarded evaluation has no required behavior \\
+load reuse & same bytes and compatible intervening effects \\
+reassociation & exact arithmetic or an explicit relaxation \\
+guard removal & assumption proved on every reaching path \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Represent equivalence without enumerating trees}
+\label{sec:ch62-structure}
+
+An \term{e-class} represents expressions known equal under the chosen semantics.
+An \term{e-node} records an operator and a tuple of child e-classes.
+An \term{e-graph} stores these classes and nodes while maintaining congruence: equal arguments to the same pure operator produce equal results.
+This compactly shares families of equivalent expressions, although the graph can still grow beyond any useful memory budget~\cite{willsey-2021-egg}.
+
+Start with $(x+0)\cdot1$.
+Create classes for $x$, $0$, $1$, $x+0$, and the product.
+Applying the additive identity merges the class of $x+0$ with the class of $x$.
+Applying the multiplicative identity merges the product with the class of its first operand.
+The final root class contains a one-node representative $x$ and longer equivalent representatives.
+Figure~\ref{fig:ch62-class} depicts these alternatives without claiming that each class is a distinct runtime operation.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=14mm]
+\node[basic block] (root) {root e-class};
+\node[basic block,below left=of root] (x) {x};
+\node[basic block,below=of root] (add) {add(root, zero)};
+\node[basic block,below right=of root] (mul) {mul(root, one)};
+\draw[cfg edge] (root)--(x); \draw[cfg edge] (root)--(add); \draw[cfg edge] (root)--(mul);
+\end{tikzpicture}
+\caption{Identity rewrites put several finite expressions in one class; recursive class references also describe longer alternatives.}
+\label{fig:ch62-class}
+\end{figure}
+
+Union-find tracks class identities, and a hash-consing table maps canonical operator/child tuples to their classes.
+After merging child classes, two formerly distinct parent tuples may become equal.
+The memo table is then stale until the implementation repairs congruence.
+This repair is called \term{rebuilding}.
+The companion uses repeated whole-graph scans for clarity; optimized implementations maintain affected-parent worklists and batch repairs~\cite{willsey-2021-egg}.
+
+\begin{algorithm}[htbp]
+\caption{Rebuild congruence after class unions.}
+\label{alg:ch62-rebuild}
+\begin{pseudocode}
+\Require finite e-node list, union-find class relation
+\Ensure equal canonical e-nodes have the same owning class
+\Repeat
+  \State clear memo table; $changed\gets false$
+  \ForAll{e-nodes $n$ with owner $c$}
+    \State replace each child ID in $n$ by its current representative
+    \If{the canonical node already has owner $d$ in the memo table}
+      \State union $c$ and $d$; record whether a new merge occurred
+    \Else
+      \State insert the canonical node with owner $c$
+    \EndIf
+  \EndFor
+\Until{no new merge occurred}
+\State canonicalize memo-table owners
+\end{pseudocode}
+\end{algorithm}
+
+Algorithm~\ref{alg:ch62-rebuild} terminates because every productive scan reduces the number of classes.
+With $C$ allocated class IDs and $N$ bounded-arity e-nodes, it needs at most $C$ scans.
+Bounding each representative lookup by $O(C)$ gives a deliberately loose $O(C^2N)$ bound with expected constant-time hashing; path compression improves actual lookup behavior.
+Production union-by-rank and incremental rebuilding have substantially better behavior; the demonstration is not a complexity model for \code{egg}.
+
+\section{Saturate within a resource budget}
+\label{sec:ch62-budget}
+
+\term{Equality saturation} repeatedly matches sound rules, adds replacement nodes, and merges equivalent classes.
+Stopping because no applicable rule changes the graph differs from stopping because a time, node, or iteration limit has expired.
+Both can yield a correct extracted program; only the former is a fixed point of the rules actually searched.
+Neither establishes that all semantic equalities have been discovered.
+
+The companion applies constant folding and the three identities above.
+It deliberately omits expansive distributivity rules so its small examples remain inspectable.
+Table~\ref{tab:ch62-trace} records the identity example under unit cost per expression-tree node.
+The implementation reports budget exhaustion separately from saturation and preserves a finite original representative.
+
+\begin{table}[htbp]
+\caption{The root's cheapest known tree becomes smaller as equalities are added.}
+\label{tab:ch62-trace}
+\centering
+\begin{tabular}{lll}
+\toprule
+Known equality & Root representative & Tree cost \\
+\midrule
+initial graph & $(x+0)\cdot1$ & $5$ \\
+$x+0=x$ & $x\cdot1$ & $3$ \\
+$x\cdot1=x$ & $x$ & $1$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Analysis facts attached to an e-class need their own merge semantics.
+A constant-value analysis must distinguish an unknown constant from a known zero.
+Discovering two different byte constants in one class signals an invalid equality or a broken implementation, not a reason to choose one arbitrarily.
+Conditional rules must use facts valid for every represented expression under the rule's interpretation.
+Joining may-properties as though they were must-properties is a common way to introduce unsound rules.
+
+\section{Extract a finite executable representative}
+\label{sec:ch62-extraction}
+
+Class cycles are normal: merging $x$ with $x+0$ makes a node refer to its own class.
+A recursive tree traversal without a cost fixed point can loop forever.
+For strictly positive additive node costs, begin with infinite cost for each class and relax a node only when all child classes have finite witnesses.
+Algorithm~\ref{alg:ch62-extract} records the chosen finite tree with each improvement.
+A cycle without any grounded leaf has no finite extraction.
+
+\begin{algorithm}[htbp]
+\caption{Extract a minimum-cost finite tree from a fixed e-graph.}
+\label{alg:ch62-extract}
+\begin{pseudocode}
+\Require rebuilt graph, positive additive node costs, root class $r$
+\Ensure minimum finite tree cost for $r$, or no finite witness
+\State initialize every class cost to infinity
+\Repeat
+  \State $changed\gets false$
+  \ForAll{nodes whose child classes have finite costs}
+    \State $candidate\gets$ node cost plus the sum of child costs
+    \If{$candidate$ is smaller than the owning class cost}
+      \State store the candidate cost and its finite witness tree
+      \State $changed\gets true$
+    \EndIf
+  \EndFor
+\Until{no cost changes}
+\State \Return the root's cost and witness, if finite
+\end{pseudocode}
+\end{algorithm}
+
+A minimum tree need not repeat an e-class along a root-to-leaf path: the lower occurrence is itself a cheaper witness for the repeated class because costs are positive.
+Thus at most $C$ levels are necessary for $C$ classes.
+With bounded operator arity, at most $C+1$ relaxation scans suffice, for $O(CN)$ scalar cost work on a canonical graph.
+Explicitly copying witness trees can cost much more than this, even exponentially in the number of classes when subtrees are duplicated.
+An implementation should normally keep backpointers or immutable shared witnesses and charge separately for final output size.
+
+The minimum tree is not necessarily the minimum machine program.
+Shared subexpressions, register pressure, instruction combinations, and placement make machine cost non-additive.
+A negative cost would invalidate the termination argument; a learned estimator can also change ranking without proving equivalence.
+Figure~\ref{fig:ch62-gates} keeps the sound equality engine separate from profitability estimates.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=13mm]
+\node[basic block] (rules) {verified rules and side conditions};
+\node[basic block,below=of rules] (graph) {bounded equality search};
+\node[basic block,below=of graph] (extract) {cost-guided finite extraction};
+\node[basic block,below=of extract] (emit) {schedule, allocate, validate};
+\draw[cfg edge] (rules)--(graph); \draw[cfg edge] (graph)--(extract); \draw[cfg edge] (extract)--(emit);
+\end{tikzpicture}
+\caption{A cost model ranks legal alternatives; it does not authorize new equalities.}
+\label{fig:ch62-gates}
+\end{figure}
+
+\section{Implementation and exercises}
+\label{sec:ch62-exercises}
+
+The \code{EGraph} companion implements class union, canonicalization, rebuilding, bounded rewriting, and positive-cost extraction.
+The tests compare the original and extracted identity expressions at all $256$ byte inputs, fold $256$ multiplication examples, check congruence, and reject an ungrounded cycle.
+This is finite evidence for the supplied rules and implementation, not a proof of arbitrary added rules.
+Chapter~\ref{ch:profile-spatial-compilation} develops the separate problem of estimating target cost.
+The rewriting sequence beginning in Chapter~\ref{ch:abstract-string-rewriting} distinguishes destructive normalization, termination, confluence, and completion.
+Chapter~\ref{ch:term-graph-rewriting} explains ordinary sharing and cyclic read-back; those graphs represent computations rather than equivalence classes of alternative computations.
+Chapter~\ref{ch:rewrite-strategies} compares their rule-engine scheduling obligations with equality saturation.
+
+\begin{enumerate}
+\item\label{ex:ch62-wrap} Fold $250+13$ and then multiply by $13$ in byte arithmetic.
+Give both folded constants and their expression-tree costs after saturation.
+\item\label{ex:ch62-congruence} Classes $a$ and $b$ are merged after nodes $f(a)$ and $f(b)$ were interned separately.
+Explain what rebuilding must do and why updating only the union-find parents is insufficient.
+\item\label{ex:ch62-cycle} A class contains only \code{add(self,self)}.
+Does it have a finite tree representative? Explain the extraction result.
+\item\label{ex:ch62-effects} Show why rewriting $0\cdot f()$ to zero can change a program even when multiplication itself cannot trap.
+Give an effect condition sufficient for the byte-model rule.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch62-reading}
+
+The \code{egg} paper explains rebuilding, e-class analyses, and the practical organization of equality saturation~\cite{willsey-2021-egg}.
+The separation between program meaning and search cost also connects to the transformation-validation methods developed earlier in the book.

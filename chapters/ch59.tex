@@ -1,0 +1,299 @@
+\chapter{Dynamic Linking, Loading, TLS, and Link-Time Transformations}
+\label{ch:dynamic-linking}
+
+A statically linked image can resolve every ordinary reference before execution.
+A shared library may not know either its load address or the particular definition that will satisfy a globally visible name.
+Its instructions must therefore cooperate with a runtime linker rather than assuming that all fields are final.
+This changes symbol lookup, address formation, initialization, and ownership of the tables that contain writable addresses.
+It also changes which optimizations a static linker can justify.
+
+The Lua-mapped linker developed in this sequence emits static executables.
+This chapter studies the additional runtime protocol using the ELF and AMD64 specifications and a separate executable experiment with the host dynamic loader~\cite{xinuos-2026-elf,matz-2012-amd64}.
+Keeping that distinction explicit prevents a static relocation patcher from being mistaken for a shared-library implementation.
+
+\section{Load bias and relative addressing solve different problems}
+\label{sec:ch59-bias}
+
+Suppose a shared object's linked virtual layout is loaded with bias $B$.
+A symbol at linked virtual address $S_0$ then has runtime address $B+S_0$ when it binds within that object.
+A PC-relative reference from $P_0$ has difference
+\[
+ (B+S_0)-(B+P_0)=S_0-P_0.
+\]
+The common bias cancels, so an internal relative reference can remain unchanged.
+An absolute pointer stored in data still needs the bias incorporated somewhere.
+Figure~\ref{fig:ch59-bias} distinguishes the unchanged displacement from the changed pointer.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=15mm and 23mm]
+\node[basic block] (p) {place P}; \node[basic block,right=of p] (s) {symbol S};
+\node[basic block,below=of p] (bp) {place B+P}; \node[basic block,right=of bp] (bs) {symbol B+S};
+\draw[cfg edge] (p)--node[above=3mm,font=\small] {difference S-P}(s);
+\draw[cfg edge] (bp)--node[below=3mm,font=\small] {same difference}(bs);
+\draw[dashed,->] (p)--node[left,font=\small] {load bias}(bp);
+\draw[dashed,->] (s)--node[right,font=\small] {pointer changes}(bs);
+\end{tikzpicture}
+\caption{A common load bias cancels from internal PC-relative differences but remains in absolute pointer values.}
+\label{fig:ch59-bias}
+\end{figure}
+
+This argument assumes that the selected symbol belongs at the assumed relative position.
+If runtime symbol lookup interposes a definition in another shared object, the bases need not cancel.
+Position independence and nonpreemptability are therefore separate properties.
+An instruction sequence valid for a hidden local definition may be invalid for a preemptable global name even when both are located in the same input source file before linking.
+
+\section{The dynamic section is a runtime directory}
+\label{sec:ch59-dynamic-section}
+
+The program interpreter named by \code{PT\_INTERP}, when present, participates in establishing the process image.
+Dynamic objects expose tables through their dynamic metadata: dependencies, dynamic symbols and strings, hashes, relocations, and initialization information.
+The runtime linker follows these loader-facing structures rather than relying on the section-header table that a static analysis tool might display.
+An executable can be stripped of many section names while retaining the dynamic information needed to run.
+
+The exact dependency search path is operating-system and runtime-linker policy.
+Environment variables, embedded search paths, cache files, and privileged-execution rules are not universal ELF formulas.
+A book example should name the runtime being observed instead of presenting one loader's path order as a property of all linkers.
+Our executable experiment uses the Linux/POSIX \code{dlopen} interface with an explicit file path.
+
+Table~\ref{tab:ch59-records} separates information used for static linking from information required at runtime.
+The same conceptual symbol can appear in both a full symbol table and a smaller dynamic symbol table with different index spaces.
+A dynamic relocation must refer to the table specified by its runtime contract, not an arbitrary index retained from a relocatable input.
+
+\begin{table}[htbp]
+\caption{Dynamic loading consumes runtime metadata rather than replaying the original static link command.}
+\label{tab:ch59-records}
+\centering
+\begin{tabular}{p{0.29\linewidth}p{0.58\linewidth}}
+\toprule
+Structure & Principal role \\
+\midrule
+Input section table & Describes relocatable contributions for link editing. \\
+Program headers & Describe mappings and runtime metadata locations. \\
+Dynamic symbol table & Supplies symbols participating in runtime lookup. \\
+Dynamic relocations & Describe fields still requiring runtime work. \\
+Dependency entries & Name shared-object dependencies under loader policy. \\
+Initialization records & Identify runtime initialization/finalization work. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{GOT entries centralize mutable addresses}
+\label{sec:ch59-got}
+
+A global offset table can hold runtime-resolved addresses outside otherwise shareable text.
+An instruction reaches a nearby table slot through a position-independent addressing sequence and loads the final pointer from that slot.
+This separates the code bytes from a process-specific binding decision.
+It does not eliminate relocation work: it moves that work to a data structure whose mutability and lifetime can be managed explicitly.
+
+Consider a table slot at linked address \code{0x3000}, with a runtime definition selected at \code{0x7F0012345000}.
+The runtime relocation writes that selected address into the slot.
+Every use site that accesses the slot then observes the same binding.
+If a call instruction instead encoded a fixed direct displacement to a different object, moving either object or changing the selected definition could invalidate the call.
+
+The exact GOT-related relocation formulas are architecture-specific.
+Some refer to the address of a symbol's slot, some to the GOT base, and some express the slot's displacement from the instruction.
+The names cannot be interpreted by a generic rule such as \enquote{write the symbol address minus the table base}.
+The AMD64 supplement distinguishes these values explicitly~\cite{matz-2012-amd64}.
+
+\section{PLT binding is a state transition}
+\label{sec:ch59-plt}
+
+A procedure linkage table provides call stubs that cooperate with runtime binding.
+Under a lazy-binding policy, an unresolved slot initially routes a call into the runtime resolver.
+After lookup, the slot can be updated so later calls reach the selected function through a shorter path.
+Under eager binding, the runtime resolves the relevant slots before transferring control to ordinary program code.
+These policies move work between startup and first use; neither guarantees better total performance for every workload.
+
+Figure~\ref{fig:ch59-lazy} depicts the state transition without committing to one processor's exact stub instruction sequence.
+Concurrent first calls require synchronization consistent with the runtime's rules.
+Auditing, profiling, or interposition facilities can also affect whether a slot is permanently rewritten.
+An implementation should not assume that a conceptual lazy-binding diagram is a complete description of every production loader.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=16mm and 22mm]
+\node[basic block] (call) {call site};
+\node[basic block,right=of call] (slot) {PLT / address slot};
+\node[basic block,below left=of slot] (resolver) {runtime resolver};
+\node[basic block,below right=of slot] (fun) {chosen function};
+\draw[cfg edge] (call)--(slot);
+\draw[dashed,->] (slot)--node[left,font=\small,fill=white,inner sep=2pt] {unresolved}(resolver);
+\draw[cfg edge] (resolver)--node[below,font=\small] {select and publish}(fun);
+\draw[cfg edge] (slot)--node[right,font=\small,fill=white,inner sep=2pt] {resolved}(fun);
+\end{tikzpicture}
+\caption{Lazy binding changes a runtime indirection after lookup; eager binding performs that work before first use.}
+\label{fig:ch59-lazy}
+\end{figure}
+
+\section{Runtime lookup is not static strong-over-weak merging}
+\label{sec:ch59-lookup}
+
+The static resolution table in Chapter~\ref{ch:link-symbols} gives strong definitions precedence over weak ones.
+Runtime lookup additionally depends on an ordered search scope, visibility, version requirements, and the loader's binding policy.
+It is not generally implemented by collecting every loaded definition and selecting the globally strongest one.
+An earlier eligible runtime definition can determine a binding even when another loaded object has a different definition with the same spelling.
+Platform rules must be consulted before treating static weak-symbol intuition as a dynamic lookup algorithm.
+
+\begin{algorithm}[htbp]
+\caption{Resolve a runtime reference under an explicitly supplied lookup policy.}
+\label{alg:ch59-lookup}
+\begin{pseudocode}
+\Require name/version request, ordered lookup scope, platform eligibility and binding policy
+\Ensure a permitted runtime definition or a policy-defined unresolved outcome
+\ForAll{objects in the lookup scope's declared order}
+  \State query the object's dynamic symbol index for the requested name
+  \ForAll{candidate entries}
+    \State check definition state, visibility, version, and permitted symbol kind
+    \If{the policy selects this eligible candidate}
+      \State \Return its runtime definition
+    \EndIf
+  \EndFor
+\EndFor
+\State apply the platform's missing-symbol rule for this reference
+\end{pseudocode}
+\end{algorithm}
+
+Algorithm~\ref{alg:ch59-lookup} intentionally exposes policy as input rather than inventing a universal ELF search order.
+With $D$ objects in the scope and $H$ the total work of their hash/index queries and candidate checks, its search cost is $O(D+H)$.
+Real loaders cache results, use version-aware hash tables, and special-case local or relative relocations that need no global lookup.
+Those fast paths preserve the same distinction between locating a name and computing a field value.
+
+\section{Relative relocations and initialization order}
+\label{sec:ch59-relocation}
+
+A relative relocation often needs only the object's load bias and an addend.
+On AMD64, \code{R\_X86\_64\_RELATIVE} computes $B+A$.
+It does not require a name search for an ordinary external symbol.
+Grouping or compactly representing such relocations can reduce loader overhead, but the encoding and permitted ordering are ABI details.
+Table~\ref{tab:ch59-runtime-reloc} contrasts common runtime tasks.
+
+\begin{table}[htbp]
+\caption{Runtime relocations differ in whether they need symbol lookup or only a load bias.}
+\label{tab:ch59-runtime-reloc}
+\centering
+\begin{tabular}{lll}
+\toprule
+AMD64 operation & Representative value & Needed information \\
+\midrule
+RELATIVE & $B+A$ & object's load bias \\
+GLOB\_DAT & $S$ & selected symbol address \\
+JUMP\_SLOT & $S$ & selected callable definition \\
+TLS-related relocation & ABI-specific & module/thread-relative information \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+After mappings and required relocation work are ready, initialization functions can run under the runtime's dependency and cycle rules.
+Dependencies with cycles cannot all satisfy a strict \enquote{every dependency initializes first} ordering.
+The loader needs an explicit cycle policy and must avoid reentering the same initialization indefinitely.
+Finalization and unloading similarly involve dependency, reference, and lifetime rules rather than a universal reversal of the static link command.
+
+Code that obtains a function pointer from a dynamically loaded object must not continue calling it after that object's code is unloaded.
+Reference counts, retained handles, and application synchronization are therefore part of the runtime interface.
+Relocation correctness alone does not establish lifetime correctness.
+Chapter~\ref{ch:extension-models} turns that requirement into a versioned plugin-table contract: the retained loader handle owns the validity interval of its function entries and object destructors.
+Its native test rejects incompatible table requests and unloads only after the last table use.
+
+\section{TLS adds a thread coordinate}
+\label{sec:ch59-tls}
+
+An ordinary global object has one address within a process mapping.
+A \term{thread-local storage} object has a distinct instance for each thread.
+The linker can describe the variable's offset within a TLS template, but the eventual address also depends on which thread is accessing it.
+The runtime must copy initialized TLS bytes and zero the remaining TLS extent for the relevant thread storage.
+ELF uses a TLS program-header description for the initialization template~\cite{xinuos-2026-elf}.
+
+Figure~\ref{fig:ch59-tls} uses a template offset of $24$.
+Thread one and thread two have different TLS block bases, so the same offset identifies different addresses.
+Treating the symbol as an ordinary process-wide absolute address would make the threads share storage incorrectly.
+Different TLS access models trade flexibility for cheaper address formation, under assumptions about when a module becomes known and how storage is allocated.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm]
+\node[basic block] (template) at (0,0) {TLS variable: template +24};
+\node[basic block] (a) at (-3,-1.7) {thread 1 base: 0x710000};
+\node[basic block] (b) at (3,-1.7) {thread 2 base: 0x720000};
+\node[basic block] (av) at (-3,-3.4) {instance: 0x710018};
+\node[basic block] (bv) at (3,-3.4) {instance: 0x720018};
+\draw[cfg edge] (template)--(a); \draw[cfg edge] (template)--(b);
+\draw[cfg edge] (a)--(av); \draw[cfg edge] (b)--(bv);
+\end{tikzpicture}
+\caption{One TLS symbol offset denotes different concrete storage in different threads.}
+\label{fig:ch59-tls}
+\end{figure}
+
+The runnable experiment in \path{dynamic-lib.c} defines a thread-local counter initialized to $37$ and exports a function returning and incrementing it.
+The loader driver calls once in the main thread, twice in a worker thread, then once more in the main thread after joining the worker.
+The observed per-thread sequences are both $37,38$.
+The driver uses eager local loading, checks the dynamic lookup error state, and closes the library only after the worker has finished.
+Both GCC and Clang builds execute this experiment; it uses the host runtime loader, not our static case-study linker.
+
+\section{Link-time garbage collection follows references from roots}
+\label{sec:ch59-gc}
+
+After archive extraction, a linker can discard unreachable allocated sections under an appropriate root policy.
+Relocations induce edges from a referencing section to the section containing the selected target.
+The entry section, explicitly retained sections, and other ABI- or export-required sections supply roots.
+Initialization arrays and externally discoverable entry points may need explicit retention even when ordinary code references do not reveal them.
+GNU scripts provide \code{KEEP} for such cases~\cite{gnu-2026-ld}.
+
+\begin{algorithm}[htbp]
+\caption{Compute live input sections from a declared root and reference policy.}
+\label{alg:ch59-section-gc}
+\begin{pseudocode}
+\Require selected objects, resolved relocation targets, complete root set and implicit edges
+\Ensure every section reachable under that policy remains live
+\State mark roots and place them on a worklist
+\While{the worklist is nonempty}
+  \State remove section $s$
+  \ForAll{reference edges $s\to t$}
+    \If{$t$ is unmarked}
+      \State mark $t$ and add it to the worklist
+    \EndIf
+  \EndFor
+\EndWhile
+\State discard only unmarked discardable sections; recompute layout afterward
+\end{pseudocode}
+\end{algorithm}
+
+With $V$ sections and $E$ reference edges, Algorithm~\ref{alg:ch59-section-gc} costs $O(V+E)$ using adjacency lists.
+The difficult correctness premise is that the root/edge policy captures all required uses.
+An inline assembly convention, a runtime registration table, or a symbol found by name can violate a naive \enquote{only direct calls matter} graph.
+Graph traversal is easy once the graph is sound; discovering the right graph is the toolchain-specific part.
+
+\section{Folding and LTO require stronger equivalence arguments}
+\label{sec:ch59-transforms}
+
+Identical-code folding cannot rely solely on equal unrelocated bytes.
+Two byte-identical functions can contain relocation placeholders naming different callees.
+Their relocation targets, addends, associated metadata, and address-significance policy can distinguish them.
+Conversely, different input symbol indices can still name equivalent selected targets, so raw relocation-record bytes can be too strict a comparison.
+An iterative structural comparison may be needed when candidate functions refer to other candidates.
+
+Even code with identical behavior can have observably distinct addresses under a language or toolchain contract.
+Folding those addresses requires either a permitted optimization policy or evidence that the addresses are not significant.
+Debugging, unwind, exception, and profiling records must also be updated consistently.
+This is another example of a transformation preserving more than just instruction bytes.
+
+LTO moves some compiler work into the link pipeline by retaining an intermediate representation until more whole-program information is available.
+It can enable cross-module inlining and dead-code elimination before machine code is finalized.
+Assembly objects, opaque libraries, dynamic interposition, and externally visible symbols still constrain what that \enquote{whole program} means.
+The linker must coordinate final code generation with ordinary object selection and relocation rather than treating IR files as already encoded sections.
+
+\section{Exercises}
+\label{sec:ch59-exercises}
+\begin{enumerate}
+\item\label{ex:ch59-bias} Add bias \code{0x400000} to place \code{0x1200} and target \code{0x1280}. Compute the old and new relative differences and the new absolute target.
+\item\label{ex:ch59-tls} Compute both TLS addresses in Figure~\ref{fig:ch59-tls} for offset 40 instead of 24. Explain why one ordinary absolute relocation cannot represent both.
+\item\label{ex:ch59-gc} For edges entry to a, a to b, b to a, and orphan to b, compute the live set with entry as the only root.
+\item\label{ex:ch59-fold} Two functions have identical bytes with a zero call field, but their relocations name different non-equivalent targets. Explain the failure of byte-only folding.
+\item\label{ex:ch59-lifetime} In the TLS experiment, explain why unloading before joining the worker can invalidate a function pointer even though dynamic symbol lookup originally succeeded.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch59-reading}
+The ELF specification describes dynamic metadata, initialization, and TLS templates~\cite{xinuos-2026-elf}.
+The AMD64 supplement defines processor-specific runtime relocation and TLS mechanisms~\cite{matz-2012-amd64}.
+Levine discusses dynamic linking and advanced linker techniques, while GNU documentation specifies concrete retention and script controls~\cite{levine-1999-linkers,gnu-2026-ld}.

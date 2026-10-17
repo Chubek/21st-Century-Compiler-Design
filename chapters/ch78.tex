@@ -1,0 +1,189 @@
+\chapter{Exact Matching, Dictionaries, and String Indexes}
+\label{ch:string-matching-indexes}
+
+A scanner searching for a long delimiter can repeatedly recompare the same prefix after every mismatch.
+An identifier dictionary can repeatedly compare the same initial letters across thousands of words.
+Both problems disappear only when the implementation records the structure of the comparisons it has already performed.
+Prefix functions, tries, and suffix indexes record different structure for different query workloads.
+
+\section{Recover from mismatch without restarting}
+\label{sec:ch78-prefix}
+Let pattern $p$ have length $m$ and text $s$ length $n$, both measured in the same alphabet.
+After matching $p[0:j]$, a mismatch does not erase the fact that a suffix of the matched region might be another pattern prefix.
+A \term{border} is a proper prefix that is also a suffix.
+The prefix function $\pi[i]$ is the length of the longest border of $p[0:i+1]$.
+
+For \code{ababa}, the prefix values are $[0,0,1,2,3]$.
+At the last position, \code{aba} is both prefix and suffix.
+If a full match ends there, retaining border length three permits an overlapping match two positions later.
+Table~\ref{tab:ch78-prefix} works every position, and Figure~\ref{fig:ch78-border} marks the reused region.
+
+\begin{table}[htbp]
+\caption{The prefix function records the largest already justified fallback.}
+\label{tab:ch78-prefix}
+\centering
+\begin{tabular}{rrlr}
+\toprule
+Index & Symbol & Longest border & Length \\
+\midrule
+0 & a & empty & 0 \\
+1 & b & empty & 0 \\
+2 & a & a & 1 \\
+3 & b & ab & 2 \\
+4 & a & aba & 3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\node[basic block] (p) at (0,0) {a b a b a};
+\node[basic block] (b) at (0,-1.4) {reusable border: a b a};
+\draw[cfg edge] (p)--node[right,font=\small]{fallback length 3}(b);
+\end{tikzpicture}
+\caption{A complete match retains a nonempty border when overlapping matches are possible.}
+\label{fig:ch78-border}
+\end{figure}
+
+Algorithm~\ref{alg:ch78-prefix} constructs the failure information.
+Each successful extension increments $j$ by one and each fallback decreases it.
+Across the whole scan there are only $O(m)$ increases and decreases, giving $O(m)$ time and $O(m)$ storage under constant-time symbol comparison.
+The while loop can be long at one position without making total preprocessing quadratic.
+
+\begin{algorithm}[htbp]
+\caption{Construct the prefix function of a nonempty pattern.}
+\label{alg:ch78-prefix}
+\begin{pseudocode}
+\Require pattern $p$ of length $m>0$
+\Ensure longest proper-border lengths $\pi[0:m]$
+\State initialize $\pi$ to zero; $j\gets0$
+\For{$i=1$ to $m-1$}
+\While{$j>0$ and $p[i]\ne p[j]$}
+\State $j\gets\pi[j-1]$
+\EndWhile
+\If{$p[i]=p[j]$} \State $j\gets j+1$ \EndIf
+\State $\pi[i]\gets j$
+\EndFor
+\end{pseudocode}
+\end{algorithm}
+
+\section{Search with a maintained prefix invariant}
+\label{sec:ch78-search}
+Before processing the next text symbol, $j$ records the longest pattern prefix matching a suffix of the text consumed so far.
+Fallback replaces that suffix with its longest feasible border; no text position moves backward.
+Algorithm~\ref{alg:ch78-search} reports all matches, not merely the first.
+After reporting a match it falls back instead of resetting to zero, which preserves overlap.
+
+\begin{algorithm}[htbp]
+\caption{Find every exact match, including overlapping matches.}
+\label{alg:ch78-search}
+\begin{pseudocode}
+\Require text $s$, pattern $p$, its prefix function when nonempty
+\Ensure all match start positions in increasing order
+\If{$|p|=0$} \State return every boundary $0$ through $|s|$ \EndIf
+\State $j\gets0$
+\For{$i=0$ to $|s|-1$}
+\While{$j>0$ and $s[i]\ne p[j]$} \State $j\gets\pi[j-1]$ \EndWhile
+\If{$s[i]=p[j]$} \State $j\gets j+1$ \EndIf
+\If{$j=|p|$}
+\State report $i+1-|p|$; $j\gets\pi[j-1]$
+\EndIf
+\EndFor
+\end{pseudocode}
+\end{algorithm}
+
+The total cost is $O(n+m+z)$ including preprocessing and $z$ reported positions.
+Searching \code{ababababa} for \code{ababa} reports $0,2,4$.
+The empty pattern policy reports all $n+1$ boundaries rather than dereferencing a nonexistent first pattern symbol.
+The companion checks all 255 binary texts of length at most seven against all 31 binary patterns of length at most four, comparing with a direct start-position oracle.
+
+A streaming implementation keeps only $j$, the prefix table, and a running text offset between chunks.
+Resetting $j$ at chunk boundaries misses matches split across buffers.
+If the alphabet is Unicode scalars, the decoder also retains incomplete byte sequences between chunks under its own error policy.
+Matching state and decoding state must not be conflated.
+
+\section{Index a dictionary with shared prefixes}
+\label{sec:ch78-trie}
+A \term{trie} assigns an edge to each next symbol and a final marker to each complete stored word.
+Words \code{cat}, \code{cot}, and \code{cut} share their first edge but diverge at the vowel.
+For a dictionary with $L$ total symbol occurrences, a plain trie has at most $L+1$ states.
+Lookup follows at most $m$ edges for an $m$-symbol query, with transition costs determined by the child-map representation.
+
+Figure~\ref{fig:ch78-trie} shows the branching needed by the spellchecker.
+A final marker belongs to the state after the last symbol, not to an extra terminator character that users must supply.
+A word can be both final and have outgoing edges, as when \code{compile} and \code{compiler} coexist.
+Frequency and display metadata belong to final entries and need explicit merge rules under normalization.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=12mm and 15mm]
+\node[basic block] (r) {root};\node[basic block,below=of r] (c) {c};
+\node[basic block,below left=of c] (a) {ca};\node[basic block,below=of c] (o) {co};
+\node[basic block,below right=of c] (u) {cu};
+\node[basic block,below=of a] (at) {cat: final};
+\node[basic block,below=of o] (ot) {cot: final};
+\node[basic block,below=of u] (ut) {cut: final};
+\draw[cfg edge] (r)--(c);\draw[cfg edge] (c)--(a);\draw[cfg edge] (c)--(o);\draw[cfg edge] (c)--(u);
+\draw[cfg edge] (a)--(at);\draw[cfg edge] (o)--(ot);\draw[cfg edge] (u)--(ut);
+\end{tikzpicture}
+\caption{A trie shares prefixes while keeping each state's complete root path unique.}
+\label{fig:ch78-trie}
+\end{figure}
+
+Suffix-equivalent trie states can be merged into a smaller acyclic automaton.
+That preserves membership, but it destroys the unique-prefix property: one state can now be reached by several output strings.
+This matters in approximate search.
+Keeping one predecessor or one prefix per merged state can accidentally discard distinct candidate words even if membership tests still pass.
+The case study deliberately keeps a trie and charges its extra storage rather than silently relying on an invalid enumeration invariant.
+
+\section{Choose which side to preprocess}
+\label{sec:ch78-indexes}
+Prefix-function matching preprocesses the pattern; a trie preprocesses a dictionary.
+A suffix array preprocesses a fixed text into the lexicographically ordered list of suffix starts.
+Pattern matches form a contiguous interval in that order, so binary search can locate them.
+With naive symbol-by-symbol comparisons, searching costs $O(m\log n+z)$ for pattern length $m$, text length $n$, and $z$ returned positions; more sophisticated longest-common-prefix structures reduce repeated comparisons.
+Those bounds exclude suffix-array construction, whose cost depends on the construction algorithm and alphabet representation.
+
+Table~\ref{tab:ch78-indexes} gives a workload map rather than declaring one universal winner.
+A compiler compiling a single source snapshot often values streaming scans and small auxiliary state.
+A source browser answering repeated substring queries may justify a larger persistent index.
+Dynamic edits require invalidation or a genuinely dynamic indexing algorithm; rebuilding a static suffix array is not constant-time update.
+
+\begin{table}[htbp]
+\caption{The reusable side of the workload determines which index can amortize its cost.}
+\label{tab:ch78-indexes}
+\centering
+\begin{tabular}{lll}
+\toprule
+Structure & Preprocessed data & Natural query \\
+\midrule
+prefix function & one pattern & streaming exact matches \\
+trie & word dictionary & prefix lookup and completion \\
+multi-pattern automaton & pattern collection & all patterns in one stream \\
+suffix array & fixed text snapshot & repeated substring lookup \\
+hash table & complete keys & exact dictionary equality \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Multi-pattern matching augments shared-prefix states with failure transitions and output lists so one scan can recognize many patterns.
+The output volume can itself be large when patterns are nested suffixes, and must appear in the complexity bound.
+Fingerprint-based search can accelerate candidate filtering, but a collision-aware implementation verifies candidates unless its specification explicitly permits a probabilistic answer.
+For source transformations and diagnostics, a false positive is normally unacceptable.
+
+\section{Exercises}
+\label{sec:ch78-exercises}
+\begin{enumerate}
+\item\label{ex:ch78-prefix} Compute the prefix function of \code{aaaa} and all its matches in \code{aaaaaa}.
+\item\label{ex:ch78-stream} Split \code{ababababa} after its fourth symbol.
+Which state must cross the chunk boundary to retain all \code{ababa} matches?
+\item\label{ex:ch78-trie} Insert \code{compile} and \code{compiler} into an initially empty trie.
+Count states including the root, and identify the two final states.
+\item\label{ex:ch78-merge} Explain how merging suffix-equivalent dictionary states can preserve membership while invalidating an enumeration algorithm storing one prefix per state.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch78-reading}
+Crochemore, Hancart, and Lecroq develop exact matching, automata representations, and indexing in detail~\cite{crochemore-2007-strings}.
+The lexer-construction chapters provide complementary automaton-building techniques; Chapter~\ref{ch:fst-spellchecker} uses the trie as a constrained output language rather than an exact-match table.

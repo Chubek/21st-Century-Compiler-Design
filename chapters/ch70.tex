@@ -1,0 +1,187 @@
+\chapter{ABI Classification and Foreign-Call Lowering}
+\label{ch:ffi-abi}
+
+Passing eight integer arguments exposes a boundary that a two-argument demonstration never reaches.
+Some values enter registers and others enter the stack area.
+Adding a floating argument exposes another register class; returning a large aggregate can add an invisible result pointer.
+An FFI implements the selected calling convention, not merely a cast to a convenient function-pointer type.
+
+The examples use the ordinary System V AMD64 ABI for scalar integers, doubles, and two particular structures.
+They exclude vector extensions, packed structures, bit-fields, and the full aggregate classification algorithm.
+The native experiment delegates call construction to libffi and compares results with C calls compiled from the same declarations.
+
+\section{Classify before assigning locations}
+\label{sec:ch70-classify}
+The first six integer-class argument slots use \code{RDI}, \code{RSI}, \code{RDX}, \code{RCX}, \code{R8}, and \code{R9}.
+Floating arguments use a separate SSE register sequence beginning at \code{XMM0}.
+Eligible aggregates are classified in eight-byte units, and assignment can require more than one register class~\cite{matz-2012-amd64}.
+Classification depends on field layout and type categories, not just total size.
+
+Our \code{Pair} contains a double followed by a signed 32-bit tag.
+On the tested ABI it has size $16$, alignment $8$, and offsets $0$ and $8$.
+Its two units classify as SSE and INTEGER.
+A three-element aggregate of unsigned 64-bit integers instead uses memory in the ordinary profile considered here.
+Table~\ref{tab:ch70-types} records the distinctions checked by the test fixture.
+
+\begin{table}[htbp]
+\caption{Equal source-level argument counts can demand different native resources.}
+\label{tab:ch70-types}
+\centering
+\begin{tabular}{lll}
+\toprule
+Type & Tested layout & Argument treatment \\
+\midrule
+signed 32-bit integer & $4$ bytes & integer-class location \\
+double & $8$ bytes & SSE-class location \\
+Pair: double, int32 & $16$ bytes, alignment $8$ & SSE plus INTEGER, or stack \\
+Triple: three uint64 & $24$ bytes, alignment $8$ & memory argument \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A memory-class argument and a memory-class return do not mean the same thing.
+An ordinary memory argument is passed in the caller's stack argument area under this ABI.
+A memory-class return uses caller-provided result storage whose address is passed through a hidden parameter; this consumes an integer argument register.
+Other ABIs make different choices, so generic IR should retain the distinction until target lowering.
+
+\section{Reserve aggregate resources atomically}
+\label{sec:ch70-registers}
+An aggregate that needs several registers must not partially consume them and spill only the remainder when one class runs out.
+Insufficient registers cause the entire eligible aggregate to be passed on the stack and tentative assignments to be rolled back~\cite{matz-2012-amd64}.
+Algorithm~\ref{alg:ch70-reserve} implements the restricted class-count model in the Python companion.
+It computes register-versus-stack decisions, not stack byte offsets.
+
+\begin{algorithm}[htbp]
+\caption{Assign registers in the restricted scalar and two-unit aggregate profile.}
+\label{alg:ch70-reserve}
+\begin{pseudocode}
+\Require classified arguments; six integer and eight SSE slots
+\Ensure all-or-stack assignment for each supported aggregate
+\State initialize used-slot counters, including any hidden result pointer
+\ForAll{arguments in declaration order}
+  \If{memory-class or either register class lacks capacity}
+    \State assign the whole argument to the stack argument area
+  \Else
+    \State reserve all required integer and SSE slots together
+    \State assign the argument's units to those slots
+  \EndIf
+\EndFor
+\end{pseudocode}
+\end{algorithm}
+
+Restricted assignment costs $O(A)$ for $A$ already classified arguments.
+General classification recursively inspects aggregate types and applies target-specific exceptional cases; this count-only model does not implement it.
+Stack placement additionally accounts for size, alignment, and the total outgoing area.
+Immediately before an ordinary call instruction the stack is $16$-byte aligned in this profile; the pushed return address shifts the callee-entry position by eight bytes.
+
+Table~\ref{tab:ch70-pressure} works six integer arguments followed by Pair and a double.
+The six integers fill the integer bank.
+Pair cannot obtain its integer component, so it goes entirely to the stack without consuming \code{XMM0}.
+The final double therefore still uses \code{XMM0}.
+Figure~\ref{fig:ch70-banks} visualizes this decision.
+
+\begin{table}[htbp]
+\caption{An aggregate spill leaves the unused floating bank available to later arguments.}
+\label{tab:ch70-pressure}
+\centering
+\begin{tabular}{lll}
+\toprule
+Argument & Demand & Assignment \\
+\midrule
+first six uint64 values & one integer slot each & six integer registers \\
+Pair & one integer, one SSE & entire Pair on stack \\
+final double & one SSE slot & XMM0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=12mm and 12mm]
+\node[basic block] (pair) {Pair requires both banks};
+\node[basic block,below left=of pair] (gp) {integer bank: full};
+\node[basic block,below right=of pair] (fp) {SSE bank: free};
+\node[basic block,below=of gp] (stack) {whole Pair on stack};
+\draw[cfg edge] (pair)--(gp); \draw[cfg edge] (pair)--(fp); \draw[cfg edge] (gp)--(stack);
+\end{tikzpicture}
+\caption{A free register in one bank does not permit a partial aggregate assignment.}
+\label{fig:ch70-banks}
+\end{figure}
+
+\section{Give call metadata a lifetime}
+\label{sec:ch70-libffi}
+libffi's \code{ffi\_cif} describes the ABI, return type, and argument types.
+The runtime supplies addresses of actual argument objects, not values packed into pointer-sized integers.
+A pointer argument therefore needs the address of a pointer-valued slot; passing the pointee directly adds an indirection error.
+Type descriptors and their referenced arrays must remain alive while the prepared interface uses them~\cite{libffi-2026-manual}.
+
+The companion's \code{FxPlan} owns its argument-type array and contains an interface pointing into that array.
+It must remain at a stable address after preparation; copying the structure would leave internal pointers referring to old storage.
+The scalar API supports signed 32-bit integers, unsigned 64-bit integers, doubles, and pointers, with at most eight arguments.
+Aggregate and variadic tests use libffi directly rather than exposing those features through the small scalar-plan API.
+
+\begin{algorithm}[htbp]
+\caption{Invoke a known native target through an address-stable prepared plan.}
+\label{alg:ch70-call}
+\begin{pseudocode}
+\Require prepared plan, trusted matching function address, typed values, output
+\Ensure ABI-conformant call or rejection before invocation
+\State validate argument count and value kinds against the plan
+\State build addresses of correctly typed argument slots
+\State select aligned return storage of sufficient size
+\State invoke the target through the prepared libffi interface
+\State normalize the native return into the wrapper's value kind
+\State publish the wrapper result
+\end{pseudocode}
+\end{algorithm}
+
+For $A$ scalar arguments, wrapper setup is $O(A)$, excluding native execution and ABI-specific libffi work.
+For integral return types narrower than the machine register size, libffi can write a widened result; the companion uses \code{ffi\_sarg} storage for its signed 32-bit return channel~\cite{libffi-2026-manual}.
+Allocating only four bytes for that channel on a wider machine risks overwriting adjacent memory.
+Arguments instead use their exact declared scalar object types.
+
+Figure~\ref{fig:ch70-indirection} separates argument-value addresses from the pointed-to output.
+The metadata cannot establish that a symbol actually has the supplied signature.
+That remains a trusted declaration and library-identity assumption.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=12mm]
+\node[basic block] (slots) {slots: a, b, output pointer};
+\node[basic block,below left=of slots] (call) {libffi reads slot addresses};
+\node[basic block,below right=of slots] (storage) {writable output integer};
+\draw[cfg edge] (slots)--(call);
+\draw[cfg edge] (slots)--node[right,font=\small]{pointer value}(storage);
+\end{tikzpicture}
+\caption{The pointer-valued slot refers to separate storage; libffi receives the slot's address.}
+\label{fig:ch70-indirection}
+\end{figure}
+
+\section{Promote variadic arguments}
+\label{sec:ch70-varargs}
+C's default promotions affect the variadic tail: float becomes double, and integer promotions apply to narrow integer types~\cite{wg14-2011-c11}.
+The wrapper builds storage for the promoted values and uses the variadic preparation API with fixed and total argument counts.
+System V AMD64 also uses the low byte of \code{RAX} to convey an upper bound on vector-register use~\cite{matz-2012-amd64}.
+libffi supplies that mechanism when the call is described correctly.
+
+Our test calls a variadic sum with fixed count $2$ and doubles $1.25$ and $2.5$.
+The result is $3.75$, matching the compiler-generated direct call.
+An unpromoted float descriptor in the variadic tail is rejected by the tested libffi implementation.
+Declaring a variadic function as fixed-signature, even for one observed argument list, is not a general substitute.
+
+\section{Exercises}
+\label{sec:ch70-exercises}
+\begin{enumerate}
+\item\label{ex:ch70-eight} Assign eight uint64 arguments and evaluate $\sum_{i=1}^{8}i\cdot i$, the native test's weighted sum.
+\item\label{ex:ch70-rollback} Explain why the last double in Table~\ref{tab:ch70-pressure} does not use XMM1.
+\item\label{ex:ch70-hidden} A function returns a memory-class aggregate and takes six uint64 arguments.
+How many explicit arguments remain in integer registers?
+\item\label{ex:ch70-promote} A variadic tail supplies a float and signed char with values $1.25$ and $7$.
+State the promoted types and why the original small objects are invalid slots for those types.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch70-reading}
+The AMD64 supplement defines the classification, register, stack, and variadic rules used here~\cite{matz-2012-amd64}.
+The libffi manual specifies descriptor lifetimes, slot indirection, and widened returns~\cite{libffi-2026-manual}.
+C11 distinguishes language promotions from ABI placement~\cite{wg14-2011-c11}.

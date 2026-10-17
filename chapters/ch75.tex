@@ -1,0 +1,188 @@
+\chapter{Native Extension Models}
+\label{ch:extension-models}
+
+A shared library can play several different roles.
+It can be called through a generic FFI, imported as a runtime-specific module, loaded as a host plugin, or linked into a program that embeds the runtime.
+These arrangements share ABI machinery but differ in who initializes the runtime, who owns application state, how capabilities are discovered, and when code can be unloaded.
+Choosing an extension model therefore shapes the lifetime and evolution of the entire interface.
+
+\section{Choose the direction of control}
+\label{sec:ch75-models}
+In an \term{extension module}, the language runtime imports native code that presents objects or functions through the runtime's API.
+In \term{embedding}, a native host creates and controls a runtime instance and exposes host services to scripts or compiled managed code.
+A generic FFI instead describes foreign signatures without requiring the foreign library to know the calling language.
+A host plugin implements a host-defined contract that may contain no managed-runtime types at all.
+Table~\ref{tab:ch75-models} distinguishes their entry points.
+
+\begin{table}[htbp]
+\caption{The extension model determines which component owns initialization and adaptation.}
+\label{tab:ch75-models}
+\centering
+\begin{tabular}{lll}
+\toprule
+Model & Initial controller & Typical interface \\
+\midrule
+generic FFI & managed caller & signature metadata plus native symbols \\
+runtime extension & runtime importer & runtime-specific initialization entry \\
+embedded runtime & native host & runtime creation and protected evaluation \\
+host plugin & native application & versioned host/plugin function tables \\
+isolated worker & process supervisor & serialized requests and replies \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The companion exercises four in-process forms.
+Its core has no Lua or Python dependency, its scalar bridge uses libffi, its modules expose the core through each runtime's API, and its Lua host embeds the same module entry point.
+A separate native loader queries a versioned function table from a shared library.
+Figure~\ref{fig:ch75-models} shows how the shared core avoids duplicating arithmetic and ownership rules across bindings.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=13mm and 12mm]
+\node[basic block] (core) {opaque C core and libffi bridge};
+\node[basic block,above left=of core] (python) {CPython module};
+\node[basic block,above right=of core] (lua) {Lua module / host};
+\node[basic block,below=of core] (plugin) {native plugin table client};
+\draw[cfg edge] (python)--(core); \draw[cfg edge] (lua)--(core);
+\draw[cfg edge] (plugin)--(core);
+\end{tikzpicture}
+\caption{Several extension models can share one language-neutral native contract.}
+\label{fig:ch75-models}
+\end{figure}
+
+\section{Separate API stability from ABI stability}
+\label{sec:ch75-stability}
+An \term{application programming interface} specifies source-level names, types, and behavior.
+An application binary interface additionally fixes machine-visible representations and call rules.
+A source-compatible change may still require rebuilding extensions if object layouts or exported calling conventions change.
+Conversely, a preserved binary layout can conceal a behavioral incompatibility, such as changing ownership of a returned pointer.
+
+Opaque objects and accessor functions reduce the amount of representation exposed to callers.
+Appending an optional function to a versioned table can preserve an existing prefix if both sides check the available size before accessing it.
+Removing or reordering a field generally breaks that agreement.
+The companion table contains a version, byte size, and checked-add function pointer; it is a same-platform native structure, not a portable wire format.
+
+Algorithm~\ref{alg:ch75-negotiate} performs the small negotiation implemented by the loader fixture.
+It rejects version $2$ and an oversized required prefix, accepts version $1$ with the expected size, and then obtains $42$ from $19+23$.
+The version-and-size mechanism detects declared incompatibility; it cannot validate an arbitrary untrusted function pointer's behavior.
+
+\begin{algorithm}[htbp]
+\caption{Negotiate a versioned native function-table contract.}
+\label{alg:ch75-negotiate}
+\begin{pseudocode}
+\Require loaded matching-platform library, known query symbol signature, required prefix
+\Ensure usable table with retained library handle, or rejection
+\State resolve query symbol and check loader error status
+\State request supported version and required prefix size
+\If{query returns null} \State reject incompatible interface \EndIf
+\State validate returned version, available size, and required function entries
+\State retain library handle for every possible table or object user
+\State publish the table to clients
+\end{pseudocode}
+\end{algorithm}
+
+Checking $K$ required entries costs $O(K)$ after loader work.
+For the one-function fixture this is constant.
+The library handle must remain alive while any function pointer, object destructor, or callback entry can reach library code.
+The loader test closes its handle only after its sole call and all table use have ended.
+Hot replacement requires the broader retirement discipline developed for runtime-managed code, not just overwriting a global table pointer.
+
+\section{Use runtime-supported extension boundaries}
+\label{sec:ch75-runtime}
+CPython distinguishes the Limited API, a selected API subset, from the Stable ABI, the binary compatibility contract associated with supported interfaces~\cite{python-2026-capi}.
+Defining a minimum Limited API version constrains which declarations the extension can use.
+It does not make external native dependencies, target architecture, compiler settings, or behavior automatically portable.
+An \code{abi3} filename expresses the extension's intended compatibility class; it is not experimental evidence that every supported Python version has been tested.
+
+Our module selects a 3.11 Limited API floor and uses multi-phase initialization with per-module state.
+Each module instance owns its successful-add counter rather than sharing a process-global mutable counter.
+The test removes the import cache entry, imports a new instance, and verifies the counters are independent.
+That verifies this reimport scenario, not every subinterpreter or free-threaded configuration.
+The supported execution contract remains a conventional GIL-enabled CPython build.
+
+Lua modules use an initialization function that returns the module's values, while an embedded host can register the same entry through the Lua auxiliary library~\cite{ierusalimschy-2026-lua}.
+The companion explicitly builds against Lua 5.4 and its configuration with 64-bit integers.
+It does not load a 5.4 module into a different Lua ABI merely because both runtimes export similarly named functions.
+
+Node-API offers a runtime-provided ABI-stable interface for native addons, including ownership and asynchronous facilities~\cite{node-2026-api}.
+This illustrates the value of a deliberately narrow boundary, but compatibility still depends on the used API version and external libraries.
+Table~\ref{tab:ch75-compatibility} separates five dimensions that deployment metadata should record.
+
+\begin{table}[htbp]
+\caption{One compatibility promise does not establish the others.}
+\label{tab:ch75-compatibility}
+\centering
+\begin{tabular}{ll}
+\toprule
+Dimension & Required evidence \\
+\midrule
+source API & supported headers and declarations \\
+runtime ABI & supported runtime version and extension configuration \\
+platform ABI & architecture, data model, calling convention \\
+behavior & ownership, errors, threading, and feature semantics \\
+dependency closure & compatible linked libraries and loader resolution \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Isolate execution when the contract needs a process boundary}
+\label{sec:ch75-isolation}
+In-process native code shares the host's address space and can corrupt its memory if it violates pointer contracts.
+A separate worker process changes that failure boundary and replaces direct pointers with serialized messages or explicitly shared mappings.
+The wire format in Chapter~\ref{ch:ffi-marshaling} illustrates the representation discipline, but a worker protocol additionally needs request identity, operation selection, framing, resource limits, and terminal outcomes.
+This chapter specifies the design; the case study does not implement a worker supervisor or sandbox.
+
+Figure~\ref{fig:ch75-worker} shows a request/reply boundary.
+A numeric handle sent over the channel names an object in the worker's table; it is not a host-address pointer.
+If the worker restarts, a generation or session identifier must distinguish new handles from stale ones retained by clients.
+Shared memory can avoid payload copies but reintroduces synchronization and lifetime obligations for the mapped region.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=30mm]
+\node[basic block] (host) {host request table};
+\node[basic block,right=of host] (worker) {worker object table};
+\draw[cfg edge] (host.north east) to[bend left=15] node[above,font=\small]{request ID, bytes}(worker.north west);
+\draw[cfg edge] (worker.south west) to[bend left=15] node[below,font=\small]{status, bytes}(host.south east);
+\end{tikzpicture}
+\caption{An isolated extension exchanges defined records rather than process-local pointers.}
+\label{fig:ch75-worker}
+\end{figure}
+
+Algorithm~\ref{alg:ch75-worker} describes completion handling with a per-session outstanding-request table.
+With an expected constant-time hash lookup, each dispatch adds expected $O(1)$ bookkeeping plus $O(N)$ validation/copying for an $N$-byte record; worst-case lookup depends on the table implementation.
+Duplicate completion is rejected so a resource cannot be released twice.
+Worker death produces an explicit indeterminate outcome for operations whose effects may have occurred before the lost reply.
+Automatically retrying a non-idempotent operation could repeat those effects.
+
+\begin{algorithm}[htbp]
+\caption{Accept a worker completion only for one live request in the current session.}
+\label{alg:ch75-worker}
+\begin{pseudocode}
+\Require framed completion, current session, serialized request-table access
+\Ensure at most one terminal completion per admitted request
+\State validate frame extent, session identity, request ID, and result schema
+\If{request is absent or already terminal} \State reject duplicate or stale reply \EndIf
+\State atomically mark request terminal and detach its retained resources
+\State deliver its outcome through a protected host-runtime entry
+\State release detached resources exactly once
+\end{pseudocode}
+\end{algorithm}
+
+\section{Exercises}
+\label{sec:ch75-exercises}
+\begin{enumerate}
+\item\label{ex:ch75-version} Work the query outcomes for version one with the exact table size, version two, and version one with a required size one byte larger than the table.
+\item\label{ex:ch75-unload} A plugin-created object survives after its library is closed.
+Explain why even freeing that object can require the library to remain loaded.
+\item\label{ex:ch75-state} Two module instances each start with counter zero.
+After two successful additions through the first and one through the second, give both counters and identify the process-global implementation bug this test detects.
+\item\label{ex:ch75-retry} A worker charges an account and dies before replying.
+Why is blindly retrying the request unsafe, and what additional protocol could support deduplication?
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch75-reading}
+Python documents multi-phase modules, per-module state, and the distinction between its Limited API and Stable ABI~\cite{python-2026-capi}.
+Lua documents module loading and embedding entry points~\cite{ierusalimschy-2026-lua}.
+Node-API provides a contrasting versioned runtime boundary~\cite{node-2026-api}.

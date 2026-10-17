@@ -1,0 +1,272 @@
+\chapter{Lua Preprocessing, Macros, and Multi-Pass Layout}
+\label{ch:assembly-preprocessing}
+
+A repeated instruction sequence is easy to generate until it contains labels, configuration choices, and size-sensitive branches.
+Copying its text twice can define the same private label twice.
+Evaluating a size expression too early can freeze a value that later instruction expansion invalidates.
+Allowing arbitrary scripts to query and mutate a half-built symbol table can make output depend on which assembly pass happened to run first.
+A useful extensible assembler therefore needs phase boundaries as carefully as it needs an expression parser.
+
+The case study places Lua before assembly.
+Lua computes a finite assembly stream; the assembler then interprets that stream under its own symbol, size, and encoding rules.
+This is a concrete form of the macro-expansion phase discussed in assembler literature~\cite{salomon-1993-assemblers}.
+It also creates an opportunity to distinguish executable configuration from the later fixed-point problem of layout.
+
+\section{Specify what preprocessing can know}
+\label{sec:ch55-phases}
+
+Before assembly begins, a Lua script can know its arguments, constant tables, selected feature flags, and the text it has emitted.
+It cannot know the final address of a symbol in another object.
+In our interface it also cannot query the assembler's current section counter, because the assembler has not parsed the emitted stream yet.
+These restrictions follow directly from phase order.
+They prevent an expression such as \enquote{emit this instruction only if the later function is nearby} from accidentally becoming an undocumented dependency cycle.
+
+Figure~\ref{fig:ch55-phases} puts the boundaries in order.
+Each stage has an input that is complete enough for its decisions.
+An implementation can add later callbacks, but then it must define what can change, how dependencies are recorded, and when another iteration is required.
+Embedding a general-purpose language does not itself answer those questions.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=13mm]
+\node[basic block] (lua) {Lua values and functions};
+\node[basic block,below=of lua] (text) {completed assembly text};
+\node[basic block,below=of text] (frag) {instructions, labels, fixups};
+\node[basic block,below=of frag] (obj) {ELF sections and relocations};
+\draw[cfg edge] (lua)--node[right,font=\small] {emit}(text);
+\draw[cfg edge] (text)--node[right,font=\small] {parse and encode}(frag);
+\draw[cfg edge] (frag)--node[right,font=\small] {serialize}(obj);
+\end{tikzpicture}
+\caption{Preprocessing finishes before assembly state exists, making the available information at each phase explicit.}
+\label{fig:ch55-phases}
+\end{figure}
+
+Lua functions supply parameterization, loops supply repetition, and tables supply generated data.
+There is no need to invent a second integer-expression language for counts already known at preprocessing time.
+An address expression remains textual assembly, however: emitting \code{.quad answer+8} preserves the symbol dependency for later phases rather than asking Lua to evaluate it.
+The boundary is between known preprocessing values and relocatable program values.
+
+\section{Private macro labels need fresh identities}
+\label{sec:ch55-labels}
+
+Suppose a countdown macro emits a label followed by a subtract and conditional branch.
+Calling it twice with the same literal label causes a duplicate definition.
+Worse, a permissive assembler might bind both branches to the second definition.
+The correct expansion requires a fresh private label for every invocation.
+This is a simple example of macro hygiene, even though textual assembly macros generally do not provide the full lexical hygiene of language-level syntax systems.
+
+The Lua example maintains a local serial number and emits \code{.loop\_1}, \code{.loop\_2}, and later names.
+The prefix is reserved by convention for that macro implementation; a larger generator should encapsulate name creation behind a shared fresh-name service.
+Two modules independently resetting the same serial with the same prefix can still collide when their generated text enters one assembly unit.
+Figure~\ref{fig:ch55-fresh} contrasts the two-invocation result.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=18mm and 22mm]
+\node[basic block] (m) {countdown macro};
+\node[basic block,below left=of m] (a) {.loop\_1: sub ecx, 1};
+\node[basic block,below right=of m] (b) {.loop\_2: sub edx, 1};
+\draw[cfg edge] (m)--node[left,font=\small,fill=white,inner sep=2pt] {first call}(a);
+\draw[cfg edge] (m)--node[right,font=\small,fill=white,inner sep=2pt] {second call}(b);
+\draw[back edge] (a) edge[loop below] node[below,font=\small] {jnz .loop\_1}(a);
+\draw[back edge] (b) edge[loop below] node[below,font=\small] {jnz .loop\_2}(b);
+\end{tikzpicture}
+\caption{Fresh private names keep each generated control-flow cycle inside its own macro invocation.}
+\label{fig:ch55-fresh}
+\end{figure}
+
+Parameters should also be validated before interpolation.
+A register parameter is not an arbitrary assembly fragment if the function promises a register-based countdown.
+The case-study assembler ultimately validates the emitted operands; a reusable Lua library can fail earlier with a clearer message about the macro argument.
+For raw byte data, emitting one numeric \code{.byte} per source byte avoids quoting ambiguities involving embedded zeros, newlines, quotes, or comment delimiters.
+The \path{hello.lua} example uses this strategy for a message written by a Linux system call.
+
+\begin{algorithm}[htbp]
+\caption{Expand a counted assembly macro with a private label.}
+\label{alg:ch55-macro}
+\begin{pseudocode}
+\Require valid register $r$, positive count $n$, shared fresh-name state
+\Ensure one self-contained countdown sequence with no reused private label
+\State $label\gets\Call{FreshName}{countdown}$
+\State emit initialization of $r$ to $n$
+\State emit the private label definition
+\State emit subtraction of one from $r$
+\State emit a conditional branch back to $label$ while the result is nonzero
+\end{pseudocode}
+\end{algorithm}
+
+Algorithm~\ref{alg:ch55-macro} emits a constant number of assembly statements regardless of the runtime count.
+An unrolling macro instead emits $O(n)$ statements and changes code size accordingly.
+Compile-time repetition and runtime iteration are different transformations, even if both are written using a loop in the generator's implementation.
+
+\section{Cross the Lua/C boundary with explicit representations}
+\label{sec:ch55-lua-api}
+
+The assembler registers one C function, \code{emit}, in a Lua state.
+It accepts a Lua byte string, appends its bytes to a checked buffer, and adds a newline.
+Embedded zero bytes are rejected because the downstream assembly parser uses nul-terminated line strings.
+The data-generation interface still represents zero data bytes by emitting the textual directive \code{.byte 0}.
+Do not confuse zeros in the source-language transport with zeros requested in the target program.
+
+Lua compilation and execution occur through a protected call.
+If the script raises an error, the host prints the Lua error and never publishes an object file.
+Lua error values need not be strings, so the error path must not blindly pass a null conversion result to a C string formatter.
+The implementation emits a fallback diagnostic for a non-string error value.
+These behaviors follow the Lua C API's error and string conventions~\cite{ierusalimschy-2026-lua}.
+
+Table~\ref{tab:ch55-boundaries} lists the decisions at this interface.
+The scripts run with Lua's standard libraries and therefore have the same build-time authority as other build scripts.
+The tools are not script sandboxes.
+The generated-text buffer is bounded, but an arbitrary Lua program can still run forever before emitting anything; a source-size bound is not an execution-time bound.
+
+\begin{table}[htbp]
+\caption{The preprocessing boundary distinguishes source transport, target data, and script execution.}
+\label{tab:ch55-boundaries}
+\centering
+\begin{tabular}{p{0.30\linewidth}p{0.57\linewidth}}
+\toprule
+Value or event & Case-study behavior \\
+\midrule
+Lua string passed to emit & Copied by explicit byte length; newline appended. \\
+NUL inside source text & Rejected before line parsing. \\
+Target byte value zero & Expressed as an ordinary numeric data directive. \\
+Lua runtime error & Reported before object publication. \\
+Assembly encoding error & Reports generated assembly line number. \\
+Final linked address & Unavailable to preprocessing; represented symbolically. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{A listing should explain expansion provenance}
+\label{sec:ch55-provenance}
+
+When a generated instruction fails, the programmer needs to know both what the assembler saw and why it was generated.
+A complete provenance record might include the emitted line, Lua file and line, macro name, invocation number, and caller chain.
+The generated line remains useful because it identifies the exact syntax that the assembler rejected.
+The originating Lua location remains useful because that is the editable source.
+
+The current implementation keeps the source script path and generated assembly line number.
+Lua's own syntax and execution diagnostics identify script locations.
+It does not claim a complete expansion stack or DWARF line-table producer.
+An extension could store a provenance record beside every emitted line, using Lua debug information at the callback boundary and an explicit macro-call identifier for nested libraries.
+That record belongs to the intermediate representation, not to an unstructured diagnostic string reconstructed after failure.
+
+\section{Variable-size instructions turn layout into a dependency problem}
+\label{sec:ch55-relaxation}
+
+The implemented assembler uses near branches with fixed four-byte displacements.
+It therefore does not need branch relaxation to determine label offsets.
+To understand a production assembler, now consider adding short two-byte jumps and long five-byte jumps.
+A branch's allowed form depends on its distance; the distance depends on the sizes of instructions between source and target; those sizes can include other branches.
+One pass that selects every shortest-looking form from an initial layout can invalidate its own decisions.
+
+Use two forward branches $A$ and $B$, initially two bytes each.
+After $B$, place $124$ fixed bytes, label $T$, eight more fixed bytes, and label $U$.
+$A$ targets $T$ and $B$ targets $U$.
+Table~\ref{tab:ch55-relaxation} computes the widening sequence.
+Short displacements range from $-128$ to $127$.
+Initially $A$ fits, but $B$ does not; widening $B$ then pushes $A$ out of range.
+
+\begin{table}[htbp]
+\caption{One branch expansion can invalidate a previously fitting branch.}
+\label{tab:ch55-relaxation}
+\centering
+\begin{tabular}{lllllll}
+\toprule
+Round & Size A & Size B & T & U & A displacement & B displacement \\
+\midrule
+Initial & $2$ & $2$ & $128$ & $136$ & $126$ & $132$ \\
+Widen B & $2$ & $5$ & $131$ & $139$ & $129$ & $132$ \\
+Widen A & $5$ & $5$ & $134$ & $142$ & $129$ & $132$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=13mm,y=10mm]
+\node[basic block] (a) at (0,0) {A}; \node[basic block] (b) at (2,0) {B};
+\node[basic block] (t) at (5,0) {T}; \node[basic block] (u) at (7,0) {U};
+\draw[cfg edge] (a) to[bend left=28] node[above,font=\small] {crosses B's encoding}(t);
+\draw[cfg edge] (b) to[bend right=28] node[below,font=\small] {must widen first}(u);
+\draw[dashed] (b)--node[above,font=\small] {124 bytes}(t);
+\draw[dashed] (t)--node[above,font=\small] {8 bytes}(u);
+\end{tikzpicture}
+\caption{The interval covered by A includes B, so changing B's size changes A's required displacement.}
+\label{fig:ch55-relaxation}
+\end{figure}
+
+\begin{algorithm}[htbp]
+\caption{Find a valid layout by monotonically widening instruction forms.}
+\label{alg:ch55-widen}
+\begin{pseudocode}
+\Require finite ordered forms per instruction, largest forms checked for representability
+\Ensure a self-consistent valid layout or explicit unrepresentable-reference error
+\State choose the smallest allowed form for each relaxable instruction
+\Repeat
+  \State recompute offsets, labels, and alignment padding from current forms
+  \State collect instructions whose fields do not fit in the current layout
+  \If{any failing instruction has no wider supported form}
+    \State \Return unrepresentable-reference error
+  \EndIf
+  \State widen every collected instruction by at least one form
+\Until{no instruction was widened}
+\State revalidate every final field, then emit bytes and relocations
+\end{pseudocode}
+\end{algorithm}
+
+Let $F$ be the number of fragments and $W$ the total number of possible form promotions across them.
+Algorithm~\ref{alg:ch55-widen} performs at most $W$ changing rounds, plus a final stable round.
+With $O(F)$ layout and checking per round, its bound is $O(F(W+1))$.
+The proof of termination uses the monotone form indices, not monotone label distances: alignment can cause padding to increase or decrease as preceding instructions grow.
+The final validation establishes representability under the final layout.
+This algorithm need not produce the globally smallest encoding.
+It never revisits a widening choice even if a later padding change would permit a smaller form.
+
+\section{Alignment, literals, and external targets add constraints}
+\label{sec:ch55-layout-constraints}
+
+Alignment fragments are functions of their incoming offset, not constants stored forever after their first visit.
+For power-of-two alignment $a$, padding is $(-x)\bmod a$, with a result in $[0,a)$.
+Increasing an earlier instruction by one byte can reduce that padding by one and leave later addresses unchanged.
+This is why a dependency graph over fragments is more informative than treating every byte increase as a uniform shift of all following labels.
+
+Literal pools introduce another kind of reachability constraint.
+An instruction that loads a constant from a nearby pool needs the pool within its displacement range.
+Pool placement can require an inserted branch around embedded data and can change the distances of other branches.
+Such a pass must preserve fall-through behavior as well as field range.
+The x86-64 case study avoids literal pools, but the representation of deferred relationships generalizes to them.
+
+An external target has no known same-object distance.
+The assembler can choose a conservative form whose relocation the linker understands, or emit a relaxable sequence with sufficient metadata for link-time rewriting.
+It cannot honestly certify a short external branch by assuming that separately compiled functions will happen to be adjacent.
+Veneers, thunks, and linker relaxation are target-dependent solutions discussed again in Chapter~\ref{ch:link-layout}.
+
+\section{Reproducibility starts before byte emission}
+\label{sec:ch55-reproducibility}
+
+Lua table iteration with \code{pairs} does not define a portable stable order for arbitrary keys.
+If emission order matters, use a dense numeric array with an explicit numeric loop or sort a collected key list.
+Avoid incorporating time, random values, or ambient paths into bytes unless they are declared build inputs.
+Two deterministic assemblers cannot repair nondeterministic source generation that has already changed the instruction order.
+
+The same principle applies to symbol-table ordering and diagnostics.
+Stable source order and explicit local/global partitioning make output repeatable without depending on a hash table's bucket order.
+Tests compare complete ELF bytes across compiler configurations and repeat generation to catch accidental state leakage.
+Determinism is a property of the entire pipeline and its input policy, not only a promise made by the final file writer.
+
+\section{Exercises}
+\label{sec:ch55-exercises}
+\begin{enumerate}
+\item\label{ex:ch55-fresh} Expand two countdown invocations with counts three and five. List their private names and explain which shared state guarantees uniqueness within the assembly unit.
+\item\label{ex:ch55-bytes} Give the emitted numeric data directives for the three-byte Lua string containing ASCII A, zero, and newline.
+\item\label{ex:ch55-rounds} Recompute Table~\ref{tab:ch55-relaxation} after each widening. Explain why A's displacement stays 129 when A itself grows.
+\item\label{ex:ch55-align} Compute padding to alignment 16 at offsets 29, 30, and 32. What happens to the aligned destination after a one-byte growth from 29 to 30?
+\item\label{ex:ch55-bound} There are 20 branches with two forms each and 200 fragments. Give the maximum number of changing rounds in the widening scheme and the resulting coarse layout-work bound.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch55-reading}
+Salomon treats macro expansion, conditional assembly, and source-level assembler facilities in detail~\cite{salomon-1993-assemblers}.
+The Lua manual defines strings, integer behavior, iteration, and the C API needed to embed this preprocessing phase~\cite{ierusalimschy-2026-lua}.
+GNU linker documentation illustrates the related layout and relaxation responsibilities that can remain after assembly~\cite{gnu-2026-ld}.

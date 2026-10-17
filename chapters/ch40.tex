@@ -1,0 +1,421 @@
+\chapter{Logic for Compiler Reasoning}
+\label{ch:logic-compiler-reasoning}
+
+Replacing a division $x/x$ by the constant $1$ looks like elementary algebra.
+Yet an optimizer must first ask whether $x$ can be zero, what division means in this IR, and whether evaluating $x$ has an observable effect.
+A graph tells us where an instruction executes; logic tells us which claims justify changing it there.
+The useful product of a proof is a precise connection between assumptions, execution, and the property we want to preserve.
+
+We begin with pure expressions and mathematical integers, then make the boundary with machine operations explicit.
+Statements in the small assertion language use deterministic, total expression evaluation unless stated otherwise.
+This assumption deliberately excludes overflow, traps, memory faults, and side effects from expression evaluation.
+Those features require additional premises, not a different interpretation of the word \enquote{proof}.
+The logical foundations and program-proof rules developed here are treated systematically by Huth and Ryan~\cite{huth-2004-logic}.
+
+\section{Facts at a program point}
+\label{sec:ch40-facts}
+
+Suppose a bounds check branches on $0\leq i$ and then on $i<n$.
+At the array access, both comparisons have succeeded, provided neither operand has changed.
+Write $p$ for $0\leq i$ and $q$ for $i<n$.
+The access requires $p\land q$, not merely $p\rightarrow q$.
+Table~\ref{tab:ch40-truth} shows why the distinction matters.
+
+\begin{table}
+\caption{An implication can hold even when the bounds-check conjunction fails.}
+\label{tab:ch40-truth}
+\centering
+\begin{tabular}{ccccc}
+\toprule
+$p$ & $q$ & $\neg p$ & $p\land q$ & $p\rightarrow q$ \\
+\midrule
+F & F & T & F & T \\
+F & T & T & F & T \\
+T & F & F & F & F \\
+T & T & F & T & T \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A \term{propositional formula} combines atomic propositions using connectives such as negation $\neg$, conjunction $\land$, disjunction $\lor$, and implication $\rightarrow$.
+A \term{valuation} assigns each atom either true or false.
+Evaluation extends this assignment through the formula's syntax tree.
+Conjunction requires both operands to be true; disjunction requires at least one; negation reverses the truth value.
+The formula $A\rightarrow B$ means $\neg A\lor B$.
+It is false only when $A$ is true and $B$ is false.
+The constants $\top$ and $\bot$ denote truth and falsity.
+
+Logical implication describes truth under an assignment, not temporal execution or causation.
+Similarly, $A\land B$ does not specify which operand a program evaluates first.
+If a source expression uses short-circuit evaluation, that control flow must be represented separately before logical formulas can describe its results.
+In particular, a logical formula containing a division is not made operationally safe merely by writing a nonzero test to its left.
+
+A formula is \term{satisfiable} if some valuation makes it true, \term{valid} if every valuation does, and \term{unsatisfiable} if none does.
+The formula $p\lor\neg p$ is valid; $p\land\neg p$ is unsatisfiable; $p\land q$ is satisfiable but not valid.
+These are properties of formulas, not three possible truth values of an individual valuation.
+
+Treating comparisons as independent atoms can lose arithmetic information.
+For example, the propositional assignment that makes both $x<0$ and $x\geq0$ true has no corresponding integer state.
+A propositional proof valid under all assignments remains useful under this abstraction, but a propositional counterexample might be arithmetically impossible.
+Predicate semantics will recover the relationship between the atoms.
+
+Figure~\ref{fig:ch40-guard-facts} attaches assertions to the successful edges of the bounds check.
+The fact belongs to a particular version of $i$ and $n$.
+If an intervening assignment changes $i$, the optimizer cannot reuse the old comparison without proving a relationship between the old and new values.
+Dominance identifies a must-pass-through block; it does not by itself prove that a value tested there is still unchanged.
+
+\begin{figure}
+\centering
+\input{figures/logic-guard-facts.tex}
+\caption{Successful test edges accumulate facts about unchanged operands before an access.}
+\label{fig:ch40-guard-facts}
+\end{figure}
+
+\section{Meaning and derivation are different objects}
+\label{sec:ch40-entailment}
+
+Let $\Gamma$ be a finite collection of assumptions.
+We write $\Gamma\models A$ for \term{semantic entailment}: every interpretation satisfying all members of $\Gamma$ also satisfies $A$.
+For propositional formulas, interpretations are valuations.
+An assignment that makes every assumption true and $A$ false is a counterexample to the entailment.
+Thus $\Gamma\models A$ exactly when
+\[
+  \left(\bigwedge_{G\in\Gamma}G\right)\land\neg A
+\]
+is unsatisfiable; the empty conjunction is $\top$.
+This reformulation is the bridge to solver-based checking in Chapter~\ref{ch:automated-reasoning-limits}.
+
+The notation $\Gamma\vdash A$ means \term{derivability}: there exists a finite proof of $A$ from $\Gamma$ in a specified proof system.
+Entailment quantifies over meanings; derivability quantifies over proof objects.
+For example, the following rules introduce a conjunction, extract one of its components, and apply an implication:
+\[
+  \frac{\Gamma\vdash A\qquad\Gamma\vdash B}{\Gamma\vdash A\land B}
+  \qquad
+  \frac{\Gamma\vdash A\land B}{\Gamma\vdash A}
+  \qquad
+  \frac{\Gamma\vdash A\qquad\Gamma\vdash A\rightarrow B}
+       {\Gamma\vdash B}.
+\]
+Each rule is a finite instruction for constructing a larger proof from smaller proofs.
+An assumption rule permits $\Gamma\vdash A$ when $A\in\Gamma$.
+
+Take $\Gamma=\{p,\ p\rightarrow q,\ q\rightarrow r\}$.
+The assumption rule provides $p$ and $p\rightarrow q$; implication elimination yields $q$.
+A second application, using $q\rightarrow r$, yields $r$.
+Conjunction introduction then yields $p\land r$.
+This is a derivation with named dependencies, rather than a claim that the conclusion merely looks plausible.
+
+A proof system is sound when $\Gamma\vdash A$ implies $\Gamma\models A$.
+It is complete for the chosen semantics when the converse holds.
+The few displayed rules are not a complete system; standard classical propositional calculi add rules for the other connectives and are sound and complete~\cite{huth-2004-logic}.
+Completeness does not promise a short proof or a fast search procedure.
+Nor does soundness of a calculus establish that a compiler's encoding of an instruction is correct.
+The statement proved and its connection to the implementation are separate obligations.
+
+Inconsistent assumptions entail every conclusion: no interpretation satisfies them, so none can refute the entailment.
+An optimization checker that assumes both $x=3$ and $x=4$ can therefore \enquote{prove} a false rewrite conditionally on those assumptions.
+This may correctly describe an unreachable path, or it may expose an encoding bug.
+Checking whether assumptions are satisfiable is a useful diagnostic; it is not a replacement for checking that they describe reachable program states soundly.
+
+\section{Predicates, domains, and binding}
+\label{sec:ch40-quantifiers}
+
+The statement $i<n$ has structure that an atom named $q$ hides.
+In \term{predicate logic}, terms denote domain elements, predicates denote relations on those elements, and quantifiers bind variables.
+An interpretation $\mathcal M$ supplies a nonempty domain, meanings for constants, meanings for function symbols, and meanings for predicate symbols.
+An environment $\rho$ supplies values for free variables.
+We write $\mathcal M,\rho\models A$ when formula $A$ is true in that interpretation and environment.
+For arithmetic assertions here, the domain is $\mathbb Z$, addition has its usual meaning, and $<$ is the usual integer ordering.
+
+The universal assertion $\forall x.\,A$ holds when $A$ holds for every replacement of $\rho(x)$ by a domain element.
+The existential assertion $\exists x.\,A$ holds when at least one replacement makes $A$ true.
+A variable occurrence is \term{bound} when it is within the scope of a quantifier for that variable; otherwise it is \term{free}.
+A formula with no free variables is a sentence.
+An assertion about a running program normally has free variables: its truth depends on the current state.
+
+Parentheses specify scope.
+The formula $(\forall x.\,P(x))\lor Q(x)$ has a free occurrence of $x$ in $Q(x)$.
+The formula $\forall x.\,(P(x)\lor Q(x))$ binds both occurrences.
+Renaming a bound variable consistently, without capturing other variables, changes no meaning.
+Using distinct internal identifiers for binders is therefore safer than identifying variables only by their printed names.
+
+Quantifier order records dependency.
+Consider two uses $u_1,u_2$ and two definitions $d_1,d_2$, where the relation $R(u,d)$ consists exactly of $(u_1,d_1)$ and $(u_2,d_2)$.
+Then
+\[
+ \forall u\in\{u_1,u_2\}.\,\exists d\in\{d_1,d_2\}.\,R(u,d)
+\]
+is true: each use has a suitable definition.
+But the formula with $\exists d$ before $\forall u$ is false: no single definition serves both uses.
+The bounded notation $\forall x\in S.\,A$ abbreviates $\forall x.\,(x\in S\rightarrow A)$; existential restriction uses conjunction instead.
+Reordering quantifiers can silently change a per-use obligation into a common-witness obligation.
+
+To instantiate a universally quantified theorem, substitute a term for its bound variable while respecting other binders.
+To prove a universal claim, reason about an arbitrary fresh variable, with no assumption that restricts it to a convenient value.
+To use an existential assumption, introduce a fresh name for its witness within a local argument; a conclusion that escapes that argument must not depend on which fresh name was chosen.
+These freshness conditions prevent a proof from treating an unknown value as a particular constant.
+
+\subsection{Substitution must avoid capture}
+\label{sec:ch40-substitution}
+
+Write $Q[e/x]$ for replacement of the free occurrences of $x$ in $Q$ by expression $e$.
+Bound occurrences of $x$ are untouched.
+Any binder that would capture a free variable of $e$ must first be renamed to a fresh variable.
+This operation is \term{capture-avoiding substitution}.
+
+For example, let $Q=\forall y.\,x\leq y$ and substitute the free variable $y$ for $x$.
+Naive text replacement produces $\forall y.\,y\leq y$, which is always true.
+Correct substitution first renames the bound variable and produces $\forall z.\,y\leq z$.
+Over the domain $\{0,1\}$ with the usual ordering and free $y=1$, the correct result is false because $z=0$ refutes it.
+The naive result remains true.
+The difference is a change in meaning, not typography.
+
+Compiler-generated assertions often avoid source-level name clashes by giving every program value and every logical binder a unique identity.
+Printing can recover readable names afterwards.
+Nevertheless, a substitution routine must work on binding structure, not substrings: replacing the letter \code{x} in an identifier is not logical substitution.
+
+\section{Proof by induction follows the object being proved}
+\label{sec:ch40-induction}
+
+A compiler correctness argument often covers infinitely many expressions or executions using a finite collection of cases.
+The induction measure explains why those cases suffice.
+For a syntax-directed transformation, use \term{structural induction}: prove the property for leaves, then prove it for each constructor assuming it holds for the constructor's children.
+For a proof checker, induct on the derivation tree.
+For a loop invariant, induct on the number of completed iterations.
+These are different objects, so their induction hypotheses are different.
+
+As a small structural example, consider pure integer expressions built from constants, variables, addition, and negation.
+A recursive simplifier processes children first and removes a double negation when its simplified child is itself a negation.
+For a variable or constant, evaluation is unchanged.
+For addition, the two induction hypotheses say that the simplified operands have the same values as the original operands; adding equal values gives equal results.
+For negation, either the constructor remains and the induction hypothesis suffices, or a simplified operand $-t$ is exposed and the result is $t$.
+In the latter case the original negated expression evaluates to $-(-\llbracket t\rrbracket_\rho)=\llbracket t\rrbracket_\rho$.
+This last equality uses the specified arithmetic semantics.
+It would not justify silently ignoring an exception from an intermediate operation in a trapping arithmetic language.
+
+Soundness of an inference system follows the same pattern.
+Assumption leaves are true in every interpretation satisfying $\Gamma$.
+At an implication-elimination node, the induction hypotheses establish both $A$ and $A\rightarrow B$; their truth conditions establish $B$.
+Check each remaining rule similarly.
+Induction then covers every finite derivation, not only the derivation used as an example.
+
+Induction is also what justifies the assignment rule below.
+For a total pure expression $e$, let $v=\llbracket e\rrbracket_\rho$ and let $\rho[x\mapsto v]$ update just $x$.
+The substitution property is
+\[
+  \mathcal M,\rho\models Q[e/x]
+  \quad\Longleftrightarrow\quad
+  \mathcal M,\rho[x\mapsto v]\models Q.
+\]
+Its proof proceeds through the terms and formula constructors, with binder renaming supplying the quantifier case.
+An implementation of assertion rewriting relies on this property every time it crosses an assignment backwards.
+
+\section{Assertions before and after execution}
+\label{sec:ch40-hoare}
+
+A \term{Hoare triple} $\{P\}\ C\ \{Q\}$ connects a precondition $P$, a command $C$, and a postcondition $Q$.
+For \term{partial correctness}, it says that every terminating execution of $C$ starting in a state satisfying $P$ ends in a state satisfying $Q$.
+For the total-expression command language used here, there are no stuck executions.
+When extending the language with faults, state explicitly whether the specification also requires their absence; a fault must not disappear merely because it fails to produce an ordinary final state.
+
+\term{Total correctness} additionally requires termination from every state satisfying $P$.
+Partial correctness alone validates $\{\top\}\ \text{while true do skip}\ \{\bot\}$: there is no terminating execution that could violate the postcondition.
+It does not validate the corresponding total-correctness claim.
+This distinction matters when considering transformations that delete loops or move effects across potentially nonterminating computations.
+
+For assignment, the substitution property gives
+\[
+  \{Q[e/x]\}\ x:=e\ \{Q\}.
+\]
+If the desired postcondition after $x:=x+2$ is $x\geq7$, the required assertion before it is $x+2\geq7$, or $x\geq5$.
+The occurrences of $x$ in $x+2$ denote the old value.
+Substitution is performed once; the expression inserted for $x$ is not recursively rewritten by the same substitution.
+
+Two additional rules connect local proofs:
+\[
+ \frac{\{P\}\ C_1\ \{R\}\qquad\{R\}\ C_2\ \{Q\}}
+      {\{P\}\ C_1;C_2\ \{Q\}},
+ \qquad
+ \frac{P\models P'\quad\{P'\}\ C\ \{Q'\}\quad Q'\models Q}
+      {\{P\}\ C\ \{Q\}}.
+\]
+The second is the consequence rule: strengthen the precondition or weaken the postcondition.
+Reversing either implication is unsound.
+A proof requiring $x\geq5$ can accept callers promising $x\geq8$, not callers promising only $x\geq0$.
+
+\subsection{Computing obligations backwards}
+\label{sec:ch40-backward}
+
+For loop-free commands with total expressions, the \term{weakest precondition} $\operatorname{wp}(C,Q)$ is exactly the set of initial states whose execution finishes in $Q$.
+It is weakest in the implication order: every sufficient precondition entails it.
+Algorithm~\ref{alg:ch40-wp} computes a formula for that set by recursion over structured commands.
+The command \code{skip} changes no state, and a conditional evaluates its guard before executing exactly one arm.
+
+\begin{algorithm}
+\caption{Construct a weakest precondition for a loop-free command.}
+\label{alg:ch40-wp}
+\begin{pseudocode}
+\Require Command $C$ built from skip, assignment, sequence, and conditionals
+\Require Postcondition $Q$; pure, total expressions and guards
+\Ensure Formula true exactly in the states from which $C$ establishes $Q$
+\Function{WP}{$C,Q$}
+  \If{$C$ is skip}
+    \State \Return $Q$
+  \ElsIf{$C$ is $x:=e$}
+    \State Rename binders in $Q$ that would capture free variables of $e$
+    \State \Return $Q[e/x]$ using structural substitution
+  \ElsIf{$C$ is $C_1;C_2$}
+    \State $R\gets\Call{WP}{C_2,Q}$
+    \State \Return $\Call{WP}{C_1,R}$
+  \Else \Comment{$C$ is if $b$ then $C_t$ else $C_f$}
+    \State $R_t\gets\Call{WP}{C_t,Q}$
+    \State $R_f\gets\Call{WP}{C_f,Q}$
+    \State \Return $(b\rightarrow R_t)\land(\neg b\rightarrow R_f)$
+  \EndIf
+\EndFunction
+\end{pseudocode}
+\end{algorithm}
+
+For $a:=a+2;\ b:=3a$ with goal $b\geq12$, crossing the second assignment gives $3a\geq12$.
+Crossing the first gives $3(a+2)\geq12$, equivalent over integers to $a\geq2$.
+Figure~\ref{fig:ch40-backward} shows the forward state changes beside these backward obligations.
+At $a=2$, the final $b$ is $12$; at $a=1$, it is $9$, so weakening the precondition to $a\geq1$ would be wrong.
+
+\begin{figure}
+\centering
+\input{figures/logic-backward-assertions.tex}
+\caption{Execution moves down the command sequence while substitution moves the obligation up it.}
+\label{fig:ch40-backward}
+\end{figure}
+
+For a conditional example, execute $x:=-x$ when $x<0$, otherwise execute $x:=x+2$, and then execute $y:=3x$.
+The goal $y\geq6$ first becomes $x\geq2$.
+The two arms require $-x\geq2$ and $x+2\geq2$, respectively, giving
+\[
+  (x<0\rightarrow x\leq-2)\land
+  (x\geq0\rightarrow x\geq0).
+\]
+Over integers this is equivalent to $x\neq-1$.
+The input $-2$ produces $y=6$, the input $-1$ produces $y=3$, and the input $0$ produces $y=6$.
+The guard is evaluated in the incoming state, so it must not be replaced by the post-assignment value of $x$.
+
+Let $n$ be the number of command nodes and $L$ the total number of syntax nodes inspected or allocated by all substitution and formula-construction steps.
+With linear-time capture avoidance and constant-time node operations, the running time is $O(n+L)$; recursive control storage is $O(n)$ in the worst case, in addition to formula storage.
+This is an output-sensitive statement, not a claim that $L$ is polynomial in $n$.
+Repeated substitution through $x:=x+x$ can double a tree representation at each step.
+Shared expression graphs reduce duplication, but substitution caches must include the substitution environment, not only the original node.
+The algorithm constructs a formula; it does not decide arithmetic validity or simplify that formula automatically.
+
+\subsection{Loops need an inductive assertion}
+\label{sec:ch40-loop-proof}
+
+Backward recursion cannot unfold a loop indefinitely.
+Instead choose a \term{loop invariant}, an assertion $I$ that holds at the loop head initially and after every completed iteration.
+For a loop with guard $b$, body $C$, and desired exit property $Q$, prove initialization, preservation, and exit:
+\[
+  P\models I,\qquad
+  \{I\land b\}\ C\ \{I\},\qquad
+  I\land\neg b\models Q.
+\]
+Here $P$ describes the state just before the first guard evaluation.
+The preservation triple establishes the induction step for every state satisfying $I\land b$, not only for states reached in one sample execution.
+
+Take an unchanged integer $n\geq0$, initialize $i:=0$ and $t:=0$, then repeat $t:=t+3;\ i:=i+1$ while $i<n$.
+Choose $I\equiv 0\leq i\leq n\land t=3i$.
+Initialization satisfies $I$.
+Under $I\land i<n$, integer discreteness gives $i+1\leq n$, and the next values satisfy $t'=t+3=3(i+1)=3i'$.
+At exit, $i\leq n$ and $i\geq n$ give $i=n$, hence $t=3n$.
+Table~\ref{tab:ch40-loop-trace} checks the arithmetic for $n=4$.
+
+\begin{table}
+\caption{The loop invariant and decreasing variant at each guard evaluation for $n=4$.}
+\label{tab:ch40-loop-trace}
+\centering
+\begin{tabular}{rrrrc}
+\toprule
+$i$ & $t$ & $3i$ & $n-i$ & $i<n$ \\
+\midrule
+0 & 0 & 0 & 4 & T \\
+1 & 3 & 3 & 3 & T \\
+2 & 6 & 6 & 2 & T \\
+3 & 9 & 9 & 1 & T \\
+4 & 12 & 12 & 0 & F \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+For total correctness, use the \term{loop variant} $n-i$.
+It is a nonnegative integer at the head and decreases by one on each taken iteration; the body itself terminates.
+There is no infinite strictly descending sequence of nonnegative integers, so the loop terminates.
+A real-valued quantity that merely decreases is insufficient: $1,1/2,1/4,\ldots$ decreases forever while remaining positive.
+Termination requires a well-founded descent, not just a less-than comparison between successive values.
+
+\section{Turning a proof into an optimization precondition}
+\label{sec:ch40-optimization}
+
+For pure total expressions $e$ and $e'$, a local rewrite under fact $P$ requires
+\[
+  \forall\rho.\ P(\rho)\rightarrow
+  \llbracket e\rrbracket_\rho=\llbracket e'\rrbracket_\rho.
+\]
+The quantification is over all admissible input states, not just inputs seen in testing.
+Substitution of equal expressions into a larger pure expression preserves its value because each enclosing operator is a function of its operands.
+This compositional argument stops being sufficient when evaluation order, effects, or exceptional results become observable.
+
+For example, replacing $x/x$ by $1$ is justified on nonzero mathematical integers with exact integer division of equal operands.
+It is also an equality of the corresponding defined integer operations for nonzero machine integers when that operation has no other exceptional case on equal operands.
+It is not an unconditional floating-point identity: zero, infinities, and NaNs need separate treatment.
+The useful compiler rule includes its type and definedness premises, rather than relying on the spelling of the operator.
+
+Code motion needs an execution premise as well as a value equality.
+Suppose a division executes only on the true arm of a branch.
+Moving it before the branch introduces an evaluation on the false arm.
+Even if neither operand changes, the new evaluation can fault when the denominator is zero there.
+A proof must establish safety on every newly exposed path, or show that the IR semantics permits the speculation.
+Likewise, an address equality does not justify merging loads if memory may change between them.
+
+Facts supplied by analysis are premises in these proofs.
+An interval result $0\leq x\leq14$ can justify a comparison rewrite for four-bit unsigned addition, while $0\leq x\leq15$ cannot justify the same claim.
+An implementation should record the fact's program point, operand identities, arithmetic semantics, and invalidation conditions.
+This gives a concrete debugging order: inspect the premises, inspect the semantic rule, then inspect the transformation that applied it.
+
+\section{Exercises}
+\label{sec:ch40-exercises}
+
+Solutions and finite-example checks are in \code{example-code/logic-checks/}.
+The checks supplement the general arguments; bounded enumeration is not a proof over all integers.
+
+\begin{enumerate}
+\item\label{ex:ch40-entailment}
+Let $\Gamma=\{p\lor q,\ p\rightarrow r\}$.
+Give a valuation refuting $\Gamma\models r$, then show that adding $\neg q$ makes the entailment valid.
+
+\item\label{ex:ch40-capture}
+Compute the capture-avoiding substitution $Q[y/x]$ for $Q=\exists y.\,x<y$.
+Over $\mathbb Z$ with free $y=5$, compare its truth with that of the naive text replacement.
+
+\item\label{ex:ch40-sequence}
+Over integers, compute the weakest precondition of $a:=a+2;\ b:=3a$ for $b\geq15$.
+Give one boundary input that satisfies it and one that does not.
+
+\item\label{ex:ch40-branch}
+When $x<0$, execute $x:=-x$; otherwise execute $x:=x+2$.
+Then execute $y:=3x$.
+Compute the weakest precondition for $y\geq9$ over integers, retaining the guard constraints until the final simplification.
+
+\item\label{ex:ch40-invariant}
+Change the loop in Section~\ref{sec:ch40-loop-proof} to increment $t$ by $5$ instead of $3$.
+Give an invariant and a variant proving total correctness for unchanged $n\geq0$, and compute the exit state for $n=3$.
+
+\item\label{ex:ch40-speculation}
+An IR division traps on zero.
+A program evaluates $12/d$ only when a Boolean input $b$ is true.
+An optimizer moves the division before the branch, assuming only $b\rightarrow d\neq0$.
+Give a counterexample and a sufficient stronger premise for this motion, assuming the division is otherwise pure and total.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch40-reading}
+
+Huth and Ryan~\cite{huth-2004-logic} connect propositional and predicate proof systems to program assertions; their discussions of substitution and partial versus total correctness explain the side conditions that a proof-producing compiler must preserve.
+Boolos, Burgess, and Jeffrey~\cite{boolos-2007-computability} develop the relationship between formal derivations and semantic consequence, providing the background for understanding why a complete calculus need not yield a terminating decision procedure.

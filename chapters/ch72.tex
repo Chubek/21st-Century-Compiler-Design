@@ -1,0 +1,175 @@
+\chapter{Ownership, Lifetimes, and Garbage Collection at Language Boundaries}
+\label{ch:ffi-ownership}
+
+A native pointer can outlive the runtime object that originally justified it.
+Keeping that object reachable fixes one problem, but a moving collector can still change its address.
+Conversely, preventing movement does not necessarily keep an otherwise unreachable object alive.
+An FFI must account for reachability, address stability, and release authority separately.
+
+\section{State who may release each resource}
+\label{sec:ch72-ownership}
+\term{Foreign ownership} is the contract assigning responsibility for retaining and releasing a resource across the boundary.
+A borrowed pointer grants temporary access without transferring release responsibility.
+An owned result transfers a specified release obligation, often through an explicit destructor function.
+Shared ownership adds a retention mechanism whose increments and decrements must agree across all participants.
+
+Our native constructor copies bytes into a \code{BbBuffer} and publishes its pointer only after successful allocation and initialization.
+The caller must eventually call \code{bb\_free}; it must not guess which allocator can free the result.
+The allocation and destructor belong to the same native component, which also allows the representation to remain opaque.
+Table~\ref{tab:ch72-resources} accounts for the resources used in the two adapters.
+
+\begin{table}[htbp]
+\caption{Every resource has both a retention mechanism and a release event.}
+\label{tab:ch72-resources}
+\centering
+\begin{tabular}{lll}
+\toprule
+Resource & Retained by & Released at \\
+\midrule
+Python input export & buffer-protocol acquisition & end of constructor copy \\
+Lua input string & argument on Lua stack & ordinary call completion \\
+native byte buffer & capsule or full userdata owner & explicit close or finalization \\
+callback function & synchronous call arguments & visitor return \\
+prepared call metadata & address-stable stack plan & foreign call completion \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The C constructor leaves its output unchanged on failure.
+The wrappers initialize their owner slots to null, so cleanup is valid even if construction fails before publication.
+The native destructor accepts null, but it is not generally idempotent on a nonnull freed address.
+Idempotent close belongs to the wrapper: it releases once and replaces its stored pointer with null.
+
+\section{Separate roots, handles, and pins}
+\label{sec:ch72-movement}
+A \term{foreign root} keeps a managed object reachable for the collector.
+A \term{stable handle} names an indirection slot whose target can be updated when an object moves.
+A \term{pin} prevents relocation for a specified interval under the runtime's pinning rules.
+These mechanisms solve related but distinct problems~\cite{jones-2023-garbage}.
+
+Figure~\ref{fig:ch72-handle} shows a handle surviving relocation.
+The foreign client keeps the handle, not a cached raw address from its previous lookup.
+If it resolves the handle to a raw pointer and then allows a collection, it must reacquire the address afterward or enter a protocol guaranteeing stability during use.
+The existence of the handle alone does not make every derived pointer permanent.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=13mm and 16mm]
+\node[basic block] (handle) {rooted handle slot};
+\node[basic block,below left=of handle] (old) {old object address};
+\node[basic block,below right=of handle] (new) {new object address};
+\draw[cfg edge,dashed] (handle)--node[left,font=\small]{before}(old);
+\draw[cfg edge] (handle)--node[right,font=\small]{after}(new);
+\draw[cfg edge] (old)--node[below,font=\small]{move}(new);
+\end{tikzpicture}
+\caption{A moving collector updates the rooted indirection while foreign code retains the handle.}
+\label{fig:ch72-handle}
+\end{figure}
+
+The companion handle model stores a slot index and generation.
+Releasing slot $(0,0)$ increments its generation; reusing the slot produces $(0,1)$.
+A stale $(0,0)$ is rejected rather than resolving to the new owner's object.
+Algorithm~\ref{alg:ch72-handle} gives the lookup rule.
+Finite-width production generations must address wraparound, for example by retiring exhausted slots; an unbounded mathematical counter does not solve that implementation problem automatically.
+
+\begin{algorithm}[htbp]
+\caption{Resolve a sequential generation-tagged handle.}
+\label{alg:ch72-handle}
+\begin{pseudocode}
+\Require slot table, handle $(i,g)$; table cannot change during this lookup/use
+\Ensure current object or stale-handle rejection
+\If{$i$ is outside the table} \State reject \EndIf
+\State read slot generation $g'$ and object $o$
+\If{$g\ne g'$ or the slot is empty} \State reject \EndIf
+\State return $o$ under the caller's stability protocol
+\end{pseudocode}
+\end{algorithm}
+
+Array lookup costs $O(1)$; the simple model finds a reusable slot by an $O(H)$ scan over $H$ slots.
+Moving all live model objects costs $O(H)$ for their fixed-size records.
+The model is sequential and does not establish lock-free lookup safety or concurrent reclamation.
+Those require a protocol preventing release between validation and use, not merely an atomic generation comparison.
+
+\section{Make close and finalization cooperate}
+\label{sec:ch72-close}
+A finalizer is a fallback for an unreachable wrapper, not a reliable deadline for releasing scarce resources.
+Explicit close makes the event visible in program control flow.
+After close, operations on a surviving wrapper must detect the closed state rather than using its former payload.
+Figure~\ref{fig:ch72-close} shows the wrapper's two-state protocol.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=24mm]
+\node[basic block] (live) {live payload};
+\node[basic block,right=of live] (closed) {null payload};
+\draw[cfg edge] (live)--node[above,font=\small]{close}(closed);
+\draw[cfg edge] (closed) edge[loop below] node[below,font=\small]{close again}(closed);
+\end{tikzpicture}
+\caption{Wrapper-level close is idempotent because the pointer is cleared after release.}
+\label{fig:ch72-close}
+\end{figure}
+
+Algorithm~\ref{alg:ch72-close} assumes serialized access and a destructor that neither throws nor reenters the wrapper.
+If destruction can reenter, detach the payload from the owner before invoking the destructor and define how reentrant calls observe the closing state.
+If operations can run concurrently, close must also stop new users and wait for existing users; clearing a pointer alone is insufficient.
+
+\begin{algorithm}[htbp]
+\caption{Close a serialized owner with a nonreentrant native destructor.}
+\label{alg:ch72-close}
+\begin{pseudocode}
+\Require valid owner; no concurrent user; destructor accepts null and cannot reenter
+\Ensure owner has no payload and repeated close is harmless
+\State release the owner's payload through its matching native destructor
+\State set the owner's payload pointer to null
+\State return success
+\end{pseudocode}
+\end{algorithm}
+
+The bookkeeping is $O(1)$ plus the destructor's cost.
+In CPython, a capsule retains a small owner allocation until the capsule itself dies, even after its payload is closed.
+In Lua, full userdata stores the owner directly; both \code{\_\_gc} and \code{\_\_close} use the same close routine.
+The Lua adapter installs the metatable before acquiring the native payload, so any later allocation error still leaves a finalizable owner~\cite{ierusalimschy-2026-lua}.
+
+\section{Avoid cycles that neither collector can see}
+\label{sec:ch72-cycles}
+Suppose a native registration retains a managed callback, and that callback captures the wrapper owning the registration.
+The runtime sees the callback-to-wrapper edge, while the native table supplies the retention keeping the callback alive.
+Without an explicit release event or integrated tracing, neither ordinary wrapper finalization nor dropping the user's last reference necessarily breaks the cycle.
+An explicit registration token with close, a weak edge with defined failure behavior, or a tracing integration can resolve it.
+
+Table~\ref{tab:ch72-policies} compares the principal lifetime choices.
+Pinning may constrain collector movement and increase fragmentation; copying may consume bandwidth and duplicate storage.
+The right policy follows the operation's duration, mutation needs, and runtime guarantees rather than a blanket preference for avoiding copies.
+
+\begin{table}[htbp]
+\caption{Lifetime mechanisms preserve different properties and impose different costs.}
+\label{tab:ch72-policies}
+\centering
+\begin{tabular}{lll}
+\toprule
+Mechanism & Preserves & Main obligation \\
+\midrule
+root & reachability & eventually release the root \\
+handle & identity across moves & resolve under a stability protocol \\
+pin & stable address while pinned & retain liveness; eventually unpin \\
+copy & independent storage & define snapshot or mutation rules \\
+ownership transfer & designated release duty & use the specified destructor \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Exercises}
+\label{sec:ch72-exercises}
+\begin{enumerate}
+\item\label{ex:ch72-generation} Release handle $(0,0)$, reuse its slot for value $99$, and attempt both old and new lookups.
+Give the results and explain what a generation-wrap policy must prevent.
+\item\label{ex:ch72-pin} Explain why retaining an object does not necessarily stabilize its address and why a raw pin contract need not imply reachability.
+\item\label{ex:ch72-close} Trace explicit close, repeated close, a read attempt, and finalization for one owner.
+Count payload releases.
+\item\label{ex:ch72-cycle} Draw the registration/callback/wrapper retention cycle in prose and identify one explicit operation that breaks it.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch72-reading}
+The second edition of the garbage-collection handbook explains foreign references, handles, and pinning in the context of moving collectors~\cite{jones-2023-garbage}.
+The Python capsule and buffer APIs and Lua userdata/finalization APIs show concrete ownership mechanisms~\cite{python-2026-capi,ierusalimschy-2026-lua}.

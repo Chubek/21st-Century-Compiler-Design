@@ -1,0 +1,191 @@
+\chapter{Finite-State Transducers and Approximate Matching}
+\label{ch:finite-state-transducers}
+
+A recognizer answers whether an input belongs to a language.
+A spelling corrector must do more: associate an observed input with one or more dictionary outputs and rank those alternatives.
+Replacing one letter, inserting a missing letter, and ignoring an extra letter all consume and produce different amounts of text.
+A finite-state transducer exposes those two streams explicitly.
+
+\section{Label transitions with two sequences}
+\label{sec:ch79-relation}
+A \term{finite-state transducer}, or FST, has a finite state set, initial and final states, and edges labeled with an input symbol and an output symbol, either of which may be $\epsilon$.
+A path concatenates its input labels into $x$ and output labels into $y$ and therefore realizes the pair $(x,y)$.
+The transducer defines a relation $R\subseteq\Sigma^*\times\Delta^*$, not necessarily a function.
+Several paths can realize the same pair, and one input can have several different outputs.
+
+An identity dictionary transducer consumes a stored word and emits that same word, rejecting other strings.
+A morphology transducer can relate a lexical analysis to a surface spelling; inversion swaps its input and output labels and reverses the direction of that relation, not the direction of graph edges.
+A byte encoder can map one scalar to several output bytes using an expanded state path.
+Table~\ref{tab:ch79-labels} distinguishes common arc interpretations.
+
+\begin{table}[htbp]
+\caption{Input and output epsilon labels have different meanings.}
+\label{tab:ch79-labels}
+\centering
+\begin{tabular}{lll}
+\toprule
+Arc label & Consumes & Produces \\
+\midrule
+$a:a$ & input a & output a \\
+$a:b$ & input a & output b \\
+$a:\epsilon$ & input a & nothing \\
+$\epsilon:b$ & nothing & output b \\
+$\epsilon:\epsilon$ & nothing & nothing \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+An \term{epsilon transition} is not an end marker.
+It moves through the machine without consuming a symbol on the indicated tape.
+Cycles containing only epsilon on the input can produce unbounded output before another input symbol is consumed.
+Algorithms that enumerate all paths therefore need a finiteness condition or budget even for a finite graph.
+
+\section{Compose relations, not arbitrary determinized machines}
+\label{sec:ch79-compose}
+If $T$ maps $x$ to intermediate strings $y$ and $U$ maps those $y$ to $z$, their composition maps $x$ to $z$ whenever some compatible $y$ exists.
+Without intermediate epsilon labels, composition follows pairs of states and synchronizes matching output labels from $T$ with input labels from $U$.
+Figure~\ref{fig:ch79-compose} separates this relation from a destructive rewrite pipeline.
+Composition preserves all admitted alternatives until a later projection or ranking step selects among them.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=15mm]
+\node[basic block] (x) {observed input};
+\node[basic block,below=of x] (t) {edit relation};
+\node[basic block,below=of t] (u) {dictionary identity relation};
+\node[basic block,below=of u] (z) {accepted candidate outputs};
+\draw[cfg edge] (x)--(t);\draw[cfg edge] (t)--(u);\draw[cfg edge] (u)--(z);
+\end{tikzpicture}
+\caption{Composition restricts edit outputs to strings accepted by the dictionary.}
+\label{fig:ch79-compose}
+\end{figure}
+
+General weighted composition needs epsilon-handling filters so different interleavings do not spuriously duplicate paths and alter their combined weights~\cite{mohri-2009-weighted}.
+Algorithm~\ref{alg:ch79-compose} deliberately states the epsilon-free intermediate-label case.
+It costs $O(V+E)$ graph work for the reachable product it actually constructs, with matching-label indexing costs included in edge generation; the reachable product can approach the full Cartesian state product.
+The spelling composition in the next section avoids a generic filter by specializing one component to a fixed input and the other to an epsilon-free trie.
+
+\begin{algorithm}[htbp]
+\caption{Construct reachable composition when intermediate labels contain no epsilon.}
+\label{alg:ch79-compose}
+\begin{pseudocode}
+\Require transducers $T,U$ with nonempty intermediate labels and finite graphs
+\Ensure reachable product implementing relational composition
+\State enqueue initial state pairs; mark them discovered
+\While{a discovered pair $(p,q)$ remains unexpanded}
+\ForAll{$T$ arcs $(p,a,b,p')$ and $U$ arcs $(q,b,c,q')$}
+\State emit arc from $(p,q)$ to $(p',q')$ with input $a$ and output $c$
+\State discover and enqueue $(p',q')$ if new
+\EndFor
+\State mark pair final exactly when both component states are final
+\EndWhile
+\end{pseudocode}
+\end{algorithm}
+
+Projection onto one tape yields an acceptor for that tape's admitted strings.
+It does not make the relation deterministic.
+Unlike ordinary finite acceptors, arbitrary transducers cannot always be converted into equivalent deterministic sequential transducers.
+Weighted determinization also requires suitable algebraic and structural conditions.
+A compiler should not invoke an acceptor subset construction on paired labels and assume it has solved general transducer determinization.
+
+\section{Represent edit distance as path weight}
+\label{sec:ch79-edit}
+The unit-cost edit transducer includes copy $a:a$ at cost zero, substitution $a:b$ for unequal symbols at cost one, deletion $a:\epsilon$ at cost one, and insertion $\epsilon:b$ at cost one.
+We measure edits from observed query to candidate spelling.
+Thus a missing query letter is inserted on the output tape.
+Reversing that convention does not change ordinary symmetric Levenshtein distance but does matter for asymmetric learned costs.
+
+In the \term{tropical semiring}, alternative paths combine by minimum, consecutive arc costs combine by addition, and unreachable weight is infinity.
+The minimum weight realizing $(x,y)$ is its edit distance under these operations.
+Probability models use different combination operations and must account for multiple paths rather than automatically keeping just the cheapest one~\cite{mohri-2009-weighted}.
+Negative weights also invalidate a direct Dijkstra argument.
+
+For query \code{ct}, producing \code{cat} copies c, inserts a, and copies t, for cost one.
+Producing \code{coat} requires two inserted letters and costs two.
+Table~\ref{tab:ch79-distance} gives the independent dynamic-programming rows for \code{ct} against \code{cat}.
+Entry $D[i,j]$ is the cost to transform the first $i$ query symbols into the first $j$ candidate symbols.
+
+\begin{table}[htbp]
+\caption{Dynamic programming and transducer paths compute the same unit-cost distance.}
+\label{tab:ch79-distance}
+\centering
+\begin{tabular}{lrrrr}
+\toprule
+Query prefix & empty & c & ca & cat \\
+\midrule
+empty & 0 & 1 & 2 & 3 \\
+c & 1 & 0 & 1 & 2 \\
+ct & 2 & 1 & 1 & 1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The recurrence takes the minimum of deletion $D[i-1,j]+1$, insertion $D[i,j-1]+1$, and match/substitution $D[i-1,j-1]+[x_i\ne y_j]$.
+Filling the full table costs $O(mn)$ time; keeping only the previous row costs $O(n)$ storage if only the final distance is needed.
+Recovering an edit script requires additional predecessor information or a reconstruction algorithm.
+Adjacent transposition is not one of these primitive edits: \code{ab} to \code{ba} costs two, not one.
+
+\section{Search the implicit dictionary product}
+\label{sec:ch79-search}
+Fix a query $x$ and dictionary trie state $q$.
+The product state $(i,q)$ records consumed query length and emitted dictionary prefix.
+Deletion advances only $i$; insertion follows only a trie edge; copy/substitution advances both.
+Acceptance requires $i=|x|$ and a final trie state.
+Figure~\ref{fig:ch79-product} shows the local transition shapes.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=16mm and 18mm]
+\node[basic block] (s) {$(i,q)$};
+\node[basic block,right=of s] (d) {$(i+1,q)$};
+\node[basic block,below=of s] (in) {$(i,q')$};
+\node[basic block,right=of in] (b) {$(i+1,q')$};
+\draw[cfg edge] (s)--node[above,font=\small]{delete: 1}(d);
+\draw[cfg edge] (s)--node[left,font=\small]{insert: 1}(in);
+\draw[cfg edge] (s)--node[above,sloped,font=\small]{copy or substitute}(b);
+\end{tikzpicture}
+\caption{Every specialized edit transition advances the query, the trie, or both.}
+\label{fig:ch79-product}
+\end{figure}
+
+Algorithm~\ref{alg:ch79-product} performs shortest-path search while discarding paths already beyond radius $k$.
+Every dictionary state has a unique prefix, so keeping the best cost for $(i,q)$ cannot discard a different word reaching that same state.
+This proof fails if suffix states are merged without retaining additional output-path information.
+
+\begin{algorithm}[htbp]
+\caption{Enumerate dictionary candidates through an implicit unit-edit FST product.}
+\label{alg:ch79-product}
+\begin{pseudocode}
+\Require query $x$, trie, nonnegative radius $k$, expansion budget
+\Ensure complete minimum-cost candidate set, or explicit budget exhaustion
+\State distance of $(0,root)$ is zero; insert it into a min-priority queue
+\While{queue is nonempty}
+\State remove a minimum-cost state; ignore stale entries
+\State charge expansion budget; abort without claiming completeness if exhausted
+\State record final dictionary word if all query symbols are consumed
+\State relax deletion, insertion, and copy/substitution transitions within $k$
+\EndWhile
+\State return distinct candidate words with their minimum costs
+\end{pseudocode}
+\end{algorithm}
+
+For $V$ reached product states and $E$ generated transitions, heap search costs $O((V+E)\log(V+E))$ with a lazy-entry binary heap and $O(V+E)$ worst-case stored entries.
+The full product has at most $(|x|+1)Q$ states for $Q$ trie states, though radius pruning often avoids much of it.
+No universal small-search guarantee follows from a small radius when the dictionary has many nearby branches.
+The next chapter adds deterministic candidate ranking and tested exhaustion behavior.
+
+\section{Exercises}
+\label{sec:ch79-exercises}
+\begin{enumerate}
+\item\label{ex:ch79-edits} Give edit paths from \code{ct} to \code{cat} and \code{coat}, naming the input and output labels.
+\item\label{ex:ch79-transpose} Compute the distance from \code{ab} to \code{ba} and explain why it differs from a distance with unit transposition.
+\item\label{ex:ch79-product} A trie has 31 states and the query has four symbols.
+Bound the unpruned specialized product's state count.
+\item\label{ex:ch79-semiring} Two paths realize the same pair with costs two and three.
+Give their tropical combination and explain why summing them is a different model.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch79-reading}
+Mohri develops weighted composition, epsilon processing, determinization conditions, and shortest-distance algorithms~\cite{mohri-2009-weighted}.
+The string-algorithm text supplies complementary exact and approximate matching foundations~\cite{crochemore-2007-strings}.

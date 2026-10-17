@@ -1,0 +1,252 @@
+\chapter{Abstract Reduction and String Rewriting}
+\label{ch:abstract-string-rewriting}
+
+Deleting redundant separators looks like a harmless textual cleanup until two rules disagree about which separator survives.
+An optimizer faces the same structural problem when one rewrite exposes another and a different choice prevents it.
+Before choosing a rule engine, we need vocabulary for possible steps, final answers, and the role of strategy.
+This vocabulary applies to strings, syntax trees, shared graphs, and compiler states without pretending that they are interchangeable representations.
+
+\section{Separate the relation from the strategy}
+\label{sec:ch81-reduction}
+An \term{abstract reduction system} consists of a carrier set $A$ and a binary one-step relation $\to$ on $A$.
+We write $a\to^*b$ for zero or more steps, $a\to^+b$ for one or more, and $a\leftrightarrow^*b$ for conversion allowing steps in either direction.
+A \term{normal form} has no outgoing step.
+A reduction strategy selects among the available steps; the relation describes every legal choice, while a particular implementation may explore only one path.
+
+For strings over $\Sigma$, a rule $l\to r$ permits $ulv\to urv$ for arbitrary surrounding strings $u,v$.
+This closure under context is what turns a finite rule collection into a relation on infinitely many strings.
+An occurrence is described by a start offset and matched extent, measured in the chosen alphabet.
+If the alphabet is tokens, a rule cannot start inside a token; if it is bytes, it can accidentally cut a multibyte encoding unless additional validity conditions forbid that step.
+
+Figure~\ref{fig:ch81-context} separates the preserved context from the replaced region.
+Unlike a finite-state transducer, repeated rewriting feeds an output back as a new input and can iterate without bound.
+An arbitrary string-rewrite relation should therefore not be assumed to admit one finite-state compilation merely because each individual left and right side is finite.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=15mm]
+\node[basic block] (a) {prefix u | matched l | suffix v};
+\node[basic block,below=of a] (b) {prefix u | replacement r | suffix v};
+\draw[cfg edge] (a)--node[right,font=\small]{one rule occurrence}(b);
+\end{tikzpicture}
+\caption{A string rewrite preserves its surrounding context but can change all later offsets.}
+\label{fig:ch81-context}
+\end{figure}
+
+\section{Work an overlap before claiming a canonical answer}
+\label{sec:ch81-overlap}
+Take the single rule \code{aa}$\to$\code{b} and input \code{aaa}.
+Rewriting the left occurrence yields \code{ba}; rewriting the right yields \code{ab}.
+Both are normal forms because neither contains \code{aa}.
+The system terminates by length decrease but does not give a unique normal form.
+Table~\ref{tab:ch81-overlap} computes the alternatives.
+
+\begin{table}[htbp]
+\caption{Length-decreasing rules can still produce incompatible normal forms.}
+\label{tab:ch81-overlap}
+\centering
+\begin{tabular}{llll}
+\toprule
+Input & Occurrence start & Result & Further step \\
+\midrule
+aaa & 0 & ba & none \\
+aaa & 1 & ab & none \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Choosing leftmost occurrence makes an implementation deterministic, but it does not change this fact about the underlying relation.
+It defines one normalization policy, which may be acceptable for a text-processing tool if documented.
+For canonicalization used as an equality decision, the distinction is essential: two convertible strings can otherwise receive unequal selected normal forms.
+If a compiler uses normalized syntax as a cache key, unstable rule ordering can also alter cache behavior without changing the source program.
+
+\section{Distinguish termination, normalization, and confluence}
+\label{sec:ch81-properties}
+A relation is \term{terminating} when it has no infinite forward reduction.
+It is weakly normalizing on an element when at least one path reaches a normal form; other paths may diverge.
+It is \term{confluent} when every pair of descendants of a common ancestor can be joined by further forward reductions.
+Local confluence asks this joining property only for pairs of immediate successors.
+These are properties of relations, not of the names of their algorithms~\cite{ohlebusch-2002-rewriting}.
+
+Figure~\ref{fig:ch81-join} shows the confluence obligation.
+The bottom node need not be a normal form.
+Confluence implies that an element cannot have two different normal forms, but it does not promise that a normal form exists or that an arbitrary strategy reaches one.
+Termination plus confluence gives existence and uniqueness for every element, which is the combination many canonicalizers want.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=14mm and 17mm]
+\node[basic block] (a) {a};
+\node[basic block,below left=of a] (b) {b};\node[basic block,below right=of a] (c) {c};
+\node[basic block,below=of a,yshift=-24mm] (d) {join d};
+\draw[cfg edge] (a)--(b);\draw[cfg edge] (a)--(c);
+\draw[cfg edge,dashed] (b)--(d);\draw[cfg edge,dashed] (c)--(d);
+\end{tikzpicture}
+\caption{Confluence requires descendants of the same ancestor to admit a common descendant.}
+\label{fig:ch81-join}
+\end{figure}
+
+Under termination, local confluence suffices for confluence; the termination premise cannot be dropped from that implication.
+Chapter~\ref{ch:rewrite-confluence} develops critical overlaps and the exact premises needed to turn local checks into a global conclusion.
+For a rewrite-based optimizer, semantic validity is another independent property: even a terminating confluent system can consistently compute the wrong program if one rule is unsound.
+
+\section{Implement an explicit occurrence policy}
+\label{sec:ch81-algorithm}
+Algorithm~\ref{alg:ch81-string} selects the smallest start offset, breaking ties by declaration order.
+Empty left sides are excluded so every match has a nonempty extent and occurrence enumeration remains simple.
+An empty right side is allowed and deletes the matched substring.
+The companion returns both the current string and a Boolean saying whether it actually reached a normal form.
+
+\begin{algorithm}[htbp]
+\caption{Normalize strings with a documented leftmost rule-order strategy.}
+\label{alg:ch81-string}
+\begin{pseudocode}
+\Require finite string rules with nonempty left sides; input; nonnegative fuel
+\Ensure selected normal form, or intermediate string with incomplete status
+\While{fuel remains}
+\State enumerate matching occurrences and their rule indices
+\If{none exist} \State return current string and complete \EndIf
+\State select minimum start offset, then minimum rule index
+\State replace exactly that occurrence; decrement fuel
+\EndWhile
+\State test whether any occurrence remains; report completeness accordingly
+\end{pseudocode}
+\end{algorithm}
+
+For $R$ rules, current length $N$, and maximum left-side length $P$, naive occurrence checking can cost $O(RNP)$ per step, plus replacement copying and occurrence-list storage.
+For $S$ steps whose intermediate strings have length at most $N_{\max}$, this gives $O(SRN_{\max}P)$ matching work under direct comparison, not a bound on arbitrary rewrite termination.
+An index can reduce matching cost, but length-changing replacement requires updating or rebuilding the affected index.
+The small implementation favors an inspectable strategy over a production matcher.
+
+On rules \code{ab}$\to$\code{a} and \code{aa}$\to$\code{a}, input \code{ababa} reduces to \code{aaba}, then \code{aba}, then \code{aa}, then \code{a}.
+Every step shortens the string by one, so the four-step trace also matches the length potential from five to one.
+By contrast, \code{a}$\to$\code{aa} grows forever from \code{a}; fuel exhaustion records an intermediate result, not a proof of termination or nontermination.
+
+\section{Certify the trace, not an unrestricted equivalence claim}
+\label{sec:ch81-certificate}
+A rewrite certificate records the rule identity, occurrence, and intermediate or reconstructible state.
+Algorithm~\ref{alg:ch81-replay} verifies each step against the actual current string.
+Offsets must be interpreted after all previous replacements, not against the original input.
+Replay establishes reachability under those rules; claiming semantic equivalence additionally requires that the rules are known sound for the object language.
+
+\begin{algorithm}[htbp]
+\caption{Replay a string-rewrite certificate against changing coordinates.}
+\label{alg:ch81-replay}
+\begin{pseudocode}
+\Require original string, trusted rule table, ordered rule/offset events
+\Ensure verified descendant or first invalid event
+\ForAll{events $(r,i)$ in order}
+\State check rule index and current substring extent
+\State require the current substring at $i$ to equal rule $r$'s left side
+\State replace that current occurrence with its right side
+\EndFor
+\State return reconstructed descendant
+\end{pseudocode}
+\end{algorithm}
+
+Replay costs the sum of match-verification and replacement costs along the supplied trace.
+It avoids searching for a redex but cannot avoid producing a large final output if the certificate expands the string.
+The term engine in Chapter~\ref{ch:term-matching-unification} implements the analogous position-based replay on trees.
+Production proof objects should also identify the rule-set version and semantic assumptions so an old trace cannot silently be checked against a different rule table.
+
+\section{Use string rewriting only where token boundaries justify it}
+\label{sec:ch81-compilers}
+A textual rule replacing \code{x+0} with \code{x} ignores binding, precedence, comments, overloaded operators, and evaluation effects.
+Even matching exact source bytes is not enough to justify a program transformation.
+Token-string rewriting is useful for controlled macro expansion, instruction-sequence peepholes, or symbolic protocols when their state and boundary contracts are explicit.
+Tree and graph representations expose more semantic structure for general compiler optimization.
+
+Table~\ref{tab:ch81-levels} contrasts the carriers.
+A graph redex can have many incoming uses and does not correspond to one contiguous textual interval.
+A term position selects one occurrence in an unfolded tree, while a shared graph node can represent several such occurrences.
+The later graph chapters build that distinction into update algorithms instead of treating pointers as a mere implementation detail.
+
+\begin{table}[htbp]
+\caption{Different rewrite carriers require different notions of occurrence and context.}
+\label{tab:ch81-levels}
+\centering
+\begin{tabular}{lll}
+\toprule
+Carrier & Occurrence & Hidden obligation \\
+\midrule
+byte string & byte interval & encoding and source syntax \\
+token string & token interval & binding and evaluation order \\
+term tree & child-index path & substitution and types \\
+shared term graph & node and graph match & aliasing and sharing semantics \\
+compiler CFG & blocks/edges/value uses & dominance, effects, control validity \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Reason about the induced equality rather than one chosen trace}
+\label{sec:ch81-conversion}
+The directed relation and its symmetric conversion closure serve different purposes.
+A directed normalizer chooses a representation; the conversion relation describes the equations generated by the rules.
+For aa$\to$b, both ba and ab are convertible through their common predecessor aaa even though neither reduces to the other.
+Consequently a test that compares their selected normal forms would incorrectly declare them inequivalent if it assumed confluence without establishing it.
+This is not a defect in the leftmost implementation: it is an unsupported use of that implementation as a decision procedure.
+
+The distinction appears in compiler caches.
+Suppose two optimization paths produce semantically equal expressions, but the cache key is the printed output of a nonconfluent simplifier.
+The keys may differ and reduce cache reuse without causing a miscompilation.
+If the compiler instead treats unequal keys as proof that the expressions are semantically different, it has crossed from a performance issue into an invalid reasoning rule.
+Sound positive evidence and complete equality decisions are different interface promises.
+
+A deterministic terminating strategy can still be useful in a nonconfluent system.
+Its output is reproducible when rule order and occurrence policy are fixed.
+To obtain idempotence, the strategy must actually stop only when none of its own admitted steps remains; an arbitrary one-pass scan can expose a redex behind the scan point and fail that property.
+Even idempotence is weaker than canonical equality: repeatedly returning the same chosen normal form for each input does not guarantee that convertible inputs share a result.
+
+\section{Model conditional and contextual string rules explicitly}
+\label{sec:ch81-conditional}
+Real textual transformations often require conditions such as being outside a string literal, having a token boundary on each side, or not crossing a comment.
+Those conditions belong to the relation.
+For instance, removing repeated spaces may preserve a token stream between identifiers while changing the contents of a quoted literal.
+The same byte pattern can therefore be a redex in one context and ordinary data in another.
+A rule engine that scans raw bytes must either carry lexical state or operate on a representation where the relevant contexts are already distinguished.
+
+Boundary predicates can change after replacement.
+If deleting a separator joins two identifiers, a later match based on the old tokenization is stale.
+A safe engine rescans the affected lexical neighborhood or uses a representation with explicit token objects and a verified retokenization rule.
+Recording old byte offsets without the source version is insufficient because all later offsets can shift after a length-changing step.
+The certificate checker must apply each event against the current state, as Algorithm~\ref{alg:ch81-replay} requires.
+
+Termination analysis must include the conditions too.
+An unconditional length decrease is sufficient even when conditions restrict which steps occur, because restricting a terminating relation cannot create an infinite path.
+But adding a new conditional expansion rule is not harmless merely because it rarely triggers.
+The proof must establish a well-founded decrease for every permitted occurrence, or use a phase-specific argument that prevents the expansion from being repeated indefinitely.
+Counting observed successful runs is useful testing evidence, not a universal termination proof.
+
+\section{Derive uniqueness from the joining property}
+\label{sec:ch81-uniqueness}
+Suppose a has two normal-form descendants n and m and the relation is confluent.
+Confluence supplies a common descendant d with $n\to^*d$ and $m\to^*d$.
+Since n and m are normal, neither can make a positive step.
+Both paths therefore contain zero steps, so n=d=m.
+This proves uniqueness whenever a normal form exists without assuming termination of every reduction path.
+
+Existence needs another argument.
+For a terminating finitely presented rewrite system with a complete effective redex search, repeatedly taking an available step cannot continue forever and eventually stops at a normal form.
+Combining that existence argument with confluence yields a unique result for every starting object.
+The implementation still needs a complete search and correct matching; a missed redex can make it report a premature normal form even when the mathematics is sound.
+
+These proof boundaries suggest separate regression tests.
+Replay checks that each reported step is permitted.
+A final full redex scan checks normality.
+Comparing different strategies on finite generated inputs can expose nonconfluence or implementation defects, but agreement on the tested inputs does not establish global confluence.
+Finally, an independent source evaluator checks that the selected rewriting relation preserves the intended program behavior.
+No one of these tests subsumes the others.
+
+\section{Exercises}
+\label{sec:ch81-exercises}
+\begin{enumerate}
+\item\label{ex:ch81-overlap} Enumerate all normal forms reachable from \code{aaa} using \code{aa}$\to$\code{b}.
+\item\label{ex:ch81-trace} Replay the four-step \code{ababa} example, recording the offset and rule chosen at each step.
+\item\label{ex:ch81-fuel} Apply \code{a}$\to$\code{aa} for three steps from \code{a}; state the result and what the fuel status does and does not establish.
+\item\label{ex:ch81-properties} Explain why a length-decreasing rule collection proves termination but does not, by itself, prove confluence or semantic correctness.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch81-reading}
+Ohlebusch develops abstract reduction, termination, and confluence with their necessary distinctions~\cite{ohlebusch-2002-rewriting}.
+Chapter~\ref{ch:finite-state-transducers} provides the complementary finite-state relation model; the two models should not be conflated.

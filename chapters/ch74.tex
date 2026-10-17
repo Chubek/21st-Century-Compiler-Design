@@ -1,0 +1,191 @@
+\chapter{Errors, Exceptions, and Unwinding across Language Boundaries}
+\label{ch:ffi-errors}
+
+A callback can fail after native code has acquired resources and before it publishes its result.
+If the runtime jumps past the native cleanup path, those resources may leak or remain locked.
+If the adapter converts every failure into a generic message, it can lose the original exception and its diagnostic context.
+The boundary must translate both the failure representation and the path by which control returns.
+
+\section{Choose an explicit error channel}
+\label{sec:ch74-channels}
+The case study uses a status return plus output parameters.
+Success initializes the output; failure leaves it untouched.
+This separates the full numeric result domain from failure indicators and permits a callback to return through ordinary C frames.
+Table~\ref{tab:ch74-channels} compares common channels and their obligations.
+
+\begin{table}[htbp]
+\caption{Each error channel imposes a different interpretation and lifetime rule.}
+\label{tab:ch74-channels}
+\centering
+\begin{tabular}{ll}
+\toprule
+Channel & Boundary obligation \\
+\midrule
+status plus output & inspect status before reading output \\
+sentinel result & reserve sentinel and identify auxiliary error state \\
+thread-local error & capture promptly before another operation changes it \\
+exception object & preserve ownership and the original failure identity \\
+nonlocal transfer & establish a compatible catch/protection boundary \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A negative return is not universally an error; many native APIs legitimately return negative values.
+Likewise, a nonzero thread-local error value after a successful call need not indicate that this call failed.
+The adapter follows the particular API's success predicate, then reads any associated error state at the specified time.
+Logging or cleanup can itself call library functions and overwrite that state, so capture the needed information first.
+
+\section{Unwinding metadata is not a language contract}
+\label{sec:ch74-unwind}
+A platform unwinder can traverse frames using unwind metadata, but language-specific personality routines decide which handlers match and which cleanups run.
+The Itanium C++ exception ABI separates search and cleanup phases and defines interactions between unwinding and language runtimes~\cite{itanium-2026-exceptions}.
+Having compatible frame-walking information does not automatically make a C++ exception meaningful to Lua, Python, or an arbitrary JIT frame.
+
+A practical C++ library boundary often catches exceptions within a C-callable wrapper, translates them to a status or owned error record, and returns normally.
+The wrapper must cover every throwing operation, including allocation during error translation, and define a fallback for failures while constructing diagnostics.
+An \code{extern "C"} declaration selects language linkage; it does not catch exceptions or prevent them from escaping.
+
+Lua errors normally use nonlocal control transfer to an installed protected boundary~\cite{ierusalimschy-2026-lua}.
+Jumping over C code skips ordinary local cleanup statements.
+In the callback path, the adapter therefore calls the Lua function with \code{lua\_pcall}, converts failure into a C status, and re-raises the retained error object only after the native visitor returns.
+Figure~\ref{fig:ch74-boundary} shows where the two control regimes meet.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=12mm]
+\node[basic block] (failure) {managed callback raises};
+\node[basic block,below=of failure] (catch) {protected adapter retains error};
+\node[basic block,below=of catch] (return) {native frames return status};
+\node[basic block,below=of return] (raise) {outer wrapper restores language failure};
+\draw[cfg edge] (failure)--(catch); \draw[cfg edge] (catch)--(return);
+\draw[cfg edge] (return)--(raise);
+\end{tikzpicture}
+\caption{The protected callback converts a nonlocal language failure into an ordinary native return.}
+\label{fig:ch74-boundary}
+\end{figure}
+
+\section{Preserve the original callback failure}
+\label{sec:ch74-preserve}
+CPython reports failure from an object-returning API with a null result and a set exception indicator.
+The adapter must propagate that failure rather than returning an apparently successful object while the indicator remains set~\cite{python-2026-capi}.
+Our callback returns a native failure status without clearing the indicator; the outer wrapper then returns null.
+The original exception object survives, and the test verifies its identity rather than only its message.
+
+Lua permits error objects other than strings.
+Our protected call leaves the original object on the stack, and the wrapper later invokes \code{lua\_error} with that object still at the top.
+The test uses a table as the error marker and checks that the same table reaches the caller.
+Replacing it with formatted text would lose this identity.
+
+Algorithm~\ref{alg:ch74-propagate} describes the common structure.
+It assumes cleanup does not replace the saved failure; a runtime that can invoke user finalizers during cleanup may need an explicit save-and-restore facility.
+The adapter bookkeeping is $O(1)$ per callback plus runtime invocation, conversion, and cleanup costs.
+
+\begin{algorithm}[htbp]
+\caption{Return through native frames before propagating a managed callback error.}
+\label{alg:ch74-propagate}
+\begin{pseudocode}
+\Require rooted callable, protected runtime entry, native status convention
+\Ensure original managed failure is available to the outer wrapper
+\State invoke the callable within the runtime's protected error boundary
+\If{invocation or result conversion fails}
+  \State retain the runtime's original error according to its ownership rules
+  \State return native callback-failure status
+\EndIf
+\State copy the converted callback value to its output; return success
+\Statex \textit{At the outer wrapper after native return:}
+\State perform nonthrowing cleanup; propagate a retained failure if present
+\end{pseudocode}
+\end{algorithm}
+
+Table~\ref{tab:ch74-trace} traces a failure at index two with output initially $-99$.
+The local partial sum is not the public result.
+This matters when a caller retries or distinguishes an unsuccessful operation from a completed operation returning a small value.
+The callback's own external side effects, however, are not rolled back merely because the sum is withheld.
+
+\begin{table}[htbp]
+\caption{Failure preserves output but does not undo already executed callback effects.}
+\label{tab:ch74-trace}
+\centering
+\begin{tabular}{lll}
+\toprule
+Event & Native state & Managed observation \\
+\midrule
+callback zero succeeds & local sum updated & first callback side effects persist \\
+callback one succeeds & local sum updated & second callback side effects persist \\
+callback two raises & failure returned & original error retained \\
+visitor exits & output still $-99$ & no later callbacks \\
+wrapper exits & native frame finished & original error propagated \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Acquire resources transactionally}
+\label{sec:ch74-cleanup}
+Suppose a wrapper first exports a managed buffer, then allocates a native owner, then allocates the payload, and finally publishes a capsule.
+Each failure point has a different cleanup suffix.
+Algorithm~\ref{alg:ch74-acquire} records successful acquisitions and releases them in reverse order until publication transfers responsibility.
+For $R$ resources this costs $O(R)$ bookkeeping and cleanup calls; actual destructors may cost more.
+
+\begin{algorithm}[htbp]
+\caption{Acquire and publish an owned result with complete failure cleanup.}
+\label{alg:ch74-acquire}
+\begin{pseudocode}
+\Require ordered acquisitions with matching nonthrowing releases
+\Ensure published owner or no outstanding acquired resources
+\State initialize cleanup list to empty
+\ForAll{required resources}
+  \State attempt acquisition
+  \If{acquisition fails}
+    \State release recorded resources in reverse order; propagate failure
+  \EndIf
+  \State record its release action
+\EndFor
+\State publish owner; transfer its resources out of the cleanup list
+\State release remaining temporary resources
+\end{pseudocode}
+\end{algorithm}
+
+Figure~\ref{fig:ch74-cleanup} shows three acquisitions and their rollback dependencies.
+This is a conceptual cleanup stack; the small C wrapper implements its few cases with explicit branches rather than a general runtime stack.
+For the Lua wrapper, installing a finalizable userdata before native allocation supplies the persistent ownership path even if a later Lua operation raises.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=14mm]
+\node[basic block] (a) {export input};
+\node[basic block,below=of a] (b) {allocate owner};
+\node[basic block,below=of b] (c) {allocate payload};
+\draw[cfg edge] (a)--(b); \draw[cfg edge] (b)--(c);
+\draw[cfg edge,dashed] (c.east) to[bend right=45] node[right,font=\small]{rollback}(b.east);
+\draw[cfg edge,dashed] (b.west) to[bend left=45] node[left,font=\small]{rollback}(a.west);
+\end{tikzpicture}
+\caption{Failure releases only successfully acquired resources, in reverse dependency order.}
+\label{fig:ch74-cleanup}
+\end{figure}
+
+\section{Cancellation is a protocol, not immediate destruction}
+\label{sec:ch74-cancel}
+Requesting cancellation does not prove a worker has stopped reading its buffer or that a queued callback cannot run.
+A cancellable API needs a terminal acknowledgement after which ownership can be reclaimed.
+Completion and cancellation can race, so exactly one transition should publish the terminal outcome and release each retained resource.
+Cancellation of a wait also need not cancel the underlying operation.
+
+The case study is synchronous and does not implement asynchronous cancellation.
+Its callback failure simply stops further loop iterations and returns.
+The retirement protocol in Chapter~\ref{ch:ffi-callbacks} supplies the additional quiescence requirement that an asynchronous variant would need before freeing registration state.
+
+\section{Exercises}
+\label{sec:ch74-exercises}
+\begin{enumerate}
+\item\label{ex:ch74-status} Why must a caller avoid reading the result after a range status when the output initially contains $99$?
+\item\label{ex:ch74-identity} A Lua callback raises a table object.
+Explain the observable difference between re-raising that object and raising its string representation.
+\item\label{ex:ch74-cleanup} Enumerate cleanup after failure at each of owner allocation, payload allocation, and capsule publication, assuming an input export was acquired first.
+\item\label{ex:ch74-cancel} A worker still holds a buffer when cancellation is requested.
+Name the event required before freeing it and explain why cancellation request alone is insufficient.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch74-reading}
+The exception ABI explains personality routines and two-phase unwinding~\cite{itanium-2026-exceptions}.
+Lua documents protected calls and error objects; Python documents its exception indicator and reference obligations~\cite{ierusalimschy-2026-lua,python-2026-capi}.

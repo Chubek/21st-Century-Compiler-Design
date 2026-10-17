@@ -1,0 +1,338 @@
+\chapter{Designing Sound Static Analyses}
+\label{ch:designing-sound-analyses}
+
+A range query can return a perfectly plausible answer and still miscompile a program.
+The transfer may have modeled unbounded addition while the instruction wraps, the answer may describe an earlier version of the function, or the client may have mistaken a possible value for a necessary one.
+None of these defects is repaired by a faster worklist.
+The engineering problem is to connect a statement about executions to a particular transformation of a particular IR revision.
+
+Chapters~\ref{ch:ch09-dataflow-analysis}--\ref{ch:ch11-abstract-interpretation} supply the equation-solving machinery.
+Here we build its specification: what executions are collected, what an abstract element denotes, which local obligations make the result sound, and what a consumer may conclude.
+The useful deliverable is an analysis contract that can be reviewed independently of the scheduling heuristics in its implementation.
+
+\section{Start with the client and the executions}
+\label{sec:ch42-client-first}
+
+Suppose a compiler wants to remove the zero-divisor check before an integer division.
+The required proposition is universal: every reachable state at that instruction has a nonzero divisor.
+A warning tool asks a different question when it reports that a divisor might be zero.
+Its report may mean that the analysis failed to exclude zero; it need not establish an execution that divides by zero.
+The two tools can share a range engine while exposing different answers.
+
+First choose the concrete semantics.
+For the initial examples, values are mathematical integers, execution is sequential, and assignments have no hidden effects.
+A state $\sigma$ maps the variables in scope to integers.
+An edge $e$ has a transition relation $\tau_e\subseteq\Sigma\times\Sigma$, where $\Sigma$ is the state space.
+An assignment edge relates the old store to the store with one binding replaced.
+A guard edge relates a store to itself only when the condition holds.
+Nondeterministic input is a relation with several possible successors, not an arbitrary fixed constant.
+
+An actual compiler extends the state with memory, object lifetime, and whatever control state affects the instruction semantics.
+If exceptions or traps are observable, give them explicit outcomes or outgoing edges.
+Do not model a trapping instruction merely by omitting its normal successor and then conclude that the instruction can be erased.
+The absence of a normal continuation says nothing about the observability of the trap itself.
+
+The entry description $I_B\subseteq\Sigma$ is nonempty only at permitted entry points.
+It includes all inputs allowed by the function's contract, rather than inputs seen in a profile.
+For ordinary functions there is one entry; exception handlers and coroutine resumptions can require additional boundaries.
+The \term{collecting semantics} assigns to every point $B$ the set $C_B$ of states occurring there on some finite execution prefix.
+With $\operatorname{post}_e(S)=\{\sigma'\mid \exists\sigma\in S:(\sigma,\sigma')\in\tau_e\}$, it satisfies
+\begin{equation}
+ C_B=I_B\cup\bigcup_{e=(P,B)}\operatorname{post}_e(C_P).
+ \label{eq:ch42-collecting}
+\end{equation}
+The intended solution of Equation~\ref{eq:ch42-collecting} is the least one under inclusion.
+It collects only states justified by finite prefixes from an entry, including prefixes of executions that never terminate.
+This choice matters to compilers: a loop with no return can still perform observable stores.
+
+A set of states is sufficient for many safety properties, but not for every compiler question.
+The property that an instruction eventually executes concerns futures, and a bound on total running time needs more than a set of stores at one point.
+One can collect traces, costs, or state pairs instead, but must change the specification accordingly.
+The choice of concrete object comes before the choice of lattice~\cite{nielson-1999-principles}.
+
+\section{Give every representation a meaning}
+\label{sec:ch42-representation}
+
+Throughout this chapter and Chapters~\ref{ch:relational-path-analysis} and~\ref{ch:interprocedural-heap-analysis}, smaller means more precise.
+Concrete sets use inclusion.
+Abstract elements use $a\sqsubseteq b$ when $a$ describes no more behavior than $b$; in the canonical domains used here this is equivalent to $\gamma(a)\subseteq\gamma(b)$.
+Thus $\bot$ describes no states, $\top$ describes all states, and $a\join b$ covers both alternatives.
+This is the concretization order, rather than the reversed flat-domain convention used in some examples of Chapter~\ref{ch:ch10-lattices-fixed-points}.
+
+For one integer variable, an interval $[l,u]$ denotes all integers between its endpoints.
+Bounds may be infinite, and the empty interval has one canonical representation, $\bot$.
+For several variables, a product of intervals denotes the Cartesian product of their value sets.
+It does not denote only the tuples that happened to produce the endpoints.
+In particular, $x\in[2,5]$ and $y\in[2,5]$ permit $x=2,y=5$, even if the program always assigns $y=x$.
+
+The abstraction $\alpha(S)$ takes the least interval product covering $S$: each component uses the infimum and supremum of that variable's values, with $\alpha(\emptyset)=\bot$.
+The defining relation is
+\begin{equation}
+ \alpha(S)\sqsubseteq a\quad\Longleftrightarrow\quad S\subseteq\gamma(a).
+ \label{eq:ch42-adjunction}
+\end{equation}
+Equation~\ref{eq:ch42-adjunction} is useful as an implementation guide.
+It makes abstraction a cover, not a sample, and identifies the best answer expressible by the representation.
+Some useful abstractions have only a concretization or lack a computable best abstraction.
+They can still support sound analysis; they must establish coverage directly rather than pretending to implement an unavailable $\alpha$.
+
+Representation details belong in this specification.
+Are endpoints inclusive?
+Does an absent variable mean unconstrained, uninitialized, or out of scope?
+Does an empty map represent one unconstrained store or no stores?
+For the interval product here, an absent binding means $\top$ for that variable, while a separate bottom tag means no stores.
+Conflating those two cases can turn an unknown argument into an unreachable function.
+
+SSA names simplify this bookkeeping but do not eliminate semantic obligations.
+A $\phi$-node selects the operand belonging to the incoming edge; it does not independently select arbitrary operands at a block entry.
+If several $\phi$-nodes are evaluated by a relational domain, their edge-specific assignments must happen in parallel before alternatives are joined.
+Sequentially overwriting names can destroy an old value still needed by another assignment.
+
+\section{Derive and check local transfers}
+\label{sec:ch42-local-soundness}
+
+An abstract edge transformer $F_e^\#$ is sound when
+\begin{equation}
+ \operatorname{post}_e(\gamma(a))\subseteq\gamma(F_e^\#(a))
+ \quad\text{for every }a.
+ \label{eq:ch42-local-cover}
+\end{equation}
+Figure~\ref{fig:ch42-sound-square} shows the two routes in Equation~\ref{eq:ch42-local-cover}.
+When a best abstraction exists, $\alpha\circ\operatorname{post}_e\circ\gamma$ is the most precise sound transformer available in that domain.
+An implementation can use a cheaper, larger result.
+The abstract-interpretation framework separates this local approximation from the global fixed-point argument~\cite{cousot-1977-abstract}.
+
+\input{figures/analysis-sound-square}
+
+For mathematical addition, $[l_1,u_1]+[l_2,u_2]=[l_1+l_2,u_1+u_2]$ is sound because addition is monotone in each operand.
+For the guard $x<8$ on integers, intersect the interval for $x$ with $[-\infty,7]$.
+If the result is empty, return bottom for the whole state.
+The number $7$ comes from discrete integer semantics; the same replacement is wrong over the reals.
+Unsupported predicates may leave the state unchanged, which loses precision but preserves coverage.
+
+Repeated operands deserve special treatment.
+Generic interval multiplication treats its two operands independently, whereas $x*x$ uses the same value twice.
+For $x\in[-4,6]$, independent multiplication gives $[-24,36]$.
+A square transfer gives $[0,36]$: zero is the minimum when the input crosses zero, and the maximum is the larger squared endpoint.
+Both answers are sound, but only the second exploits the equality of the operands.
+Neither reconstructs a lost disjunction in the input.
+
+Consider a branch that assigns $x=-4$ on its left arm and $x=6$ on its right arm, then computes $y=x+5$ and $z=x*x$.
+Table~\ref{tab:ch42-join-loss} computes the exact sets and interval results.
+The actual values of $z$ are $16$ and $36$, but the joined interval input also admits $x=0$.
+Even the best interval square transfer must therefore admit $z=0$.
+Deleting a zero check on $z$ requires a more precise input description, such as retaining both branch alternatives until after the square.
+
+\begin{table}
+\centering
+\caption{A sound join loses a disjunction before the square is evaluated.}
+\label{tab:ch42-join-loss}
+\begin{tabular}{p{0.25\linewidth}p{0.29\linewidth}p{0.34\linewidth}}
+\toprule
+Point or operation & Exact value set & Interval result \\
+\midrule
+Left arm, $x$ & $\{-4\}$ & $[-4,-4]$ \\
+Right arm, $x$ & $\{6\}$ & $[6,6]$ \\
+Join, $x$ & $\{-4,6\}$ & $[-4,6]$ \\
+$y=x+5$ & $\{1,11\}$ & $[1,11]$ \\
+$z=x*x$, after join & $\{16,36\}$ & $[0,36]$ with square transfer \\
+Square each arm, then join & $\{16,36\}$ & $[16,36]$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Monotonicity and soundness are distinct obligations.
+A transformer that returns bottom for every input is monotone but unsound for an executable assignment.
+A locally sound transformer can also be implemented with precision choices that violate monotonicity; the usual ascending solver proofs then need additional care.
+The baseline interface requires both properties, and requires $F_e^\#(\bot)=\bot$ for these execution-edge transformers.
+Tests should exercise bottom, infinities, singleton values, and boundaries, not only typical finite intervals.
+
+\section{Validate the answer rather than trusting the iteration history}
+\label{sec:ch42-certificates}
+
+The solver may use widening, priority queues, cached transfer results, or parallel work.
+The final safety obligation has a simpler form.
+Let $b_B$ cover $I_B$, and let $A_B$ be the proposed invariant at point $B$.
+It is enough that $b_B\sqsubseteq A_B$ and that every edge satisfies $F_e^\#(A_P)\sqsubseteq A_B$.
+These conditions say that the proposed result includes entry states and is closed under every abstract transition.
+Such an assignment is a \term{post-fixed invariant}, using the convention $F(A)\sqsubseteq A$ for the global operator.
+Some literature calls this a pre-fixed point; the displayed inequality is the contract used here.
+
+Algorithm~\ref{alg:ch42-validate} checks this certificate on one immutable IR revision.
+It does not need to reproduce the solver's choices or prove that the answer is the least one.
+Its trusted components are the boundary abstraction, edge enumeration, transfer functions, and inclusion test.
+Reusing a buggy transfer in the validator cannot detect that transfer's unsoundness, so this check complements local transfer verification.
+
+\begin{algorithm}
+\caption{Validate a proposed invariant on an immutable IR revision.}
+\label{alg:ch42-validate}
+\begin{pseudocode}
+\Require revision $r$, graph $G$, boundary covers $b$, candidate $A$
+\Require sound edge transfers and a sound inclusion test
+\Ensure accept only if $A$ covers all executions from $b$ in $r$
+\If{$A.\mathit{revision}\neq r$}
+  \State \Return reject
+\EndIf
+\ForAll{points $B$ in $G$}
+  \If{$b_B\not\sqsubseteq A_B$}
+    \State \Return reject
+  \EndIf
+\EndFor
+\ForAll{edges $e=(P,B)$ in $G$}
+  \State $t\gets F_e^\#(A_P)$
+  \If{$t\not\sqsubseteq A_B$}
+    \State \Return reject
+  \EndIf
+\EndFor
+\State \Return accept
+\end{pseudocode}
+\end{algorithm}
+
+The correctness argument is induction on execution-prefix length.
+An initial state is covered by the boundary check.
+If a state at $P$ is covered, local soundness covers every successor in $F_e^\#(A_P)$, and the edge check places that successor inside $A_B$.
+Every reachable state has a finite prefix, so all reachable states are covered.
+No termination assumption about the analyzed program is used.
+
+For the branch example, proposing $x\in[0,6]$ at the join fails the left-edge check because $[-4,-4]\not\sqsubseteq[0,6]$.
+Proposing $[-4,6]$ passes both incoming checks.
+At the square's output, a proposal of $[16,36]$ fails when the transfer is applied to the joined input $[-4,6]$.
+Although $[16,36]$ is a true property of this particular program, this certificate and domain cannot establish it from those intermediate invariants.
+Validation can reject a true claim whose proof information was discarded.
+
+Let $N$ count program points, $E$ edges, $C_{\leq}$ the cost of an inclusion check, and $C_e$ the cost of edge $e$'s transfer.
+The validator costs $O((N+E)C_{\leq}+\sum_e C_e)$ after the invariants exist.
+An interval product over $V$ variables uses $O(V)$ endpoint comparisons per whole-state inclusion, rather than one constant-time operation.
+With $b$-bit arbitrary-precision endpoints, arithmetic and comparison costs must also be charged; unit-cost bounds apply only when endpoints fit the chosen representation.
+
+\section{Machine instructions change the proof}
+\label{sec:ch42-machine}
+
+The same notation $x+1$ can describe several concrete operations.
+An unsigned eight-bit addition maps $255$ to $0$.
+The mathematical transfer $[250,255]+1=[251,256]$ therefore misses a reachable result and is unsound for that instruction.
+The exact output set is $\{0,251,252,253,254,255\}$, whose ordinary unsigned interval hull is $[0,255]$.
+A wrapped interval representation can retain the two segments, but needs its own order, join, and transfer definitions.
+
+For a checked signed addition, the normal result and the overflow outcome are separate successors.
+For an IR operation whose overflow creates a special invalid value, a range domain that tracks only ordinary integers is insufficient by itself.
+It needs a companion validity component or a precondition proving that the invalid case cannot arise.
+For a language with undefined signed overflow, the optimizer's reasoning must be attached to the language and IR rules, rather than transferred mechanically from the unsigned case.
+
+Conversions are equally important.
+An interval for a wide integer does not automatically remain true after truncation, and signed comparison is not interchangeable with unsigned comparison on the same bits.
+Floating-point transfers must account for NaNs, infinities, signed zero, and the permitted rounding behavior before they can justify a rewrite.
+These are changes to the concrete semantics, not small inaccuracies absorbed by widening.
+
+There is a practical audit method: for each opcode, record its input precondition, ordinary output relation, exceptional outcomes, and non-value effects.
+Then state which components of the abstract state model each item.
+An unmodeled effect requires a conservative fallback at that operation.
+For example, an unknown call can retain facts about immutable scalar SSA values while forgetting facts about reachable mutable memory.
+Forgetting everything is safe, but forgetting the wrong subset is not.
+
+\section{Results have lifetimes and dependencies}
+\label{sec:ch42-invalidation}
+
+A true property of an old graph need not hold in a new graph.
+Suppose an edit changes the left-arm assignment from $-4$ to $-5$.
+The old join range $[-4,6]$ now misses a concrete value, and the old conclusion that $y=x+5$ is nonzero is false on that arm.
+Even a transformation known to preserve program behavior can change the names and program points to which a cached answer refers.
+
+An analysis cache should identify the IR revision and every prerequisite used to compute an answer.
+Figure~\ref{fig:ch42-dependencies} shows a dependency chain in which an alias summary affects range information through load invalidation.
+The reverse edges answer the invalidation question: which cached results read this changed fact?
+Instruction identity alone is insufficient when a callee summary, entry assumption, or target arithmetic mode changes.
+
+\input{figures/analysis-dependencies}
+
+Algorithm~\ref{alg:ch42-invalidate} gives a conservative invalidation policy.
+The dependency graph contains an edge $u\to v$ when cached result $v$ was computed using $u$.
+Dependencies include the analyzed bodies and their versioned semantic options, not just other analyses.
+The graph must already include every dependency used by each cached result.
+New dependencies are registered when results are recomputed.
+
+\begin{algorithm}
+\caption{Invalidate the transitive readers of changed dependencies.}
+\label{alg:ch42-invalidate}
+\begin{pseudocode}
+\Require complete reader graph $R$, changed dependency keys $D$
+\Ensure every cached result transitively depending on $D$ is invalid
+\State $W\gets D$; $Seen\gets D$
+\While{$W\neq\emptyset$}
+  \State remove $u$ from $W$
+  \State mark the cached result for $u$ invalid, if one exists
+  \ForAll{$v\in R[u]$}
+    \If{$v\notin Seen$}
+      \State insert $v$ into $Seen$ and $W$
+    \EndIf
+  \EndFor
+\EndWhile
+\end{pseudocode}
+\end{algorithm}
+
+On the diagram, changing the callee body invalidates its effect summary, then the caller's load facts, then the range result, and finally the cached check-removal decision.
+Changing an unrelated function reaches none of those nodes if the recorded dependencies are complete.
+The traversal takes $O(K+L)$ time for $K$ visited keys and $L$ traversed reader edges, with constant-time marks and adjacency lists.
+It uses $O(K)$ temporary queue and membership storage.
+This bound covers invalidation, not subsequent recomputation.
+
+Restarting an ascending analysis from its old solution deserves a separate proof.
+Adding behaviors can require enlarging the result, while deleting behaviors can leave obsolete facts that a grow-only solver never retracts.
+More seriously, an old answer may not be a sound cover at all after a transfer changes.
+The baseline is to invalidate, initialize from the specified boundaries and bottom, and solve again.
+Incremental systems can retain unaffected components, but must account for changed equations, removed dependencies, and newly reachable paths.
+
+\section{Expose proof-strength answers to consumers}
+\label{sec:ch42-query-contract}
+
+A useful query interface distinguishes unreachable, proved, refuted by a validated witness, and unknown.
+These names refer to a precise proposition at a precise program point under explicit assumptions.
+If $A_B=\bot$ in a validated result, the point is unreachable under those assumptions.
+If $\gamma(A_B)\subseteq P$, the property $P$ is proved.
+If the abstraction merely intersects the complement of $P$, the answer is unknown unless a concrete counterexample is independently established.
+
+For $P$ equal to $z\neq0$, Table~\ref{tab:ch42-join-loss} yields unknown after the merged square.
+For $P$ equal to $y\neq0$, it yields proved because $[1,11]$ excludes zero.
+A diagnostic may explain that the first proof failed at a branch merge.
+It must not describe the abstract value zero as an observed failing input.
+Conversely, suppressing a warning because of a user preference must not upgrade an unknown answer into proof permission for the optimizer.
+
+Proof permission is narrower than transformation permission.
+Proving a divisor nonzero removes one failure condition; it does not establish that an entire division is removable, duplicable, or movable across side effects.
+An integer division may have another exceptional operand pair, and evaluating the divisor may itself be observable.
+The rewrite's own contract must cover those facts.
+Likewise, a range proof at a use does not permit speculating the producing load onto a path where its address is invalid.
+
+Analysis answers should therefore carry the proposition, program-point identity, revision, and assumptions that made them valid.
+A guarded specialization can use a stronger entry assumption only below a dominating guard that establishes it.
+The general path must retain behavior for inputs outside that assumption.
+This is the point where abstract interpretation becomes a compiler interface rather than merely a mathematical computation.
+
+\section{Exercises}
+\label{sec:ch42-exercises}
+
+\begin{enumerate}
+\item \label{ex:ch42-square}
+For branches assigning $x=-3$ and $x=8$, compute the interval for $x*x$ when joining before the square and when joining afterward.
+Use the specialized square transfer.
+Which answer proves that the result is nonzero, and why is the weaker answer still sound?
+\item \label{ex:ch42-wrap}
+An unsigned eight-bit value has range $[253,255]$ and is incremented by two modulo $256$.
+Compute the exact output set and its ordinary interval hull.
+Give the concrete input refuting the mathematical-integer transfer.
+\item \label{ex:ch42-certificate}
+A graph has entry $x=2$, an edge adding three, and then an exit.
+Check candidate intervals $[2,2]$ at entry and $[2,4]$ at exit with Algorithm~\ref{alg:ch42-validate}.
+Give the failing inclusion and a smallest replacement exit interval.
+\item \label{ex:ch42-dependencies}
+Dependencies are $a\to b$, $b\to c$, $a\to d$, and $e\to d$.
+Starting from a change to $b$, give the invalidated set.
+Then explain why adding a new dependency $e\to c$ without recording it can make a later change to $e$ unsafe.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch42-reading}
+
+Cousot and Cousot provide the foundational connection between concrete semantics, abstraction, and sound fixed-point approximation~\cite{cousot-1977-abstract}.
+Nielson, Nielson, and Hankin develop semantic specifications alongside analysis construction; read them to distinguish correctness of a solver from correctness of the equations it solves~\cite{nielson-1999-principles}.
+Kildall's framework explains why many compiler analyses share a propagation engine while computing different properties~\cite{kildall-1973-dataflow}.

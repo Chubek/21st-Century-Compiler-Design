@@ -1,0 +1,228 @@
+\chapter{Terms, Substitutions, Matching, and Unification}
+\label{ch:term-matching-unification}
+
+A rewrite such as $\operatorname{add}(x,0)\to x$ is not an instruction to replace every source variable named x.
+Here $x$ is a metavariable ranging over entire subterms.
+Applying the rule requires finding one consistent substitution, instantiating the replacement, and changing exactly the selected occurrence.
+The distinction between matching and solving equations determines both correctness and implementation cost.
+
+\section{Give terms a signature and positions}
+\label{sec:ch82-signature}
+A first-order signature assigns an arity to each function symbol.
+Constants have arity zero; variables belong to a separate set $X$.
+Terms are variables or expressions $f(t_1,\ldots,t_n)$ where the signature gives $f$ arity $n$.
+The companion represents variables with a distinct \code{Var} class and applications with immutable tuples, so the constant named x is not accidentally a metavariable.
+Its small trusted examples supply well-formed signatures; a user-facing rule loader would additionally validate a global arity table.
+
+A \term{term position} is a sequence of child indices; the empty sequence selects the root.
+The code uses zero-based indices, so position $(0,1)$ selects the second child of the first child.
+We write $t|_p$ for the subterm at $p$ and $t[u]_p$ for replacing that occurrence with $u$.
+Figure~\ref{fig:ch82-position} selects the constant one in $\operatorname{mul}(\operatorname{add}(v,0),1)$.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=13mm and 14mm]
+\node[basic block] (m) {mul: root};
+\node[basic block,below left=of m] (a) {add: (0)};\node[basic block,below right=of m] (one) {one: (1)};
+\node[basic block,below left=of a] (v) {v: (0,0)};\node[basic block,below right=of a] (z) {zero: (0,1)};
+\draw[cfg edge] (m)--(a);\draw[cfg edge] (m)--(one);\draw[cfg edge] (a)--(v);\draw[cfg edge] (a)--(z);
+\end{tikzpicture}
+\caption{A child-index path identifies one occurrence independently of its printed spelling.}
+\label{fig:ch82-position}
+\end{figure}
+
+A rule $l\to r$ requires a nonvariable left side and $\operatorname{Vars}(r)\subseteq\operatorname{Vars}(l)$.
+The latter condition prevents an ordinary first-order step from inventing unbound metavariables.
+Fresh-name generation and binding-aware rewriting are useful extensions, but need separate semantics rather than silently violating that rule contract.
+The lab rejects these malformed rules before applying them.
+
+\section{Substitute consistently}
+\label{sec:ch82-substitution}
+A substitution maps finitely many variables to terms and extends homomorphically through application nodes.
+Repeated variables denote repeated occurrences of the same substituted term.
+For $\sigma=\{x\mapsto a,y\mapsto g(a)\}$, applying $\sigma$ to $f(x,y)$ gives $f(a,g(a))$.
+Substitution composition order matters: applying one map after another is not generally a commutative dictionary union.
+
+The companion recursively resolves chained substitutions and returns an idempotent solved map from unification.
+It does not accept cyclic substitution maps supplied by arbitrary clients.
+Its occurs check prevents the solver from constructing one.
+For graph-based types that deliberately admit rational infinite trees, omitting the occurs check would describe a different mathematical domain, not merely a faster implementation of finite-term unification.
+
+\section{Match patterns in one direction}
+\label{sec:ch82-match}
+\term{Matching} solves $l\sigma=t$ by instantiating variables of the pattern $l$, leaving the subject fixed.
+For pattern $\operatorname{pair}(x,x)$, subject $\operatorname{pair}(a,a)$ succeeds with $x\mapsto a$.
+Subject $\operatorname{pair}(a,b)$ fails for distinct constants.
+Binding x to a at its first occurrence and overwriting it with b at the second is an incorrect matcher.
+Table~\ref{tab:ch82-match} makes the repeated-variable check explicit.
+
+\begin{table}[htbp]
+\caption{Repeated pattern variables impose equality constraints on the subject.}
+\label{tab:ch82-match}
+\centering
+\begin{tabular}{lll}
+\toprule
+Pattern & Subject & Result \\
+\midrule
+pair(x,x) & pair(a,a) & x maps to a \\
+pair(x,x) & pair(a,b) & failure \\
+pair(x,y) & pair(a,b) & x maps to a; y maps to b \\
+f(x) & g(a) & root-symbol failure \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Algorithm~\ref{alg:ch82-match} uses a worklist of pattern/subject pairs.
+With constant-time binding-table operations and constant-time equality of shared subject identities, matching is linear in visited pattern structure.
+The lab uses structural equality for repeated bindings, so comparisons of large repeated subterms add their actual traversal costs.
+Hash-consed nodes or cached structural hashes can accelerate those checks, but hash agreement alone is not exact equality unless collisions are checked.
+
+\begin{algorithm}[htbp]
+\caption{Match a finite first-order pattern against one fixed subject.}
+\label{alg:ch82-match}
+\begin{pseudocode}
+\Require well-formed pattern and subject; separate pattern-variable namespace
+\Ensure consistent matcher substitution or failure
+\State initialize pair worklist and empty bindings
+\While{a pair $(p,s)$ remains}
+\If{$p$ is a pattern variable}
+\State bind it to $s$ if unbound; otherwise require equality with its binding
+\Else
+\State require matching root symbol and arity
+\State enqueue corresponding children
+\EndIf
+\EndWhile
+\State return bindings
+\end{pseudocode}
+\end{algorithm}
+
+\section{Unify in both directions with an occurs check}
+\label{sec:ch82-unify}
+\term{Unification} solves equations by instantiating variables on either side.
+For $f(x,g(y))=f(g(a),g(a))$, decomposition gives $x=g(a)$ and $y=a$.
+The solved substitution makes both original terms identical.
+For $x=f(x)$ there is no finite-term solution because any candidate would contain itself as a proper subterm.
+
+Algorithm~\ref{alg:ch82-unify} dereferences existing bindings before every equation decision.
+The occurs check examines the dereferenced right side, not merely its original syntax, so an indirect cycle through earlier bindings is also rejected.
+An equation $x=x$ is discarded before the occurs check; it is not an error.
+
+\begin{algorithm}[htbp]
+\caption{Unify finite first-order terms using an explicit equation worklist.}
+\label{alg:ch82-unify}
+\begin{pseudocode}
+\Require finite terms with disjoint symbol and variable representations
+\Ensure most-general finite-term unifier, or failure
+\State initialize worklist with the input equation; substitution empty
+\While{an equation remains}
+\State dereference both sides through the current substitution
+\If{sides are equal} \State discard equation
+\ElsIf{one side is a variable $x$}
+\State orient variable left; reject if $x$ occurs in the other side
+\State record its binding
+\Else
+\State require equal root symbols and arities; enqueue child equations
+\EndIf
+\EndWhile
+\State resolve substitution chains before returning the solved map
+\end{pseudocode}
+\end{algorithm}
+
+This elementary algorithm is described for clarity, not as a linear-time unification implementation.
+Repeated substitution expansion, occurs traversals, and copying can be expensive; explicitly materializing a shared solved substitution as trees can even require exponential output.
+Graph-based algorithms with union-find and carefully maintained occurs information offer stronger bounds under their own assumptions.
+The chapter's type-inference extension uses the same finite-type occurs principle while keeping its solver contract separate.
+
+\section{Replace occurrences and replay evidence}
+\label{sec:ch82-rewrite}
+A rewrite step selects a position $p$, matches $l$ against $t|_p$, and constructs $t[r\sigma]_p$.
+Immutable tree rebuilding copies only the path's ancestors if child subtrees can be shared safely.
+The lab records rule index, position, and matcher substitution and can replay the trace independently of the search strategy.
+Figure~\ref{fig:ch82-trace} separates discovery from verification.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=13mm]
+\node[basic block] (search) {search positions and rules};
+\node[basic block,below=of search] (event) {rule ID, position, substitution};
+\node[basic block,below=of event] (replay) {recheck match; rebuild replacement};
+\draw[cfg edge] (search)--(event);\draw[cfg edge] (event)--(replay);
+\end{tikzpicture}
+\caption{Replay validates the claimed local step without repeating redex discovery.}
+\label{fig:ch82-trace}
+\end{figure}
+
+For $\operatorname{mul}(\operatorname{add}(v,0),1)$, outermost-first uses the multiplication identity at the root and then the addition identity at the root of the result.
+Innermost-first instead rewrites position $(0)$ and then the root.
+Both reach v in two steps for this rule set, but their certificates differ.
+Table~\ref{tab:ch82-trace} records the selected paths.
+
+\begin{table}[htbp]
+\caption{Two strategies can agree on a result while selecting different redex positions.}
+\label{tab:ch82-trace}
+\centering
+\begin{tabular}{lll}
+\toprule
+Strategy & First position/rule & Second position/rule \\
+\midrule
+outermost-first & root, multiply by one & root, add zero \\
+innermost-first & child zero, add zero & root, multiply by one \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+These are first-order terms without object-language binding.
+Rewriting lambda bodies requires alpha-equivalence and capture avoidance or an explicit binder representation such as declaration IDs or de Bruijn indices.
+Treating the lambda parameter as an ordinary child and substituting by spelling can capture a free variable.
+Chapter~\ref{ch:functional-core-semantics} introduces the environment-based alternative used by the functional implementation.
+
+\section{Explain why the elementary unifier is most general}
+\label{sec:ch82-generality}
+Unification does more than find a convenient assignment.
+A \term{most-general unifier} represents all solutions by leaving unconstrained variables free: any other unifier factors through it by a further substitution.
+The elementary equation transformations preserve precisely that solution set.
+Discarding an equation t=t removes no constraint; decomposing equal-root applications replaces one equation by exactly the child equalities needed to satisfy it.
+Different root symbols or arities cannot become equal by substituting variables below those roots.
+
+Eliminating x=t, when x does not occur in t, commits to an equality that every solution already has to satisfy.
+Replacing later uses of x by t expresses the remaining equations in the smaller unknown space.
+The occurs check is what keeps this elimination within finite terms.
+After the worklist is empty, every original equation is satisfied by the accumulated substitution; variables not forced to a concrete structure remain available for arbitrary further instantiation.
+That is the reason for generality, not a consequence of picking the first constant the implementation sees.
+
+For equation pair(x,y)=pair(y,z), one solved form maps x to z and y to z while leaving z free.
+Mapping all three to a happens to solve the equation, but is less general: it cannot represent the solution mapping all three to b unless a itself were a metavariable rather than a fixed constant.
+The distinction matters for type inference, where prematurely choosing Int for an unconstrained unknown destroys polymorphism.
+The lab verifies every returned substitution by applying it to both original terms, while this solution-preservation argument explains the stronger generality contract.
+
+\section{Keep matching modulo equations and binding outside the basic contract}
+\label{sec:ch82-modulo}
+First-order syntactic matching compares ordered children under exact symbols.
+Matching modulo commutativity would allow add(a,b) to match add(x,a) by swapping children, and associativity can require choosing among several groupings.
+Flattening and sorting can provide a canonical representation for a deliberately associative/commutative operator, but only after its arithmetic and effect semantics permit those equations.
+The ordinary ordered-child matcher does not silently acquire those capabilities.
+
+Higher-order patterns add another dimension because metavariables may denote functions and terms contain binders.
+A replacement can capture a formerly free variable unless the representation tracks binding identities or performs capture-avoiding substitution.
+An environment evaluator avoids repeated source substitution during execution, but a compiler transformation that rewrites lambda syntax still needs its own binding-safe representation.
+The functional optimizer in this expansion restricts itself to local structural identities and traverses binder forms explicitly; it does not advertise a general higher-order unifier.
+
+Conditional rewriting also separates structural substitution from premise solving.
+A pattern can match perfectly while an arithmetic range, purity, or dominance condition is unproved.
+Such a match is a candidate, not an admitted transformation.
+The matching substitution should remain immutable while semantic conditions are checked, and a graph edit that invalidates a condition must cause revalidation before the replacement is committed.
+This is why the rule-engine chapter treats matching, analysis queries, and commit as distinct stages.
+
+\section{Exercises}
+\label{sec:ch82-exercises}
+\begin{enumerate}
+\item\label{ex:ch82-match} Match pair(x,x) against pair(a,a) and pair(a,b), showing every binding check.
+\item\label{ex:ch82-unify} Unify $f(x,g(y))$ and $f(g(a),g(a))$ and verify the result by substitution.
+\item\label{ex:ch82-occurs} Solve $x=y$ followed by $y=f(x)$ and identify the dereferenced occurs-check failure.
+\item\label{ex:ch82-position} In the worked multiply/add term, give the position of zero and the result of replacing only that occurrence with one.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch82-reading}
+Ohlebusch supplies the first-order rewrite and unification framework used here~\cite{ohlebusch-2002-rewriting}.
+Appel connects substitution-like reasoning to compiler representations and environments~\cite{appel-1998-modern}.

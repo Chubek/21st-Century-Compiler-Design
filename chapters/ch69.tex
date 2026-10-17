@@ -1,0 +1,184 @@
+\chapter{FFI Foundations and Semantic Contracts}
+\label{ch:ffi-foundations}
+
+A native function can receive the right bits and still be called incorrectly.
+Its pointer may refer to an object the collector can move, its length may count characters instead of bytes, or its callback may reenter a runtime that the caller assumed was suspended.
+Machine-level agreement is necessary, but the whole boundary must preserve the meanings of values, effects, and lifetimes.
+A \term{foreign function interface}, or FFI, is the machinery and contract that lets one execution environment invoke operations defined by another.
+
+The running example exposes checked integer addition, owned byte buffers, and synchronous callbacks through a C interface.
+Lua and CPython wrappers share that interface while retaining their own language-level error and ownership rules.
+Chapter~\ref{ch:ffi-case-study} develops the implementation; the intervening chapters derive its contracts and examine broader extension models.
+
+\section{Separate three kinds of agreement}
+\label{sec:ch69-layers}
+Suppose a function adds two signed 32-bit integers and writes its result through an output pointer.
+Its source declaration determines parameter types, but does not by itself say whether overflow wraps, traps, or produces a status code.
+Our interface returns \code{BB\_RANGE} on overflow and leaves the output untouched.
+The caller must also supply valid writable storage for that output during the call.
+
+The ABI decides where the two integers and pointer travel and where the status returns.
+The adapter decides how a Python or Lua integer is converted and how a failure becomes a language error.
+The semantic contract decides which inputs and effects are permitted.
+Figure~\ref{fig:ch69-layers} makes these layers explicit.
+Changing one layer without updating the others can produce a binary that links correctly and fails only on unusual inputs.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=11mm]
+\node[basic block] (language) {language values and error rules};
+\node[basic block,below=of language] (contract) {conversion, ownership, effects};
+\node[basic block,below=of contract] (abi) {ABI locations and native call};
+\draw[cfg edge] (language)--(contract); \draw[cfg edge] (contract)--(abi);
+\end{tikzpicture}
+\caption{The adapter preserves language meaning while the calling convention transports values.}
+\label{fig:ch69-layers}
+\end{figure}
+
+Table~\ref{tab:ch69-agreement} gives independently failing agreements.
+\term{Interoperability} therefore describes a stated combination of languages, runtimes, target ABI, data conventions, and supported operations.
+It is not established merely by exporting a C symbol.
+
+\begin{table}[htbp]
+\caption{Successful symbol lookup establishes none of these additional contracts.}
+\label{tab:ch69-agreement}
+\centering
+\begin{tabular}{ll}
+\toprule
+Agreement & Example mismatch \\
+\midrule
+Value meaning & signed integer interpreted as unsigned \\
+Representation & UTF-8 byte count treated as character count \\
+Calling convention & floating argument placed in an integer register \\
+Lifetime & retained pointer outlives its borrowed buffer \\
+Control & exception crosses an unsupported foreign frame \\
+Concurrency & callback runs on an unattached runtime thread \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Make conversions partial and explicit}
+\label{sec:ch69-conversion}
+A conversion from arbitrary-precision integers to \code{int32\_t} is a partial function unless the interface deliberately specifies truncation.
+The accepted range is $-2^{31}$ through $2^{31}-1$.
+Our Python wrapper additionally accepts exact integers only, rejecting Boolean values and integer subclasses; the Lua wrapper requires the integer subtype and rejects \code{1.0} even though it denotes an integral numeric value.
+These are explicit binding policies, not universal recommendations for every FFI.
+
+For $a=19$ and $b=23$, conversion succeeds and checked addition produces $42$.
+For $a=2^{31}-1$ and $b=1$, both inputs fit, but the result does not.
+The core computes in a wider integer type, detects the range failure, and does not overwrite the caller's output sentinel.
+For a Python input $2^{80}$, conversion fails before native execution.
+Table~\ref{tab:ch69-add} separates those two failure stages.
+
+\begin{table}[htbp]
+\caption{Input conversion and native arithmetic enforce distinct range obligations.}
+\label{tab:ch69-add}
+\centering
+\begin{tabular}{lll}
+\toprule
+Inputs & Stage reached & Outcome \\
+\midrule
+$19,23$ & native addition & result $42$ \\
+$2^{31}-1,1$ & native addition & range status; output unchanged \\
+$2^{80},0$ & adapter conversion & rejected before native call \\
+Boolean and integer & adapter type check & rejected by this binding \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+An adapter specification describes argument direction, nullability, extent units, ownership transfer, and failure behavior in addition to scalar types.
+A \code{const} pointer says this particular C access path does not write through it; another alias may still mutate the storage.
+A pointer to a constant object is also different from a pointer whose target remains alive indefinitely.
+Algorithm~\ref{alg:ch69-admit} checks a declaration's completeness before generating a wrapper.
+
+\begin{algorithm}[htbp]
+\caption{Admit a foreign declaration with a complete supported boundary contract.}
+\label{alg:ch69-admit}
+\begin{pseudocode}
+\Require declaration, target ABI, supported conversion and lifetime policies
+\Ensure wrapper plan or explicit unsupported-contract diagnostic
+\State validate parameter/result types and calling convention
+\ForAll{pointer-like parameters}
+  \State require extent units, null policy, direction, and lifetime policy
+\EndFor
+\State identify callbacks, reentrancy, thread restrictions, and retained references
+\State identify the error channel and output validity on failure
+\State reject requirements without an implemented conversion or cleanup path
+\State return the admitted plan and its assumptions
+\end{pseudocode}
+\end{algorithm}
+
+For $A$ parameters and $K$ explicit contract annotations, structural admission costs $O(A+K)$ plus target-specific type processing.
+It does not prove that the library obeys its declaration.
+That trust boundary requires compatible headers, implementation review, and tests; guessing a signature from a symbol name cannot establish it.
+
+\section{Describe foreign effects to the optimizer}
+\label{sec:ch69-effects}
+The compiler must know more than the return type to optimize around a foreign call.
+A call can modify reachable memory, retain a pointer, invoke a callback, block, or fail to return.
+An imported effect summary must describe all allowed behavior, including behavior reached indirectly through callbacks.
+
+Consider loading a global $g$, calling a library visitor, and loading $g$ again.
+The visitor's own code may contain no store to $g$, yet its callback may change $g$.
+Replacing the second load with the first requires an effect guarantee covering the callback path.
+Likewise, a no-capture property must specify whether the library may retain the pointer after a callback or exceptional return.
+Algorithm~\ref{alg:ch69-summary} gives conservative treatment of such calls.
+
+\begin{algorithm}[htbp]
+\caption{Apply an imported effect contract conservatively.}
+\label{alg:ch69-summary}
+\begin{pseudocode}
+\Require call, current analysis facts, trusted or conservatively inferred summary
+\Ensure retained facts remain valid after every allowed behavior
+\State expand the summary to include permitted callback effects
+\State invalidate memory facts overlapping possible writes
+\State mark retained references as escaped under the ownership policy
+\State preserve required exceptional and nonreturning control paths
+\State keep only facts justified by the complete summary
+\end{pseudocode}
+\end{algorithm}
+
+With $F$ tracked facts and an overlap query costing $Q$, a direct invalidation scan costs $O(FQ)$; indexed summaries can avoid scanning unrelated regions.
+The annotation itself is not a proof.
+An incorrect read-only declaration can miscompile a program even when its register transfers are perfect.
+
+\section{Specify the temporal boundary}
+\label{sec:ch69-time}
+A borrowed byte slice can be valid for one synchronous call without being valid for a registration that returns immediately and invokes a callback later.
+The contract must name the event ending the borrow.
+For asynchronous work, that event may be completion acknowledgement rather than cancellation request.
+Figure~\ref{fig:ch69-borrow} places a synchronous borrow between acquisition and release.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=11mm]
+\node[basic block] (acquire) {acquire stable readable slice};
+\node[basic block,below=of acquire] (call) {native call and allowed callbacks};
+\node[basic block,below=of call] (release) {native use ends; release slice};
+\draw[cfg edge] (acquire)--(call); \draw[cfg edge] (call)--(release);
+\end{tikzpicture}
+\caption{The borrow includes all allowed activity during the call, including reentrancy.}
+\label{fig:ch69-borrow}
+\end{figure}
+
+The implementation avoids a retained borrow by copying byte inputs into a native allocation.
+That costs linear time and storage in the byte count but makes later ownership explicit.
+Zero-copy alternatives in Chapter~\ref{ch:ffi-marshaling} require stronger lifetime and mutation guarantees.
+
+\section{Exercises}
+\label{sec:ch69-exercises}
+\begin{enumerate}
+\item\label{ex:ch69-range} Work the three numeric rows in Table~\ref{tab:ch69-add} with output initially $99$.
+Identify which failures enter native code and the output after each call.
+\item\label{ex:ch69-extent} Use ASCII A followed by U+00E9 to show why a UTF-8 pointer's length must specify its unit.
+\item\label{ex:ch69-effect} A visitor's callback changes global $g$ from $4$ to $9$.
+Show why reusing a pre-call load after the visitor is unsound.
+\item\label{ex:ch69-retain} A library retains a pointer after returning.
+List the lifetime and completion facts needed to accept a borrowed-buffer implementation.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch69-reading}
+C11 specifies scalar, pointer, and object-lifetime rules at the native side~\cite{wg14-2011-c11}.
+The Lua and Python manuals document concrete runtime conversion and error mechanisms~\cite{ierusalimschy-2026-lua,python-2026-capi}.
+The libffi manual explains how a known signature becomes an executable call while leaving ownership and higher-level semantics to its caller~\cite{libffi-2026-manual}.

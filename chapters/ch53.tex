@@ -1,0 +1,306 @@
+\chapter{Assembly Languages, Expressions, Symbols, and Sections}
+\label{ch:assembly-language}
+
+A compiler can decide that a function needs an integer addition without knowing the address at which that addition will execute.
+The assembler preserves this separation.
+It translates a target-specific notation into instruction and data bytes, but it also records unresolved relationships between those bytes and named locations.
+If it replaces an unknown address by an unexplained zero, the linker cannot recover the missing relationship.
+If it insists that every address be final immediately, separately compiled objects become impossible.
+The useful output is therefore both a byte sequence and a structured account of what remains undecided.
+
+The next four chapters develop that output from the source language upward.
+The working target is a deliberately documented subset of x86-64, with ELF64 relocatable objects and Lua preprocessing.
+The principles apply to other instruction sets, but instruction sizes, relocation arithmetic, and ABI conventions always belong to a particular target.
+Salomon's treatment of assembler organization supplies useful background; the ELF specification supplies the file-level contract~\cite{salomon-1993-assemblers,xinuos-2026-elf}.
+
+\section{The assembler has several clients}
+\label{sec:ch53-clients}
+
+A programmer wants readable mnemonics, symbolic names, diagnostics, and predictable expansions.
+A compiler wants stable directives for sections, alignment, linkage, debugging, and unwind information.
+A linker wants machine-readable definitions, references, and fixups.
+The processor wants only correctly encoded instructions at execution time.
+These clients do not require the same representation.
+An assembler listing may show a symbolic call even though the object contains a placeholder field and a relocation record rather than a final call displacement.
+
+Figure~\ref{fig:ch53-contracts} distinguishes the source, object, and execution boundaries.
+The source-to-object arrow is not a commitment to final virtual addresses.
+Conversely, a linker does not normally parse the source mnemonic to discover what a relocation means; the object must already carry that meaning.
+This is why an assembler cannot be implemented as a dictionary replacing each mnemonic with one fixed byte string.
+Operands, widths, instruction forms, and location-dependent fields determine the encoding.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=15mm]
+\node[basic block] (src) {mnemonics + directives};
+\node[basic block,below=of src] (obj) {bytes + symbols + relocations};
+\node[basic block,below=of obj] (image) {mapped executable bytes};
+\draw[cfg edge] (src)--node[right,font=\small] {assembler}(obj);
+\draw[cfg edge] (obj)--node[right,font=\small] {linker and loader}(image);
+\node[font=\small,left=10mm of obj,align=right] {addresses may\\remain unknown};
+\end{tikzpicture}
+\caption{The object boundary preserves unresolved address relationships instead of pretending every byte is final.}
+\label{fig:ch53-contracts}
+\end{figure}
+
+A \term{directive} changes assembler state or emits structured data rather than directly naming a processor instruction.
+Selecting a section, declaring a global symbol, and requesting alignment are directives.
+Some directives emit no bytes but still change the object substantially.
+Marking a symbol global can make the difference between a private implementation label and a definition that satisfies another object's reference.
+
+\section{Choose a source grammar before choosing an encoder}
+\label{sec:ch53-syntax}
+
+Assembly languages are not interchangeable just because they name the same machine.
+Operand order, register prefixes, immediate syntax, memory addressing, comments, and directive names differ between dialects.
+The case study uses destination-first operands, bare register names, semicolon comments, and one statement per generated line.
+It accepts an optional label before a statement.
+Its \code{lea rsi, message} is a restricted notation for RIP-relative address formation, not a promise to parse every Intel-syntax memory operand.
+The restricted grammar is part of the public interface.
+
+Tokenization must not let a malformed operand quietly become an unknown symbol.
+For example, a register-width mismatch in \code{mov rax, eax} is an encoding error in this interface, not an external reference named \code{eax}.
+An unsupported register such as \code{r8} is rejected rather than partially encoded using the low three bits of its register number.
+Extended-register support requires the corresponding REX bits in every relevant operand position.
+
+An implementation can parse into statement records containing an opcode identifier, typed operands, a source span, and a chosen encoding form.
+That representation makes later layout passes independent of textual rescanning.
+The small case study combines parsing and fixed-size emission, retaining symbolic fixups separately.
+Chapter~\ref{ch:assembly-preprocessing} explains when variable-size encoding makes a richer fragment representation necessary.
+
+\section{A location counter belongs to a section}
+\label{sec:ch53-counters}
+
+A \term{location counter} records the next offset in one output section.
+Switching from text to data does not discard the text counter.
+Returning to text continues from its previous offset unless the language explicitly specifies another behavior.
+Table~\ref{tab:ch53-counters} works a sequence containing two instruction sizes, a data word, and alignment.
+All numbers are section-relative; no final address has been assigned.
+
+\begin{table}[htbp]
+\caption{Section switches preserve independent counters; alignment contributes real padding.}
+\label{tab:ch53-counters}
+\centering
+\begin{tabular}{llll}
+\toprule
+Operation & Text counter & Data counter & New definition \\
+\midrule
+Start & $0$ & $0$ & none \\
+Define start; emit 5 bytes & $5$ & $0$ & start: text $+0$ \\
+Switch data; emit 8 bytes & $5$ & $8$ & cell: data $+0$ \\
+Switch text; align to 8 & $8$ & $8$ & three padding bytes \\
+Define next; emit 2 bytes & $10$ & $8$ & next: text $+8$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:ch53-counters} draws the holes and contributions separately.
+Padding inside a text section is still part of that section's size.
+If control can fall through the padding, its byte values must have a defined executable meaning.
+Our assembler's alignment directive emits zeros in file-backed sections, so code must jump around such padding or use it only between independently entered code blocks.
+Production assemblers often choose target-specific no-operation sequences for code alignment; that is an encoding policy rather than a mathematical property of alignment.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=9mm,y=11mm]
+\draw (0,0) rectangle (5,1); \node at (2.5,0.5) {5 bytes};
+\draw[dashed] (5,0) rectangle (8,1); \node at (6.5,0.5) {pad};
+\draw (8,0) rectangle (10,1); \node at (9,0.5) {2};
+\node[anchor=east] at (-0.2,0.5) {text};
+\draw (0,-2) rectangle (8,-1); \node at (4,-1.5) {8-byte cell};
+\node[anchor=east] at (-0.2,-1.5) {data};
+\foreach \x in {0,5,8,10} \node[font=\small] at (\x,1.4) {\x};
+\end{tikzpicture}
+\caption{Text and data offsets live in separate coordinate systems even when their numeric values coincide.}
+\label{fig:ch53-counters}
+\end{figure}
+
+\section{Represent expressions by what can be relocated}
+\label{sec:ch53-expressions}
+
+An integer expression and an address expression have different relocation behavior.
+The absolute value $24$ stays $24$ when a section moves.
+The address of a label at text offset $24$ gains the text base.
+Treating both as an untagged integer loses information needed by the linker.
+A useful internal value domain contains absolute integers, section-relative values, unresolved symbol-plus-addend expressions, and invalid expressions.
+
+For section bases $B_s$, represent a section-relative value as $B_s+c$.
+Adding an absolute $k$ gives $B_s+(c+k)$.
+Subtracting two values from the same section cancels the common base and gives an absolute difference.
+Adding two section-relative addresses generally produces $B_s+B_t+c$, which a simple one-symbol relocation cannot represent.
+Different object formats support different expression languages; acceptance must follow the chosen format rather than the host evaluator's ability to compute arbitrary arithmetic.
+Table~\ref{tab:ch53-expressions} lists representative cases.
+
+\begin{table}[htbp]
+\caption{Expression classification preserves relocation dependence instead of erasing it during evaluation.}
+\label{tab:ch53-expressions}
+\centering
+\begin{tabular}{lll}
+\toprule
+Expression & Classification & Condition \\
+\midrule
+$17+6$ & absolute $23$ & checked integer arithmetic \\
+$(B_t+12)+4$ & text-relative $B_t+16$ & same base retained \\
+$(B_t+28)-(B_t+12)$ & absolute $16$ & both offsets final \\
+$(B_t+12)-(B_d+4)$ & unresolved base difference & needs richer contract \\
+$external+8$ & symbol plus addend & supported relocation kind \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{algorithm}[htbp]
+\caption{Classify addition and subtraction in a simple relocatable-expression domain.}
+\label{alg:ch53-expressions}
+\begin{pseudocode}
+\Require tagged operands with checked offsets; operator plus or minus
+\Ensure absolute result, one-base result, or explicit unsupported-expression error
+\If{both operands are absolute}
+  \State compute the checked integer operation
+\ElsIf{one-base left operand and absolute right operand}
+  \State preserve the base and adjust its offset with checked arithmetic
+\ElsIf{absolute left plus one-base right}
+  \State preserve the right base and add the absolute offset
+\ElsIf{subtracting two final offsets with the same base}
+  \State return their checked absolute difference
+\Else
+  \State reject or retain a richer symbolic expression supported by the object format
+\EndIf
+\end{pseudocode}
+\end{algorithm}
+
+Algorithm~\ref{alg:ch53-expressions} has constant work per operator once symbols are classified, but determining whether an offset is final may depend on layout convergence.
+If instruction relaxation can change the distance between two labels, their same-section difference is not ready to freeze merely because the section names match.
+The case study avoids that complication by using fixed encoding sizes and accepting only an integer or one symbol plus an integer addend in emitted fields.
+It does not implement general assembler expression algebra.
+
+\section{Symbols have identities and states}
+\label{sec:ch53-symbols}
+
+A symbol table entry needs more than a spelling and a number.
+Useful attributes include definition state, binding, section identity, section offset, optional size/type, and the source location of the defining declaration.
+An unresolved reference creates an entry whose value is not yet known.
+A later label definition updates that entry rather than creating another symbol with the same spelling.
+Two definitions of the same local name in one object are an error; the same local spelling in two different objects is normally harmless.
+
+Figure~\ref{fig:ch53-symbol-states} separates declaration from definition.
+The assembler can require explicit external declarations, or it can export every unresolved name as undefined; both policies are possible.
+The case study chooses explicit \code{.extern} or \code{.weak} declarations so that misspelled private labels do not silently turn into link-time dependencies.
+This is stricter than many production assemblers and is documented as such.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=17mm and 24mm]
+\node[basic block] (u) {unseen name};
+\node[basic block,right=of u] (r) {referenced, undefined};
+\node[basic block,below=of r] (d) {defined: section + offset};
+\node[basic block,left=of d] (e) {external declaration};
+\draw[cfg edge] (u)--(r); \draw[cfg edge] (r)--node[right,font=\small] {label}(d);
+\draw[cfg edge] (r)--(e); \draw[cfg edge] (e)--node[below=3mm,font=\small] {optional definition}(d);
+\node[basic block,below=of d] (err) {duplicate-definition error};
+\draw[back edge] (d)--node[right,font=\small] {second label}(err);
+\end{tikzpicture}
+\caption{An external declaration changes linkage without inventing a definition or assigning address zero.}
+\label{fig:ch53-symbol-states}
+\end{figure}
+
+Stable symbol identities matter when an object writer reorders symbols.
+ELF requires local symbols before nonlocals; source order need not satisfy that condition~\cite{xinuos-2026-elf}.
+Internal fixups should therefore reference an internal symbol identifier.
+Only final serialization translates that identifier into an ELF symbol-table index.
+Reordering the symbol table without translating relocation references yields well-formed records that name the wrong entities.
+
+\section{Forward references do not dictate the number of source passes}
+\label{sec:ch53-passes}
+
+A classic two-pass assembler first determines sizes and labels, then emits encoded bytes using the completed symbol table.
+That organization is useful when all sizes can be determined from syntax before values are known.
+It is not a theorem that a one-pass source reader cannot emit relocatable objects.
+A source reader can emit known bytes, retain fixups in memory, and serialize unresolved relationships after reaching the end of the source.
+The number of textual passes, number of internal layout iterations, and kind of output object are separate choices.
+Historical descriptions of particular one-pass loaders should not be generalized into restrictions on all assemblers~\cite{salomon-1993-assemblers}.
+
+\begin{algorithm}[htbp]
+\caption{Read fixed-size assembly once while retaining symbolic fixups.}
+\label{alg:ch53-fixups}
+\begin{pseudocode}
+\Require parsed statements whose instruction sizes do not depend on symbol values
+\Ensure section bytes, definitions, and unresolved field relationships
+\ForAll{statements in source order}
+  \If{the statement defines a label}
+    \State bind its stable symbol identifier to current section and offset
+  \EndIf
+  \If{the statement emits an instruction or data field}
+    \State append known bytes and reserve the exact size of each unresolved field
+    \State record field offset, symbol identifier, addend, and relocation kind
+  \Else
+    \State apply the directive to section or symbol state
+  \EndIf
+\EndFor
+\State diagnose unresolved private names and conflicting definitions
+\State serialize bytes, symbols, and translated relocation references
+\end{pseudocode}
+\end{algorithm}
+
+With $N$ statements, $B$ emitted bytes, and $R$ fixups, this organization needs $O(N+B+R)$ work plus symbol lookup and expression evaluation.
+A linear symbol array makes repeated lookup quadratic in the number of distinct names in the worst case.
+Hashing gives expected constant-time lookup under its distribution assumptions; balanced trees give logarithmic worst-case lookup.
+The case study intentionally uses bounded linear tables for reviewability, and does not claim production-scale linear performance.
+
+\section{Storage directives are not all file bytes}
+\label{sec:ch53-storage}
+
+Initialized data has both a file representation and a memory extent.
+Zero-initialized storage can have only a memory extent.
+In ELF, \code{SHT\_NOBITS} records size and alignment without storing that many payload bytes~\cite{xinuos-2026-elf}.
+A label inside such a section still has a meaningful section-relative offset.
+Its address can be relocated into a pointer elsewhere even though the labeled storage has no initial file payload.
+
+Table~\ref{tab:ch53-storage} distinguishes three quantities that are easy to conflate.
+A large zero-fill request must increase memory size and later labels without forcing the assembler to allocate an equally large byte array.
+The implementation nevertheless caps the requested extent, because a compact object can otherwise describe an arbitrarily large eventual allocation.
+
+\begin{table}[htbp]
+\caption{Zero-filled storage contributes to layout without contributing equal file payload.}
+\label{tab:ch53-storage}
+\centering
+\begin{tabular}{llll}
+\toprule
+Contribution & File bytes & Memory bytes & Label step \\
+\midrule
+64 initialized bytes & $64$ & $64$ & $64$ \\
+64 bytes in NOBITS & $0$ & $64$ & $64$ \\
+Alignment from 17 to 32 & depends on section type & $15$ & $15$ \\
+Binding declaration & $0$ payload & $0$ & $0$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Diagnostics should preserve the failed decision}
+\label{sec:ch53-diagnostics}
+
+Report whether a failure came from tokenization, unsupported syntax, expression classification, instruction encoding, or unresolved linkage.
+An out-of-range immediate is different from an unsupported addressing mode even if both occur in the second operand.
+Include the operand's spelling and source location before lowering destroys that context.
+For generated assembly, distinguish the generated line number from the Lua line that produced it.
+The case study reports the former for assembly errors and Lua's own diagnostic for preprocessing errors; a production macro system should retain an expansion stack as well.
+
+Do not write the destination object until semantic checks and serialization have succeeded.
+This keeps an invalid source from replacing a previously useful object with a partial header.
+An I/O failure during the final write remains a separate issue; atomic replacement through a temporary file is a useful production extension.
+The small tools remove a partially written output on a detected write failure.
+
+\section{Exercises}
+\label{sec:ch53-exercises}
+\begin{enumerate}
+\item\label{ex:ch53-counter} Extend Table~\ref{tab:ch53-counters} by switching to data, aligning to 16, defining tail, and emitting four bytes. Give tail's value and both final counters.
+\item\label{ex:ch53-expression} Classify $(B_t+40)-(B_t+9)$ and $(B_t+40)-(B_d+9)$. State the extra assumption needed before freezing the first result.
+\item\label{ex:ch53-symbol-index} Internal symbols are created in order global g, local a, local b. With ELF null entry zero, give the serialized indices and the mapping required by a fixup to g.
+\item\label{ex:ch53-nobits} A NOBITS section contains 24 bytes, then alignment to 32, then 12 bytes. Compute file payload, section extent, and the last label's offset.
+\item\label{ex:ch53-forward} Explain why a fixed five-byte call to a later label does not force a second source-text pass, and identify the record that must survive until object emission.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch53-reading}
+Salomon develops directives, symbols, macros, and assembler organizations across several historical machines~\cite{salomon-1993-assemblers}.
+The ELF specification is the normative reference for section types, symbol binding, and symbol-table ordering~\cite{xinuos-2026-elf}.
+The AMD64 ABI supplement connects those generic structures to x86-64 address conventions~\cite{matz-2012-amd64}.

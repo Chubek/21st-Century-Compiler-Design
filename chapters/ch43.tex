@@ -1,0 +1,375 @@
+\chapter{Relational and Path-Sensitive Analysis}
+\label{ch:relational-path-analysis}
+
+A cursor and an end pointer can both have large ranges while their distance stays small.
+Two counters can grow without bound while differing by exactly three.
+An optimizer interested in those differences gets little help from separate intervals, even when each interval is the best possible one.
+The missing information is a relationship between values, not a better worklist order.
+
+This chapter develops one precise relational domain, difference constraints over mathematical integers, and separates it from the independent choice of retaining path alternatives.
+We use the domain to prove a guard redundant, reject an infeasible branch, and construct a loop invariant with a terminating widening policy.
+The analysis order is the concretization order of Chapter~\ref{ch:designing-sound-analyses}: smaller elements admit fewer states, bottom is impossible, and join covers alternatives.
+
+\section{A range cannot express a distance}
+\label{sec:ch43-distance}
+
+Consider an integer input $i$ with $0\leq i\leq5$, followed by $j=i+3$.
+The exact reachable pairs are $(0,3),(1,4),\ldots,(5,8)$.
+Separate intervals retain $i\in[0,5]$ and $j\in[3,8]$.
+They also admit the spurious pair $(5,3)$, so they cannot prove $i<j$ by comparing the maximum of $i$ with the minimum of $j$.
+A relation $j-i=3$ proves it immediately.
+
+Figure~\ref{fig:ch43-relation} shows the geometric difference between the interval box and the six reachable integer points.
+The relational fact can justify deleting a comparison or a bounds check whose other preconditions are already established.
+It cannot by itself establish that $j$ is a valid array length, that an associated pointer is live, or that a memory access has the right element size.
+Those remain separate client obligations.
+
+\input{figures/analysis-relation}
+
+A \term{difference constraint} has the form $x_i-x_j\leq c$, where $c$ is an integer constant.
+Introduce a distinguished variable $x_0=0$.
+Then $x_i\leq u$ is $x_i-x_0\leq u$, and $x_i\geq l$ is $x_0-x_i\leq-l$.
+An equality such as $j-i=3$ is represented by two constraints, $j-i\leq3$ and $i-j\leq-3$.
+This domain includes intervals and fixed differences, but not general linear relations such as $x+y=8$ or $2x-y=0$.
+
+The choice is deliberate.
+We use only non-strict difference constraints with integer coefficients $+1$ and $-1$, integer constants, and an implicit zero variable.
+We do not implement octagons, which additionally encode sums and require different normalization rules.
+For integer variables, a strict guard $x_i<x_j+c$ is equivalent to $x_i-x_j\leq c-1$.
+For real variables, that conversion would be wrong; strictness would need an explicit representation.
+
+\section{Difference-bound matrices and closure}
+\label{sec:ch43-dbm}
+
+A \term{difference-bound matrix}, or DBM, stores one upper bound $M_{ij}$ for each difference $x_i-x_j$.
+The value $+\infty$ means that this entry imposes no bound.
+The concretization is the set of integer tuples satisfying every matrix entry, with $x_0=0$.
+A separate bottom tag represents inconsistency.
+For a nonempty state, diagonal entries are zero.
+Smaller bounds are stronger constraints.
+
+Constraints imply other constraints.
+From $x_i-x_k\leq a$ and $x_k-x_j\leq b$, addition gives $x_i-x_j\leq a+b$.
+A matrix is \term{closed} when every entry already contains the tightest bound obtainable by such paths.
+Algorithm~\ref{alg:ch43-close} computes closure by considering each variable as an intermediate vertex.
+With the convention used here, a graph edge $j\to i$ carries weight $M_{ij}$.
+A negative-weight cycle asserts $x_i-x_i<0$ and proves inconsistency.
+
+\begin{algorithm}
+\caption{Close an integer DBM and detect inconsistency.}
+\label{alg:ch43-close}
+\begin{pseudocode}
+\Require $m\times m$ DBM $M$, entries in $\mathbb{Z}\cup\{+\infty\}$
+\Require index $0$ denotes zero; addition uses exact integer arithmetic
+\Ensure canonical bounds for the same solutions, or $\bot$ if none exist
+\State $D\gets$ a copy of $M$
+\For{$i=0,\ldots,m-1$}
+  \State $D_{ii}\gets\min(D_{ii},0)$
+\EndFor
+\For{$k=0,\ldots,m-1$}
+  \For{$i=0,\ldots,m-1$}
+    \For{$j=0,\ldots,m-1$}
+      \If{$D_{ik}\neq+\infty$ and $D_{kj}\neq+\infty$}
+        \State $D_{ij}\gets\min(D_{ij},D_{ik}+D_{kj})$
+      \EndIf
+    \EndFor
+  \EndFor
+  \If{some $D_{ii}<0$}
+    \State \Return $\bot$
+  \EndIf
+\EndFor
+\State \Return $D$
+\end{pseudocode}
+\end{algorithm}
+
+For this constraint language, absence of a negative cycle implies feasibility over the integers.
+Integer edge weights admit integer shortest-path potentials; translating all potentials to make $x_0=0$ preserves every difference.
+Closure is therefore an exact feasibility test for a conjunction represented by one DBM.
+It is not an exact feasibility test for the original program after approximation has added states.
+
+Let $V$ be the number of tracked program variables and $m=V+1$ include zero.
+The algorithm uses $O(m^3)$ bound additions and comparisons and $O(m^2)$ bound cells.
+These are representation-operation counts.
+If finite bounds require $b$ bits during computation, each addition and comparison also has a bit cost depending on $b$.
+A machine implementation must not let host-integer overflow silently turn a large positive path length into a negative cycle.
+Use exact arithmetic or a proved conservative bound representation.
+
+For nonempty closed matrices, inclusion is entrywise comparison: $M\sqsubseteq N$ exactly when $M_{ij}\leq N_{ij}$ for every pair.
+The join is entrywise maximum, which retains the weakest common bound on each difference.
+For closed operands this is again a closed DBM and is the least DBM covering their union.
+The meet takes entrywise minima and then closes, possibly obtaining bottom.
+Bottom joins with another state to give that state and meets to bottom.
+Do not substitute entrywise comparison for semantic inclusion on arbitrary noncanonical representations: one matrix can imply a tighter bound than its stored entry reveals.
+
+\section{Transfers that preserve relations}
+\label{sec:ch43-transfers}
+
+A guard $x_a-x_b\leq c$ tightens $M_{ab}$ to $\min(M_{ab},c)$ and then closes.
+If closure returns bottom, the guarded edge is infeasible for the represented state.
+To forget a variable $x_a$, first close, then set its off-diagonal row and column to infinity.
+Relations between the surviving variables remain; closure before projection ensures that consequences passing through $x_a$ have already been recorded.
+Forgetting without that step is sound but can needlessly lose surviving relations.
+
+Assignment $x_a=x_b+c$ with $a\neq b$ first forgets the old $x_a$, then inserts $M_{ab}\leq c$ and $M_{ba}\leq-c$, and closes.
+Other variables keep their old relationships.
+Assignment $x_a=x_a+c$ needs a different rule because forgetting $x_a$ would erase its relationship to the old state.
+Add $c$ to each finite entry in row $a$, subtract $c$ from each finite entry in column $a$, leave $M_{aa}=0$, and leave all other entries unchanged.
+This substitution is exact for a translation over mathematical integers.
+
+For a constant assignment, use $b=0$ in the copy rule.
+For an unsupported expression such as $x_a=x_b*x_c$, forget $x_a$, then optionally add sound interval bounds derived from the old state.
+Retaining the old row and column after assigning a new value is unsound.
+A production domain can add specialized transfers incrementally, with the forgetting transfer serving as the correct baseline.
+
+An SSA edge containing several $\phi$-assignments is a parallel assignment.
+Introduce temporary old names or apply a simultaneous substitution before projecting them away.
+Serially executing a swap as two destructive copies loses the old value needed by the second copy.
+The issue is semantic even when an implementation stores the matrix persistently.
+
+\section{Compute a relational guard}
+\label{sec:ch43-worked}
+
+Use variable order $(x_0,i,j)=(0,i,j)$ for the example $0\leq i\leq5$, $j=i+3$.
+Its closed matrix is
+\begin{equation}
+ D=\begin{pmatrix}
+ 0&0&-3\\
+ 5&0&-3\\
+ 8&3&0
+ \end{pmatrix}.
+ \label{eq:ch43-example-dbm}
+\end{equation}
+For example, $D_{02}=-3$ means $0-j\leq-3$, so $j\geq3$.
+The entries $D_{12}=-3$ and $D_{21}=3$ encode $j-i=3$.
+Every entry in Equation~\ref{eq:ch43-example-dbm} can be obtained by maximizing its difference over the six concrete pairs.
+
+Now take a branch guarded by $j\leq6$.
+It lowers $D_{20}$ from $8$ to $6$.
+Closure then lowers $D_{10}$ to $D_{12}+D_{20}=-3+6=3$.
+The resulting state has $0\leq i\leq3$, $3\leq j\leq6$, and still $j-i=3$.
+Table~\ref{tab:ch43-bounds} compares interval refinement and relational closure.
+The interval state can cap $j$ but has no recorded relationship with which to cap $i$.
+
+\begin{table}
+\centering
+\caption{Closure transfers a bound on $j$ back to $i$ through their fixed difference.}
+\label{tab:ch43-bounds}
+\begin{tabular}{p{0.28\linewidth}p{0.27\linewidth}p{0.33\linewidth}}
+\toprule
+Stage & Independent intervals & Closed difference constraints \\
+\midrule
+After $j=i+3$ & $i\in[0,5]$, $j\in[3,8]$ & Same bounds; $j-i=3$ \\
+After $j\leq6$ & $i\in[0,5]$, $j\in[3,6]$ & $i\in[0,3]$, $j\in[3,6]$; $j-i=3$ \\
+Then require $i\geq4$ & $i\in[4,5]$, $j\in[3,6]$ & $\bot$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The last guard inserts $D_{01}\leq-4$ while closure has $D_{10}=3$.
+The cycle through zero and $i$ has weight $-4+3=-1$, so no state remains.
+Deleting this edge is justified by inconsistency of an over-approximation: if even the larger set has no state, the concrete set has none.
+In contrast, a nonempty closed matrix proves only that the abstract constraints are feasible.
+It does not prove that the program reaches a corresponding state.
+
+\section{Relations and path partitions solve different losses}
+\label{sec:ch43-paths}
+
+Suppose one branch assigns $(x,y)=(1,7)$ and another assigns $(x,y)=(7,1)$.
+Both establish $x+y=8$.
+The interval join gives $x,y\in[1,7]$.
+The DBM join adds only $-6\leq x-y\leq6$, which does not improve this box: it still admits $(1,1)$ and $(7,7)$.
+Difference constraints cannot express the common sum.
+
+A \term{path partition} retains separate abstract states for selected alternatives instead of joining them immediately.
+Figure~\ref{fig:ch43-partitions} keeps the two branches until after $s=x+y$.
+Each partition computes $s=8$, so their later join retains that constant even with a nonrelational value domain.
+An analysis using a richer domain capable of expressing the sum could instead merge earlier.
+Relational precision and path precision are independent resources.
+
+\input{figures/analysis-partitions}
+
+Formally, a finite family $\{a_1,\ldots,a_k\}$ denotes $\bigcup_i\gamma(a_i)$.
+An edge transfer applies to every member; a branch can split members further.
+To bound memory, an implementation can merge selected members by the underlying join.
+That replacement enlarges the denotation and is sound.
+Dropping a member merely because its path is unlikely is not sound for optimization.
+When the partition budget is exhausted, merge or fall back to an unknown cover.
+
+Stable partition keys matter in loops.
+Partitioning by the entire branch history creates indefinitely many keys.
+A finite set of predicates, a bounded loop-iteration prefix, or selected branch identifiers supplies a finite policy.
+Even with finitely many keys, each partition's numerical state can have an infinite ascending chain and need widening.
+Budgeting partitions does not solve numerical convergence.
+
+The compiler should partition where a specific query benefits.
+For a bounds check, the relevant distinction may be whether an earlier length test succeeded.
+Retaining an unrelated logging flag doubles states without strengthening the proof.
+Liveness-based projection can remove dead numerical variables, while a relevance slice can identify predicates that influence the checked address or index.
+These are precision heuristics; their sound fallback remains merging.
+
+\section{Symbolic execution and feasibility answers}
+\label{sec:ch43-symbolic}
+
+\term{Symbolic execution} records expressions over symbolic inputs together with a path condition.
+For the two branches above, a symbolic state can keep $x=1,y=7$ under condition $b$, and $x=7,y=1$ under $\neg b$.
+To prove an assertion $P$ on one symbolic path, ask whether its path condition together with $\neg P$ is satisfiable.
+An unsatisfiable answer excludes a violating execution on that path under the encoded semantics.
+The proof covers the program only if every relevant path is covered as well.
+
+A solver answer of unknown, a timeout, or an unsupported operation is not an infeasibility proof.
+Keep the path, merge it into a conservative state, or decline the optimization.
+A satisfiable model establishes a concrete counterexample only if the symbolic encoding faithfully models the execution, including memory and exceptional outcomes.
+If the encoding over-approximates an unknown call, its satisfying model may be another abstract witness requiring concrete validation.
+
+DBM closure is a specialized solver for one conjunction of difference constraints.
+It has predictable polynomial representation cost and supports join directly.
+General symbolic conditions can retain disjunctions, multiplication, bit-vector operations, and heap encodings, but their solving cost and termination behavior differ.
+Neither representation automatically dominates the other for a compiler workload.
+One useful architecture computes a cheap invariant first, then sends selected failed queries to a stronger solver with that invariant as an additional assumption.
+The invariant must be valid at the queried program point and revision.
+
+Bounded loop exploration is useful for finding bugs but insufficient for proving an unbounded loop safe.
+An unwinding assertion can check that the explored bound covers all executions; alternatively, an inductive invariant closes the unexplored suffix.
+The next section constructs such an invariant without enumerating loop trips.
+
+\section{Widen a representation without restoring discarded constraints}
+\label{sec:ch43-widening}
+
+Consider $i=0$, $j=3$, followed by a loop that tests $i<6$ and increments both variables by one.
+At the header, the exact relation is $j-i=3$ with $0\leq i\leq6$.
+The upper endpoint grows through $0,1,2,\ldots,6$ during naive ascending iteration.
+Changing six to a large constant makes iteration expensive even though the relational shape remains simple.
+
+For a loop with a loop-free body, let $E$ be its closed entry DBM and let $H(D)$ be the closed join of $E$ with the body result from the true guard applied to $D$.
+Assume $H$ is sound and monotone.
+The header invariant must satisfy $H(D)\sqsubseteq D$.
+This formulation includes the entry contribution on every evaluation, not only during initialization.
+
+Define a representation-level widening on matrices by retaining an old entry when the new bound is no larger and replacing it by infinity otherwise.
+The difficulty is that closure can rederive an entry previously discarded by widening.
+Applying closure to the left-hand accumulator before every widening invalidates the simple argument that each entry is discarded at most once.
+Algorithm~\ref{alg:ch43-widen-loop} therefore keeps an unclosed accumulator $W$ and closes only a copy for semantic transfer and final queries.
+It never copies those rederived bounds back into $W$.
+
+\begin{algorithm}
+\caption{Solve one DBM loop header with raw widening and bounded replay.}
+\label{alg:ch43-widen-loop}
+\begin{pseudocode}
+\Require nonempty closed entry $E$, monotone sound header map $H$
+\Require $H$ includes $E$ and returns a closed DBM; replay budget $q\geq0$
+\Ensure closed header invariant $D$ with $H(D)\sqsubseteq D$
+\State $W\gets E$
+\Loop
+  \State $C\gets H(\operatorname{Close}(W))$
+  \If{$C_{ij}\leq W_{ij}$ for every $i,j$}
+    \State \Break
+  \EndIf
+  \ForAll{pairs $(i,j)$}
+    \If{$C_{ij}>W_{ij}$}
+      \State $W_{ij}\gets+\infty$
+    \EndIf
+  \EndFor
+\EndLoop
+\State $D\gets\operatorname{Close}(W)$
+\For{$t=1,\ldots,q$}
+  \State $D\gets H(D)$
+\EndFor
+\State \Return $D$
+\end{pseudocode}
+\end{algorithm}
+
+The accumulator only loses constraints, so it remains consistent and covers $E$.
+Each changing iteration discards at least one of its at most $m(m-1)$ finite off-diagonal entries.
+Thus the widening loop performs at most $m(m-1)+1$ evaluations, including the final unchanged one.
+At exit, every constraint stored in $W$ is respected by $H(\operatorname{Close}(W))$, so closure of $W$ is an invariant.
+The entrywise stopping test is sufficient even when $W$ is not canonical; it may be stricter than necessary.
+
+If one evaluation of $H$ costs $T_H$ representation operations, the total bound is $O(m^2(m^3+T_H)+qT_H)$, including repeated closure of the accumulator.
+This deliberately loose bound belongs to the displayed single-header algorithm.
+It is not a bound for an arbitrary nested-CFG solver; nested and irreducible cycles need a separately specified iteration strategy.
+Peak storage includes $O(m^2)$ matrix cells plus the body's temporary analysis states.
+
+The replay phase is a simple bounded narrowing strategy.
+From $H(D)\sqsubseteq D$, monotonicity gives $H(H(D))\sqsubseteq H(D)$.
+Consequently each replay remains inductive while becoming no larger.
+No claim of termination for unbounded descending iteration is needed because $q$ is finite.
+Intersecting with a guessed bound, without this argument or a fresh invariant check, would not be justified.
+
+\begin{table}
+\centering
+\caption{Immediate widening keeps the fixed difference, and one replay restores the finite loop bound.}
+\label{tab:ch43-loop}
+\begin{tabular}{p{0.25\linewidth}p{0.22\linewidth}p{0.22\linewidth}p{0.19\linewidth}}
+\toprule
+Stage & Range of $i$ & Range of $j$ & Relation \\
+\midrule
+Entry $E$ & $[0,0]$ & $[3,3]$ & $j-i=3$ \\
+First $H(E)$ & $[0,1]$ & $[3,4]$ & $j-i=3$ \\
+Widened $W$ & $[0,+\infty)$ & $[3,+\infty)$ & $j-i=3$ \\
+$H(\operatorname{Close}(W))$ & $[0,6]$ & $[3,9]$ & $j-i=3$ \\
+After one replay & $[0,6]$ & $[3,9]$ & $j-i=3$ \\
+Exit guard $i\geq6$ & $[6,6]$ & $[9,9]$ & $j-i=3$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:ch43-loop} computes the result.
+The first widening drops only the growing upper bounds on $i$ and $j$; both difference entries stay fixed at $3$ and $-3$.
+From the widened state, the true guard gives $i\leq5$, and the relation gives $j\leq8$.
+The increments produce $i\leq6,j\leq9$, and joining entry gives the header bound used in the replay.
+The exit guard then forces $i=6$, hence $j=9$.
+The result is stronger than separate intervals at exit because it retains the equality linking the counters.
+
+\section{Choose the arithmetic and the precision budget explicitly}
+\label{sec:ch43-engineering}
+
+All transfers above use mathematical integers.
+For wrapping arithmetic, incrementing a counter can destroy a difference even if both counters wrap individually.
+For example, unsigned eight-bit values $i=252,j=255$ have mathematical difference three; incrementing both modulo $256$ gives $i=253,j=0$.
+A compiler can apply the translation transfer only after proving no relevant wrap occurs, or after adopting a domain whose relations are defined modulo the bit width.
+The latter is a different domain with different guard rules.
+
+Our counted-loop example stays between zero and nine, so it is also valid for machine integer types that represent those values and perform the displayed operations without exceptional outcomes.
+That justification comes from the established bounds, not from assuming that all loops behave like mathematical integers.
+Pointer differences additionally require the language's object and provenance rules; numerical closeness alone does not establish a legal pointer subtraction.
+
+Dense DBMs become expensive as the number of live variables grows.
+Track selected packs of related variables rather than one matrix for every scalar in a large function.
+Projection at lifetime boundaries removes dead names, while overlap between packs can exchange interval bounds.
+Any exchange must preserve the joint concretization; a reduction may strengthen one component only using facts proved by the others.
+Scheduling fewer closures is another engineering option, provided every operation that requires canonical input actually receives it.
+
+Precision should be measured at clients.
+Count checks proved redundant, queries left unknown, matrix dimensions, closure operations, and partitions merged.
+A more precise invariant that enables no additional transformation may not justify its compile-time cost.
+Conversely, a small targeted relational pack can pay for itself by proving one hot-loop bounds check redundant.
+The soundness contract remains the same when the budget changes: exhausted precision yields a larger cover, never discarded behavior.
+
+\section{Exercises}
+\label{sec:ch43-exercises}
+
+\begin{enumerate}
+\item \label{ex:ch43-close}
+Let $0\leq x\leq4$ and $y=x+2$.
+Write the closed DBM in order $(0,x,y)$.
+Add $y\leq4$, close it, and identify every changed entry.
+\item \label{ex:ch43-cycle}
+For that refined state, add $x\geq3$.
+Give a negative cycle and its total weight.
+Explain why a nonempty DBM would not by itself establish a reachable program path.
+\item \label{ex:ch43-partition}
+Two arms assign $(x,y)=(2,9)$ and $(9,2)$.
+Compute $s=x+y$ after a DBM join and after separate per-arm evaluation.
+Give a pair admitted by the joined DBM that explains the precision loss.
+\item \label{ex:ch43-loop}
+Change the loop to $i=0,j=4$, guard $i<7$, and increments by one.
+Run immediate widening and one replay as in Algorithm~\ref{alg:ch43-widen-loop}.
+Give the widened, replayed, and exit states, including the relation.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch43-reading}
+
+Cousot and Cousot explain why widening and inductive over-approximations can replace exact iteration without sacrificing safety~\cite{cousot-1977-abstract}.
+Nielson, Nielson, and Hankin connect domain design, abstract transfer functions, and fixed-point construction; use their framework to check which precision claims depend on the chosen representation~\cite{nielson-1999-principles}.
+Baier and Katoen provide complementary foundations for state-space exploration and the interpretation of counterexamples~\cite{baier-2008-model-checking}.

@@ -1,0 +1,371 @@
+\chapter{Interprocedural and Heap Analysis}
+\label{ch:interprocedural-heap-analysis}
+
+A helper that writes through its first argument can be harmless to one caller's cached load and destructive to another's.
+The difference is not in the helper's syntax; it is in the objects supplied by the callers and the relationships among their arguments.
+Analyzing the helper once is attractive, but a summary must retain enough structure to be instantiated correctly at each call.
+Recursion, repeated allocation, and separately compiled code make that structure part of the soundness argument.
+
+Chapter~\ref{ch:ch22-interprocedural-analysis} develops call graphs and may-modify propagation, while Chapter~\ref{ch:ch20-alias-analysis} develops inclusion-based points-to sets.
+Here we connect those mechanisms to matched call/return semantics, relational summaries, heap updates, and module interfaces.
+The order remains inclusion of represented behavior: $\bot$ means no behavior, $\top$ means unconstrained behavior, and joins cover all alternatives.
+
+\section{A call has a matching continuation}
+\label{sec:ch44-matched}
+
+Consider two calls to a pure helper that returns its argument plus two.
+Call site $c_1$ supplies $4$ and receives $6$; site $c_2$ supplies $9$ and receives $11$.
+If an interprocedural graph connects both call sites to one entry and its exit to both continuations, ordinary graph reachability admits an impossible path: enter from $c_1$ and return to the continuation of $c_2$.
+Concrete execution maintains a return stack, so it cannot take that path.
+
+Figure~\ref{fig:ch44-matched-returns} separates shared code from the two legal return connections.
+A \term{matched call/return path} returns from each invocation to the continuation belonging to that invocation.
+Nested calls must obey the same nesting discipline.
+Exceptions, tail calls, continuations, and coroutine transfers need their own control rules; the baseline here is ordinary sequential call and return.
+Ignoring those distinctions can invent behaviors and weaken analysis, while omitting legal exceptional returns can be unsound.
+
+\input{figures/analysis-matched-returns}
+
+A procedure summary avoids traversing the callee's graph separately for every dynamic call.
+For a pure helper, the relation $r=a+2$ links entry argument $a$ to normal result $r$.
+Instantiating it at $c_1$ yields $r=6$; instantiating the same relation at $c_2$ yields $r=11$.
+This is more precise than storing only the union of observed return values $\{6,11\}$.
+A shared summary need not be context-insensitive in the sense of erasing all input/output correlation.
+
+At a call, save the caller-local facts that the callee cannot modify, bind actual arguments to fresh formal names, apply the summary, and map the result back to the designated continuation.
+All fresh names must be renamed apart from names belonging to another invocation.
+The caller's untouched state is the frame around the call.
+Memory in that frame can be retained only when the summary's effect contract establishes that it is untouched.
+
+\section{Specify summaries as relations and effects}
+\label{sec:ch44-summary-contract}
+
+For a sequential procedure $P$, its normal-return semantics can be described by a relation between entry and exit states.
+An entry state contains arguments and the relevant pre-call heap; an exit state contains the result and the post-call heap.
+A sound relational summary covers every such terminating input/output pair.
+The summary need not assert that every allowed input terminates.
+In particular, a relation containing no output for an input is not, by itself, a proof that executing the call has no effects.
+
+For general compiler use, separate normal returns, exceptional returns, and effects possible before either return or divergence.
+A procedure that stores to a global and then loops forever has no normal-return pair, but the store remains observable.
+A normal-return relation can justify facts after a call; it cannot alone justify removing the call.
+Likewise, a may-write set does not prove that a location is overwritten on every return path, and a no-write summary does not prove absence of reads.
+
+Parameterize heap effects by formal roots when possible.
+A summary saying that the procedure may write field $f$ of the object reached by argument one can be instantiated with the caller's points-to information.
+Replacing that symbolic root by the union of every object ever passed to the helper loses precision at every call.
+The instantiation must also account for aliases: formal arguments one and two may denote the same object.
+The same heap cannot be modeled as two independent copies merely because the interface has two parameter names.
+
+A compact summary might contain a precondition, a return relation, may-read and may-write footprints, escape information, and exceptional outcomes.
+Each component has a separate interpretation.
+The precondition states when the more precise relation is valid; it is not a fact the caller may assume without proof.
+If the caller cannot establish it, use a weaker unconditional summary or retain a runtime guard.
+The footprint states which cells may be touched, not which cells definitely are touched.
+Escape information states which references may outlive the call, affecting later allocation and lifetime reasoning.
+
+\section{Contexts preserve selected distinctions}
+\label{sec:ch44-contexts}
+
+A \term{call string} records a sequence of call-site identifiers used to distinguish analysis contexts.
+Keeping only the most recent $k$ sites gives a finite policy for a finite program.
+Different invocations with the same retained suffix are merged, including sufficiently deep recursive invocations.
+The empty suffix is the context-insensitive case.
+Context keys must be bounded deliberately; the dynamic call stack is unbounded even when the source has few procedures.
+
+An alternative key is an abstract input description, such as a constant argument, a range class, or a selected alias partition.
+Memoizing by exact interval endpoints without a merge policy can create unboundedly many contexts.
+When a budget is reached, merge inputs and recompute a summary covering the merged description, or use a previously established general summary.
+Dropping the expensive context would drop behaviors.
+
+Context sensitivity does not replace matched returns.
+A bounded call string identifies an abstract invocation class, while the analysis still needs to route a callee result to a call site's own continuation.
+Even when several callers share one context, each summary application is attached to its calling edge.
+Conversely, correctly matched summaries can still lose precision when their input/output abstraction is too coarse.
+These are two different design decisions~\cite{nielson-1999-principles}.
+
+For a receiver-oriented language, an allocation-site or object-based context can distinguish methods operating on different receiver classes.
+Such a context distinguishes abstract objects, not necessarily dynamic instances.
+One allocation site in a loop can still represent many simultaneous receivers.
+The heap model must decide what identity information survives inside the context.
+
+\section{Recursive summaries are a fixed-point problem}
+\label{sec:ch44-recursion}
+
+A recursive procedure's summary depends on itself, directly or through other procedures.
+For a fully specified baseline, assume a finite abstract boundary-state universe $Q$ with $m=|Q|$ states.
+Local abstract transitions form finite relations and soundly simulate concrete steps.
+Call binding, return projection, and preservation of caller-local state are included in the model.
+If the concrete language is infinite-state, constructing this finite model is itself an abstraction obligation.
+
+Store a summary $S_P\subseteq Q\times Q$ for each procedure $P$.
+It covers normal terminating entry/exit pairs.
+The lattice order is subset inclusion and join is union.
+Let $\operatorname{Eval}(P,S)$ compute intraprocedural reachability while replacing a call to $R$ by the currently stored relation $S_R$, applied at that call's matching continuation.
+Retain the entry state as an origin tag throughout this local computation, so that outputs are paired with their own inputs.
+Loops inside a body are solved by finite reachability on these tagged states.
+
+Algorithm~\ref{alg:ch44-summary-fixedpoint} iterates all summaries synchronously.
+The local evaluator is monotone in the summaries it reads.
+Bottom initialization initially describes only behavior with no completed calls; later rounds add behavior justified by increasingly deep finite call trees.
+Every terminating execution has a finite call tree, so the least fixed point includes all terminating modeled behavior.
+Intermediate summaries are incomplete and must not be exposed as sound whole-program answers before convergence.
+
+\begin{algorithm}
+\caption{Compute finite relational summaries for mutually recursive procedures.}
+\label{alg:ch44-summary-fixedpoint}
+\begin{pseudocode}
+\Require finite procedures, boundary universe $Q$, sound finite local model
+\Require $\operatorname{Eval}$ computes tagged local reachability with matched calls
+\Ensure $S_P$ covers every normal terminating modeled pair for each $P$
+\State $S_P\gets\emptyset$ for every procedure $P$
+\Loop
+  \ForAll{procedures $P$}
+    \State $T_P\gets S_P\cup\operatorname{Eval}(P,S)$
+  \EndFor
+  \If{$T_P=S_P$ for every $P$}
+    \State \Return $S$
+  \EndIf
+  \State $S\gets T$
+\EndLoop
+\end{pseudocode}
+\end{algorithm}
+
+Let $p$ count procedures, $N$ all intraprocedural points, $L$ ordinary edges, and $C$ call sites with their possible target edges.
+There are at most $pm^2$ summary memberships to add, hence at most $pm^2+1$ complete sweeps including the final unchanged sweep.
+One straightforward evaluator explores up to $m^2$ origin/current-state pairs per program point.
+For each origin, a dense local relation or callee relation can have $m^2$ transition pairs.
+Thus a whole sweep can be implemented in $O(Nm^2+(L+C)m^3)$ membership and transition operations, assuming constant-time table access.
+The resulting coarse bound is the sweep cost multiplied by $pm^2+1$; storage is $O((N+p)m^2)$ cells plus the model's transition relations.
+These are bounds for the explicitly tabulated finite model, not for symbolic summaries whose application may invoke a solver.
+
+Production solvers avoid these full sweeps.
+They process strongly connected call-graph components, register summary readers, and propagate changed pairs or changed abstract values.
+Acyclic components can be handled after their callees, while recursive components require iteration.
+For infinite-height numerical summaries, widening must also occur at recursive summary dependencies, not only at intraprocedural loop headers.
+A program can recurse indefinitely without containing a CFG back edge inside any one procedure.
+
+\section{Compute a recursive input/output relation}
+\label{sec:ch44-recursive-example}
+
+Consider a helper with precondition $0\leq n\leq3$.
+It returns $2$ when $n=0$; otherwise it returns one plus the result of calling itself on $n-1$.
+Use mathematical integers and normal returns only.
+The recursive call remains inside the precondition, and the result stays between two and five.
+The finite example can therefore be represented exactly with boundary values from zero through five, restricting admissible entries to zero through three.
+
+Let $S^{(0)}=\emptyset$.
+In the first evaluation, only the base case yields a return, so $S^{(1)}=\{(0,2)\}$.
+The second evaluation can use that pair at the recursive call with argument zero and obtains $(1,3)$.
+Successive rounds add $(2,4)$ and $(3,5)$.
+Table~\ref{tab:ch44-recursive-pairs} records every change, including the unchanged convergence check.
+
+\begin{table}
+\centering
+\caption{Each synchronous round adds one deeper terminating invocation to the summary.}
+\label{tab:ch44-recursive-pairs}
+\begin{tabular}{p{0.16\linewidth}p{0.28\linewidth}p{0.45\linewidth}}
+\toprule
+Round & Newly established pair & Entire normal-return relation \\
+\midrule
+0 & None & $\emptyset$ \\
+1 & $(0,2)$ & $\{(0,2)\}$ \\
+2 & $(1,3)$ & $\{(0,2),(1,3)\}$ \\
+3 & $(2,4)$ & $\{(0,2),(1,3),(2,4)\}$ \\
+4 & $(3,5)$ & $\{(0,2),(1,3),(2,4),(3,5)\}$ \\
+5 & None & Same as round 4 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+At convergence, a call with argument one returns three and a call with argument three returns five.
+Projecting the relation to an output-only set $\{2,3,4,5\}$ would lose that distinction.
+An interval summary retaining only input $[0,3]$ and output $[2,5]$ loses it too.
+A relational numerical summary $r=n+2$ could express the same input/output dependence compactly and cover a larger range, provided its arithmetic and recursive-invariant proof were established.
+
+This example also shows why a recursive call cannot be assigned an empty summary as a final conservative fallback.
+Empty means no normal behavior, not unknown normal behavior.
+During least-fixed-point construction it is a seed; at a timeout it remains incomplete.
+A compiler that cannot finish must use a separately sound cover, such as an unconstrained return with conservative effects, rather than return the partial relation to clients.
+
+\section{Heap names are abstractions of objects}
+\label{sec:ch44-heap-names}
+
+An \term{allocation-site abstraction} names heap objects by the instruction that allocates them, optionally combined with a bounded context.
+A field-sensitive cell is then a pair $(a,f)$ of an abstract object $a$ and a field $f$.
+The heap map $H^\#$ assigns an abstract value to each such cell.
+Its concretization requires every concrete cell represented by $(a,f)$ to have a value allowed by $H^\#(a,f)$.
+If several concrete objects share the name $a$, the abstract value must cover all of their fields.
+
+Figure~\ref{fig:ch44-summary-heap} shows two live allocations from one site.
+Their concrete fields initially contain zero.
+Pointers $p$ and $q$ refer to different objects, but the points-to abstraction gives both the singleton set $\{a\}$.
+That equality does not prove $p=q$.
+The singleton set contains one abstract name, and the name represents two concrete objects.
+
+\input{figures/analysis-summary-heap}
+
+An abstract name can instead be known to represent at most one live object per concrete state at a particular program point.
+For example, a distinguished fresh allocation can remain separate from older objects until another allocation at the same site forces a merge.
+The uniqueness fact is temporal and state-dependent.
+Allocation in a loop, recursive activations, escaping references, and joins can invalidate it.
+It is not enough to inspect the allocation instruction and notice that it appears only once in the source.
+
+Heap abstractions also need a policy for external objects, null, invalid addresses, and deallocated objects.
+An empty points-to set must not stand for an arbitrary foreign pointer.
+A sound unknown-address element or an explicit universe of possible external regions gives unknown code somewhere to point.
+Lifetime and invalid-access outcomes must remain represented even when the compiler is interested only in ordinary load values.
+
+\section{Strong updates require a singleton concrete target}
+\label{sec:ch44-updates}
+
+A \term{strong update} replaces a cell's old abstract value with the value being stored.
+A \term{weak update} joins the stored value with the old value.
+The distinction follows from the heap concretization.
+If an abstract cell represents several concrete cells and the store changes only one, the others retain their old contents and must remain covered.
+
+Algorithm~\ref{alg:ch44-store} specifies a field store for a restricted sequential heap model.
+Fields are distinct nonoverlapping cells, addresses have already been checked valid on the normal path, and a store writes one entire field with compatible representation.
+The target set is a sound nonempty set of possible abstract field cells.
+The predicate $\operatorname{One}(a,f)$ proves that this cell represents exactly one concrete target in every represented state and that the store necessarily writes it.
+For a singleton target set, this includes the requisite object multiplicity and offset facts.
+
+\begin{algorithm}
+\caption{Update an abstract heap for a valid whole-field store.}
+\label{alg:ch44-store}
+\begin{pseudocode}
+\Require heap $H$, nonempty sound target set $T$, stored abstract value $v$
+\Require nonoverlapping fields; sound singleton-target predicate $\operatorname{One}$
+\Ensure returned heap covers every normal concrete store result
+\State $H'\gets$ a copy of $H$
+\If{$T=\{(a,f)\}$ and $\operatorname{One}(a,f)$}
+  \State $H'(a,f)\gets v$
+\Else
+  \ForAll{$(a,f)\in T$}
+    \State $H'(a,f)\gets H(a,f)\join v$
+  \EndFor
+\EndIf
+\State \Return $H'$
+\end{pseudocode}
+\end{algorithm}
+
+Other pointers may alias the target of a strong update.
+The algorithm does not require that only one pointer names the cell; it requires that the store definitely changes the one represented concrete cell.
+Because all aliases read the shared heap map, they observe the replaced value.
+An implementation that caches load values separately must invalidate those aliases' cached facts as well.
+
+For the two allocations in Figure~\ref{fig:ch44-summary-heap}, storing seven through $p$ changes the first concrete field from zero to seven and leaves the second at zero.
+The site cell must therefore become $\{0,7\}$ in a finite value-set domain, or $[0,7]$ in an interval domain.
+Replacing it by $\{7\}$ would misdescribe the subsequent load through $q$.
+Table~\ref{tab:ch44-updates} computes this case and two contrasting cases.
+
+\begin{table}
+\centering
+\caption{The update strength depends on concrete multiplicity and definite targeting, not only the number of abstract names.}
+\label{tab:ch44-updates}
+\begin{tabular}{p{0.28\linewidth}p{0.27\linewidth}p{0.33\linewidth}}
+\toprule
+Target information & Old field values & Result of store \\
+\midrule
+One name $a$, two live objects & $H(a,f)=\{0\}$ & Store $7$: $H'(a,f)=\{0,7\}$ \\
+One unique target $u$ & $H(u,f)=\{2\}$ & Store $5$: $H'(u,f)=\{5\}$ \\
+Either unique $u$ or unique $v$ & $H(u,f)=\{2\}$, $H(v,f)=\{9\}$ & Store $5$: $H'(u,f)=\{2,5\}$, $H'(v,f)=\{5,9\}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+In the final row, each object is individually unique, but the analysis does not know which one the store targets.
+Each cell may remain unchanged, so both updates are weak.
+A path partition that proves the target on each arm can strongly update within each partition and then join.
+The joined per-cell sets are the same here, but the partitions retain correlations between the pointer and the changed cell that a product heap loses.
+
+If $A$ abstract cells are stored in a flat map and joining values costs $J$, the displayed copying implementation costs $O(A+|T|J)$ time and $O(A)$ new map storage per store.
+A persistent or copy-on-write map changes that cost; the join itself is not always constant time.
+For value sets over $U$ possible values stored as bitsets, $J=O(\lceil U/w\rceil)$ word operations at word width $w$.
+The cost of proving $\operatorname{One}$ and computing $T$ belongs to the pointer and multiplicity analyses and must be added.
+
+\section{Aliasing connects summary application to memory optimization}
+\label{sec:ch44-alias-summary}
+
+Suppose a helper writes five through parameter $p$ and returns the field read through parameter $q$.
+If the caller proves that $p$ and $q$ select disjoint cells, the returned value can retain the old fact for $q$.
+If they must select the same unique cell, the return is five.
+If they may alias, the return must cover both cases.
+A summary that assumes the formal parameters are distinct without an explicit precondition is unsound.
+
+One design keeps separate alias cases in the summary and chooses or joins cases at instantiation.
+Another uses symbolic heap roots and lets substitution identify equal actual roots.
+Either way, aliasing must be resolved before relying on frame preservation.
+Taking a summary's may-write footprint and subtracting it syntactically from the caller's known locations is insufficient when two different names can overlap.
+
+Real memory accesses name byte ranges, not only fields.
+Partial stores, unions, packed representations, and type-punning can invalidate the nonoverlapping-field premise of Algorithm~\ref{alg:ch44-store}.
+A byte-aware implementation updates every overlapping abstract cell or uses a coarser region abstraction.
+Equal starting addresses do not establish compatible load/store sizes, and disjoint field names do not establish disjoint bytes in every language layout.
+The abstract heap model must match the IR memory model consumed by the optimizer.
+
+Dynamic call targets add another dependency.
+A points-to result can discover a new possible callee, which enlarges the summary applied at the call and can in turn enlarge points-to sets.
+An integrated solver must propagate both kinds of change to a joint fixed point, or use a staged conservative call graph whose target set already covers every possible call.
+Using an incomplete call graph while waiting for more precise pointer information is unsafe if clients observe the intermediate summaries.
+
+\section{Module interfaces carry assumptions across builds}
+\label{sec:ch44-modules}
+
+Separate compilation replaces unseen bodies with interface contracts.
+A useful serialized summary identifies the function, calling convention, semantic version of the summary format, target data layout, and arithmetic and memory assumptions.
+It also records the body or interface revision on which it depends.
+Two summaries with the same source-level name need not describe the same implementation after linking, symbol interposition, or dynamic loading.
+The optimizer must know which binding assumptions the build permits.
+
+An unavailable body does not justify an empty effect set.
+Without a stronger interface, an external call may access reachable mutable memory and relevant globals, retain references, invoke permitted callbacks, and return any value allowed by its type and language contract.
+A local object proved inaccessible to the callee can remain outside this footprint.
+That exclusion depends on escape and reachability facts, not merely on the object's storage class.
+
+Callbacks make effects transitive in both directions across an interface.
+A library routine that performs no direct store may still invoke a client callback that mutates the caller's global state.
+The interface must expose the callback possibility or conservatively include its effects.
+Similarly, a no-capture promise affects later calls: if it is absent, a pointer passed now may become reachable by unknown code later.
+The call's immediate may-write set is not enough to reason about that future access.
+
+Summary reuse requires invalidation when any assumption changes.
+Changing a callee body invalidates its summary and readers; changing the alias policy, data layout, or external binding assumption can invalidate an entire family of summaries.
+The dependency traversal from Chapter~\ref{ch:designing-sound-analyses} applies here, but the dependency keys include semantic options and imported interfaces.
+A version mismatch should trigger recomputation or a conservative fallback, not reinterpret old bytes under a new meaning.
+
+For compiler clients, expose only guarantees whose quantifiers are clear.
+\enquote{May write $a$} includes all possible writes but promises none.
+\enquote{Returns a fresh object} requires identity and lifetime facts, not merely an allocation-site label.
+\enquote{Argument is not captured} must specify whether callbacks or exceptional returns are included.
+Well-specified interfaces let separate compilation retain useful facts without treating unavailable code as if it were absent.
+
+\section{Exercises}
+\label{sec:ch44-exercises}
+
+\begin{enumerate}
+\item \label{ex:ch44-matching}
+A helper returns its argument plus two and is called with $1$ at site $a$ and $8$ at site $b$.
+Give the two correct return values and one impossible call/return combination admitted by an unmatched graph.
+Explain how an input/output relation avoids merging the answers.
+\item \label{ex:ch44-recursion}
+Change the recursive helper's precondition to $0\leq n\leq4$.
+Starting from the empty summary, list the new pair in each changing synchronous round and the number of the first unchanged round.
+\item \label{ex:ch44-weak}
+Three live objects allocated at one site have field values $1,1,1$.
+A store changes exactly one of them to $6$.
+Compute the site cell in a finite value-set domain and in an interval domain.
+Why does a singleton points-to set not justify replacing the site cell by $6$?
+\item \label{ex:ch44-alias-case}
+Unique cells $u$ and $v$ initially contain $2$ and $9$.
+A helper stores $5$ through $p$ and returns the load through $q$.
+Compute its result when $(p,q)=(u,v)$, when $(p,q)=(u,u)$, and when $p=u$ while $q$ may denote either cell.
+State the alias precondition needed to reuse the old value of $q$.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch44-reading}
+
+Nielson, Nielson, and Hankin develop interprocedural paths and context-sensitive analyses in a framework that makes the underlying semantic distinctions explicit~\cite{nielson-1999-principles}.
+Cousot and Cousot provide the fixed-point abstraction principles needed when recursive summaries or heap descriptions use infinite abstract domains~\cite{cousot-1977-abstract}.
+Kildall's dataflow framework remains useful for understanding the propagation engine underneath finite summary computations~\cite{kildall-1973-dataflow}.

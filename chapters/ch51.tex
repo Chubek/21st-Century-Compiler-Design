@@ -1,0 +1,299 @@
+\chapter{Backtracking and Generalized Parsing}
+\label{ch:backtracking-generalized}
+
+A function can recognize a valid prefix and still choose the wrong prefix for its caller.
+This is the central implementation problem in a backtracking recursive-descent parser.
+Saving the input cursor at the start of each function is not enough: after the function returns successfully, a later failure must be able to reopen its discarded alternatives.
+We first make that return contract explicit, then examine how shared state-space methods replace repeated search.
+The distinction determines what the Aurocks case study can accept and what its resource limits mean.
+
+\section{Local success and complete success differ}
+\label{sec:ch51-local}
+
+Use the grammar
+\[
+ S\to A\ b,\qquad A\to a\ b\mid a.
+\]
+On input \code{ab}, the first $A$ alternative consumes both characters.
+That is a valid $A$, but the caller still requires $b$ and is now at end of input.
+A parser that retries only alternatives of $S$ fails because $S$ has no other production.
+The valid derivation requires reopening $A$ and choosing its second alternative, which consumes only \code{a}.
+Table~\ref{tab:ch51-retry} computes the search.
+
+\begin{table}[htbp]
+\caption{The failing caller determines whether a locally successful prefix can be committed.}
+\label{tab:ch51-retry}
+\centering
+\begin{tabular}{p{0.36\linewidth}p{0.18\linewidth}p{0.34\linewidth}}
+\toprule
+Attempt & Endpoint & Remaining obligation \\
+\midrule
+$A\to ab$ & $2$ & Match $b$ at end: fails \\
+Retry $A\to a$ & $1$ & Match $b$: reaches $2$ \\
+Complete $S$ & $2$ & Require end: succeeds \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+On \code{abb}, the first alternative is the right one.
+On \code{abx}, both choices fail to produce a complete $S$.
+Reordering the alternatives merely exchanges which input exposes a local-commit bug.
+Figure~\ref{fig:ch51-search} places the caller's test below each candidate prefix, where it belongs.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=12mm and 19mm]
+\node[basic block] (root) {A at offset 0};
+\node[basic block,below left=of root] (long) {ab: end 2};
+\node[basic block,below right=of root] (short) {a: end 1};
+\node[basic block,below=of long] (fail) {caller b: fails};
+\node[basic block,below=of short] (pass) {caller b: end 2};
+\node[basic block,below=of pass] (eof) {end: accept};
+\draw[cfg edge] (root)--(long); \draw[cfg edge] (root)--(short);
+\draw[cfg edge] (long)--(fail); \draw[cfg edge] (short)--(pass); \draw[cfg edge] (pass)--(eof);
+\draw[back edge] (fail) to[bend right=18] node[below,font=\small] {retry saved choice}(short);
+\end{tikzpicture}
+\caption{For input \code{ab}, success is decided after the caller's suffix and the end check, not at the first completed $A$.}
+\label{fig:ch51-search}
+\end{figure}
+
+A parsing expression grammar (PEG) gives ordered choice a different contract.
+In the PEG expression $A\leftarrow ab/a$, the first successful $A$ is committed locally.
+Embedding that expression in $S\leftarrow A\ b$ can therefore reject \code{ab}.
+This is a consequence of the specified choice semantics, not a bug in a conforming PEG implementation.
+Our CFG backtracking contract instead searches for a whole-input derivation and returns the first one found in depth-first production order.
+The slash of ordered choice and the bar of CFG alternatives must not be interchanged casually~\cite{grune-2008-parsing}.
+
+\section{Represent the remaining computation}
+\label{sec:ch51-continuations}
+
+A \term{continuation} represents what must happen after the current parser produces a candidate.
+For the first call to $A$, it means: match the caller's $b$, construct $S$, and require end of input.
+The continuation receives an endpoint and a candidate tree, and returns true only if the entire remaining context succeeds.
+If it returns false, $A$ still has its local alternatives available.
+
+Algorithm~\ref{alg:ch51-choice} implements the nonterminal choice.
+Algorithm~\ref{alg:ch51-sequence} handles the symbols of one RHS.
+Offsets and child lists are values rather than one globally destructive cursor.
+The displayed lists are conceptually immutable; the case study uses stack-local child slots whose lifetimes cover the continuation call.
+
+\begin{algorithm}[htbp]
+\caption{Offer every nonterminal alternative to the caller's continuation.}
+\label{alg:ch51-choice}
+\begin{pseudocode}
+\Require nonterminal $A$, offset $i$, continuation $k$, grammar without nullable-prefix cycles
+\Ensure true exactly when some attempted alternative satisfies the complete continuation
+\Function{Choose}{$A,i,k$}
+\ForAll{productions $r:A\to\alpha$ in declared order}
+  \If{\Call{Sequence}{$r,0,i,i,[],k$}}
+    \State \Return true
+  \EndIf
+\EndFor
+\State \Return false
+\EndFunction
+\end{pseudocode}
+\end{algorithm}
+
+\begin{algorithm}[htbp]
+\caption{Parse a production suffix while retaining the enclosing continuation.}
+\label{alg:ch51-sequence}
+\begin{pseudocode}
+\Require production $r$, symbol index $j$, start $b$, cursor $i$, children $C$, continuation $k$
+\Ensure true only when this suffix and the enclosing context both succeed
+\Function{Sequence}{$r,j,b,i,C,k$}
+\If{$j$ equals RHS length}
+  \State \Return $k(i,\operatorname{Node}(r,b,i,C))$
+\EndIf
+\State $X\gets r.rhs[j]$
+\State define $next(e,t)=\Call{Sequence}{r,j+1,b,e,C+[t],k}$
+\If{$X$ is a nonterminal}
+  \State \Return \Call{Choose}{$X,i,next$}
+\Else
+  \ForAll{terminal matches $(e,t)$ allowed by the lexical contract at $i$}
+    \If{$next(e,t)$} \State \Return true \EndIf
+  \EndFor
+  \State \Return false
+\EndIf
+\EndFunction
+\end{pseudocode}
+\end{algorithm}
+
+The initial continuation accepts only an endpoint equal to the input length, after any permitted trailing layout.
+For fixed tokens, a terminal has at most one matching endpoint.
+For scannerless parsing, a regular terminal can have several possible endpoints, so the lexical contract must say whether to enumerate them or choose one.
+Aurocks chooses the longest matching prefix of each terminal atomically.
+Thus grammar choices backtrack, but a regex terminal does not shorten its own lexeme to satisfy its caller.
+The rule $S\to /a^+/\ a$ rejects \code{aa} in that contract, whereas a character-level CFG interpretation that enumerates regex endpoints could accept it.
+
+Figure~\ref{fig:ch51-continuation} shows the live obligations during the short alternative.
+The continuation is not merely an input position: it includes the production, the next symbol, the children already recognized, and the caller's own continuation.
+Omitting any of those fields loses either recognition context or the tree being built.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=13mm]
+\node[basic block] (a) {A candidate: a, span [0,1)};
+\node[basic block,below=of a] (suffix) {resume S after A: match b};
+\node[basic block,below=of suffix] (node) {finish S with children A, b};
+\node[basic block,below=of node] (end) {require end; commit tree};
+\draw[cfg edge] (a)--node[right,font=\small] {endpoint 1}(suffix);
+\draw[cfg edge] (suffix)--node[right,font=\small] {endpoint 2}(node);
+\draw[cfg edge] (node)--(end);
+\draw[back edge] (end.west) to[out=180,in=180,looseness=1.5] node[left,font=\small] {failure can return}(a.west);
+\end{tikzpicture}
+\caption{A continuation chain carries unfinished caller work all the way to whole-input acceptance.}
+\label{fig:ch51-continuation}
+\end{figure}
+
+Correctness separates soundness from completeness.
+Every accepted tree uses a declared production and matching terminal spans; induction on the constructed tree establishes a derivation.
+Completeness additionally needs termination and enumeration of every permitted choice before rejection.
+With no cycle of calls reachable through nullable prefixes, every recursive cycle consumes input, so finite input and finite alternatives give a finite search tree.
+Resource limits can stop that tree early and must therefore return an inconclusive status, not a proof of nonmembership.
+
+\section{Speculation must not execute irreversible actions}
+\label{sec:ch51-actions}
+
+Suppose the long alternative of $A$ allocates an AST node, increments a symbol counter, or writes a diagnostic before its caller fails.
+Restoring the cursor does not undo those effects.
+Reclaiming memory is only part of the problem: a symbol-table insertion may have changed how later input is interpreted.
+
+One design journals every effect and rolls it back at every choice point.
+Another limits actions to immutable arena allocations and restores an arena mark on failure.
+The case study takes a simpler route: recognition builds only temporary derivation nodes; semantic actions run in postorder after a complete tree has been selected.
+No rejected branch runs its user action.
+This excludes semantic predicates that affect recognition, and actions whose early effects determine later lexical interpretation.
+Those features require an explicitly stateful parsing contract.
+
+For \code{ab}, the selected tree has two production nodes, $A\to a$ and $S\to Ab$.
+The test grammar increments a counter once per selected production and observes two actions.
+For \code{abx}, the counter stays zero.
+These are operational checks of the commitment boundary, not merely acceptance tests.
+
+\section{Search can duplicate exponentially many histories}
+\label{sec:ch51-sharing}
+
+Consider $S\to R\ c$, $R\to aR\mid AR\mid\epsilon$, and $A\to a$.
+On input $a^n b$, every complete attempt at $S$ fails.
+At each of the $n$ copies of $a$, the parser can use a direct terminal or the nonterminal $A$.
+At least $2^n$ deepest production-choice histories therefore reach the same failing suffix.
+The current algorithm repeats work rather than remembering that those suffix problems were already encountered.
+
+Figure~\ref{fig:ch51-sharing} contrasts two histories with a shared recognition subproblem.
+Sharing recognition does not automatically preserve every parse tree or every semantic result.
+If all ambiguity is requested, the representation must retain alternative derivations, usually in a packed structure, rather than choosing an arbitrary cached tree.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=25mm,y=12mm]
+\node[basic block] (r) at (0,0) {R at i};
+\node[basic block] (a) at (2,1) {direct a};
+\node[basic block] (b) at (2,-1) {A gives a};
+\node[basic block] (join) at (4,0) {R at i+1};
+\draw[cfg edge] (r)--(a); \draw[cfg edge] (r)--(b);
+\draw[cfg edge] (a)--(join); \draw[cfg edge] (b)--(join);
+\node[font=\small] at (2,-2.2) {two histories; one recognition question};
+\end{tikzpicture}
+\caption{Memoization can share a suffix question while a forest separately records how that question was reached.}
+\label{fig:ch51-sharing}
+\end{figure}
+
+Caching one result for $(A,i)$ is not generally enough for CFG backtracking.
+In the opening example, $A$ at zero has endpoints one and two, and different callers can need different ones.
+A recognition cache may retain a set of endpoints, plus dependencies needed to propagate new results.
+A PEG packrat parser instead memoizes the single result prescribed by ordered choice.
+The familiar linear-time claim for fixed PEGs relies on bounded work per memoized parsing-expression/position entry and suitable handling of repetition, semantic operations, and recursion.
+It is not a linear-time theorem for arbitrary full-backtracking CFG parsing.
+
+\section{Chart recognition turns recursion into saturation}
+\label{sec:ch51-chart}
+
+An Earley-style item $[A\to\alpha\mathbin{\bullet}\beta,i]$ in chart column $C_j$ says that the prefix $\alpha$ has been recognized from input position $i$ to $j$.
+It records an origin as well as the current position.
+Prediction introduces a callee at the current position; scanning consumes a terminal; completion resumes callers waiting at the completed item's origin.
+Algorithm~\ref{alg:ch51-chart} is a deliberately simple recognizer using repeated closure, so that nullable completions cannot be missed because of worklist order.
+
+\begin{algorithm}[htbp]
+\caption{Recognize a token CFG by chart saturation, including nullable completions.}
+\label{alg:ch51-chart}
+\begin{pseudocode}
+\Require finite token CFG, tokens $t_0,\ldots,t_{n-1}$, fresh start $S'\to S$
+\Ensure accept exactly when a complete start item reaches column $n$
+\State $C_0\gets\{[S'\to\bullet S,0]\}$; other columns empty
+\For{$j=0,\ldots,n$}
+  \Repeat
+    \ForAll{items $[A\to\alpha\bullet B\beta,i]\in C_j$ with nonterminal $B$}
+      \State insert $[B\to\bullet\gamma,j]$ for every production $B\to\gamma$
+    \EndFor
+    \ForAll{complete items $[B\to\gamma\bullet,i]\in C_j$}
+      \ForAll{items $[A\to\alpha\bullet B\beta,h]\in C_i$}
+        \State insert $[A\to\alpha B\bullet\beta,h]$ into $C_j$
+      \EndFor
+    \EndFor
+  \Until{$C_j$ stops growing}
+  \If{$j<n$}
+    \State advance every item expecting terminal $t_j$ into $C_{j+1}$
+  \EndIf
+\EndFor
+\State \Return whether $[S'\to S\bullet,0]\in C_n$
+\end{pseudocode}
+\end{algorithm}
+
+Sets deduplicate items, so left-recursive prediction does not recursively allocate an unbounded stack.
+For $S\to SS\mid a$ on \code{aa}, $C_0$ predicts $S\to\bullet SS$ and $S\to\bullet a$ once each.
+Scanning the first $a$ yields $[S\to a\bullet,0]$ in $C_1$.
+Completion produces $[S\to S\bullet S,0]$, which predicts a new $S$ with origin one.
+Scanning and completing the second $a$ then produces $[S\to SS\bullet,0]$ in $C_2$, and the augmented start completes there.
+The parser recognizes left recursion by revisiting finite facts, not by pretending a recursive call consumed input.
+
+Let $g$ count dotted grammar positions and $n$ input tokens.
+There are $M=O(g(n+1)^2)$ possible chart items, which bounds recognition storage with indexed set membership.
+The displayed repeated full scans are intentionally inefficient; a safe coarse time bound is $O((n+1)(M+1)(M^2+gM))$ for scanning all completion pairs and production predictions per sweep.
+Indexed agendas and waiting/completed-item joins give the familiar fixed-grammar cubic worst-case recognition bound for standard Earley implementations, with better bounds for suitable grammar classes~\cite{grune-2008-parsing}.
+Do not assign that optimized bound to the naive saturation loops without implementing the required indexing.
+
+\section{Choose the sharing structure deliberately}
+\label{sec:ch51-families}
+
+Generalized LR parsing starts from shift/reduce machinery and preserves multiple stack possibilities when an LR action is not unique.
+A graph-structured stack shares common stack tails; packed forests share syntax derivations.
+Generalized LL parsing organizes top-down continuation work into descriptors and shared return contexts.
+The supplied GLL combinator paper develops this perspective in an implementation-oriented setting~\cite{vanbinsbergen-2018-gll}.
+Neither method is obtained by renaming ordinary recursive alternatives \enquote{GLR-style}.
+
+Table~\ref{tab:ch51-families} compares the operational promises.
+Generalized methods need explicit handling of nullable rules, cyclic grammars, and ambiguity; producing all individual trees can require exponential output even when a compact recognition structure is polynomial.
+A grammar with nullable cycles can even admit infinitely many derivations for one word.
+Recognition, returning one tree, and enumerating all trees are distinct interfaces.
+
+\begin{table}[htbp]
+\caption{Different parsing families commit to choices and share work at different boundaries.}
+\label{tab:ch51-families}
+\centering
+\begin{tabular}{p{0.23\linewidth}p{0.32\linewidth}p{0.34\linewidth}}
+\toprule
+Method & Choice contract & Main retained state \\
+\midrule
+Predictive LL & One production selected by lookahead & Pending symbols or calls \\
+PEG with packrat & First local ordered success & One result per expression/position \\
+CFG backtracking & Retry until complete success & Alternatives and caller continuations \\
+Earley-style chart & Saturate possible derivations & Dotted items with origins \\
+GLR/GLL & Retain generalized alternatives & Shared stacks/returns and optional forests \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Exercises}
+\label{sec:ch51-exercises}
+\begin{enumerate}
+\item\label{ex:ch51-three-inputs} Trace \code{ab}, \code{abb}, and \code{abx} in the opening grammar. Which $A$ production is selected, and how many selected production actions run?
+\item\label{ex:ch51-null-cycle} Explain why $A\to B A\mid a$, $B\to\epsilon$ is unsafe for naive recursive descent even though the first symbol of the recursive alternative is not $A$.
+\item\label{ex:ch51-sharing} For the exponential example at $n=4$, count the deepest direct-versus-indirect histories. Explain what information an endpoint-only cache omits if actions distinguish the two choices.
+\item\label{ex:ch51-null-chart} Use $S\to AB$, $A\to\epsilon$, $B\to\epsilon$. Saturate $C_0$ and show the item establishing acceptance of empty input.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch51-reading}
+Grune and Jacobs distinguish limited and exhaustive backtracking and compare deterministic and general parsing methods~\cite{grune-2008-parsing}.
+Van Binsbergen, Scott, and Johnstone connect GLL to compositional parser construction and explicit shared state~\cite{vanbinsbergen-2018-gll}.
+Hopcroft, Motwani, and Ullman provide the language-theoretic background for context-free recognition~\cite{hopcroft-2007-automata}.

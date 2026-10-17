@@ -1,0 +1,220 @@
+\chapter{Semantic, Memory, and Effect-Aware IRs}
+\label{ch:semantic-effect-ir}
+
+Two adjacent stores look independent when they use different variable names.
+They cease to be independent when those variables hold the same address.
+Two additions look interchangeable when they compute the same mathematical integer.
+They cease to be interchangeable when one wraps and the other traps.
+An IR must expose enough meaning for the optimizer to tell these cases apart.
+
+An opcode list alone is therefore not a semantic specification.
+The contract must also define values, state, observable behavior, exceptional outcomes, and the assumptions under which a transformation may replace an operation.
+This chapter connects that contract to explicit memory dependencies and effect-aware scheduling.
+
+\section{Define an operation as a state transition}
+\label{sec:ch63-semantics}
+
+For a small sequential language, let a state contain local values, a heap, and an observable-event sequence.
+Evaluating an operation either produces a new state and result, raises a specified error, or fails to terminate.
+The event sequence might record output, foreign calls, or accesses designated observable by the language.
+Ordinary internal loads need not appear in it; their returned values and possible faults still matter.
+
+A \term{semantic IR} gives these transitions a precise interpretation rather than relying on the implementation of the current interpreter as an undocumented definition.
+Executable semantics can power interpreters, tests, validators, and instruction selection, but each generated tool must implement that interpretation correctly.
+One specification does not by itself prove that all its consumers agree.
+
+Consider a bounds-checked array read followed by output.
+Moving output before the read changes the trace if the read fails.
+Removing the read changes termination if it can block forever.
+Even when its numeric result is dead, the operation may carry required behavior.
+Table~\ref{tab:ch63-effects} distinguishes the relevant dimensions.
+
+\begin{table}[htbp]
+\caption{Effect summaries describe behavior beyond the returned value.}
+\label{tab:ch63-effects}
+\centering
+\begin{tabular}{ll}
+\toprule
+Component & Meaning in the sequential model \\
+\midrule
+Read set & memory regions whose contents may be inspected \\
+Write set & memory regions whose contents may change \\
+Observable & an externally visible event may occur \\
+May trap & an exceptional outcome may terminate the operation \\
+May diverge & the operation may not return \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Make memory versions explicit}
+\label{sec:ch63-memory}
+
+One simple IR threads a memory-state token through every store and effectful call.
+A load consumes the memory version it observes; a store produces a new version.
+Control-flow joins merge incoming versions with a memory merge node.
+This exposes sequencing to graph algorithms without pretending that a memory token is a runtime pointer.
+Figure~\ref{fig:ch63-token} shows a store to $p$, a store to $q$, and a load from $p$.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=13mm]
+\node[basic block] (m0) {memory m0};
+\node[basic block,below=of m0] (s1) {m1 = store(m0,p,9)};
+\node[basic block,below=of s1] (s2) {m2 = store(m1,q,4)};
+\node[basic block,below=of s2] (load) {v = load(m2,p)};
+\draw[cfg edge] (m0)--(s1); \draw[cfg edge] (s1)--(s2); \draw[cfg edge] (s2)--(load);
+\end{tikzpicture}
+\caption{Memory-state edges preserve order until alias and effect reasoning justify bypassing a dependency.}
+\label{fig:ch63-token}
+\end{figure}
+
+A single chain conservatively orders operations that may actually be independent.
+If $p$ and $q$ denote distinct ordinary cells, the second store cannot change the later load from $p$.
+The load can then be replaced by $9$, subject to the access-validity contract.
+If $p=q$, its value is $4$ instead.
+Table~\ref{tab:ch63-alias} works both cases, including the result of swapping the stores.
+
+\begin{table}[htbp]
+\caption{Alias information changes both load forwarding and reorder legality.}
+\label{tab:ch63-alias}
+\centering
+\begin{tabular}{llll}
+\toprule
+Addresses & Original load & Swapped load & Swap legal here \\
+\midrule
+$p\ne q$ & $9$ & $9$ & yes \\
+$p=q$ & $4$ & $9$ & no \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+LLVM's MemorySSA is an analysis overlay describing memory definitions, uses, and merges; it is not a complete executable heap semantics or a claim that alias analysis has become unnecessary~\cite{llvm-2026-memoryssa}.
+Its walker uses alias information to find relevant clobbers.
+Firm provides a graph-based design in which memory dependencies are part of the IR's organization~\cite{braun-2011-firm}.
+These designs share a motivation while making different engineering choices about where dependency information lives and how it is updated.
+
+\section{Use effect summaries as conservative permissions}
+\label{sec:ch63-commute}
+
+For an operation $a$, let $R_a$ and $W_a$ overapproximate its read and write regions.
+A sufficient memory-independence condition for two operations is
+\[
+W_a\cap(R_b\cup W_b)=\emptyset,
+\qquad W_b\cap R_a=\emptyset.
+\]
+The regions must describe overlapping storage conservatively; distinct syntactic addresses are not enough.
+The operations must also have no SSA value dependence in either direction, operate on valid storage, terminate, and produce no required ordered events or faults under this rule.
+These are sufficient conditions for our sequential model, not a complete concurrency memory model.
+
+Algorithm~\ref{alg:ch63-commute} is deliberately conservative.
+For hashed explicit region sets, intersections can be checked in expected time linear in the input set sizes.
+A region analysis may instead use intervals, allocation identities, or a top element meaning unknown memory.
+Treating unknown as an empty set would turn uncertainty into an unsound permission.
+
+\begin{algorithm}[htbp]
+\caption{Check a sufficient condition for swapping two sequential operations.}
+\label{alg:ch63-commute}
+\begin{pseudocode}
+\Require sound effect summaries for $a,b$, valid accesses, no value dependence
+\Ensure true only when this rule permits exchanging their order
+\If{either operation may trap, diverge, or emit an observable event}
+  \State \Return false
+\EndIf
+\If{$W_a\cap(R_b\cup W_b)\ne\emptyset$ or $W_b\cap R_a\ne\emptyset$}
+  \State \Return false
+\EndIf
+\State \Return true
+\end{pseudocode}
+\end{algorithm}
+
+The companion tests every pair of four concrete addresses against execution of the store example.
+This checks the concrete disjointness instance, not a compiler's entire alias analysis.
+Exceptions, atomics, volatile accesses, synchronization, and signals require richer contracts before this rule can be generalized.
+In particular, absence of ordinary read/write overlap does not authorize moving a synchronization operation.
+
+\section{Effects and types serve different roles}
+\label{sec:ch63-types}
+
+A type may say that an operation returns an integer without saying whether it writes a global variable.
+An effect annotation adds that information, either as part of the type or in a separate checked summary.
+A \term{monadic IR} makes sequencing explicit through its computation structure, allowing value construction and effectful computation to be distinguished.
+MIL demonstrates such an organization for strict functional languages and connects block interfaces to specialization and representation changes~\cite{jones-2018-mil}.
+
+The implementation must still decide how summaries are obtained.
+Trusted declarations are a language boundary; inferred summaries need a sound analysis; unchecked annotations are merely hints.
+Function summaries for recursion typically require a fixed point.
+A caller that specializes against an imported effect summary must invalidate its result if that summary changes.
+This is one concrete dependency for the query architecture of Chapter~\ref{ch:incremental-databases}.
+Foreign callbacks make this dependency transitive: a native visitor that performs no direct stores can still modify managed globals through its callback.
+Chapter~\ref{ch:ffi-foundations} develops a boundary-admission contract that includes callbacks, pointer retention, and failure paths before an imported summary can justify optimization.
+
+\section{Carry contracts across lowering}
+\label{sec:ch63-lowering}
+
+Lowering a bounds-checked load to address arithmetic plus a machine load introduces obligations.
+The index calculation must use the intended integer width; the check must dominate the access; pointer arithmetic must stay within the required object model; and the failure branch must retain the specified error.
+A semantic operation may become several instructions, but its observable contract remains.
+Figure~\ref{fig:ch63-lowering} separates the value, memory, and exceptional components.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=14mm]
+\node[basic block] (source) {checked array read};
+\node[basic block,below=of source] (guard) {bounds test};
+\node[basic block,below left=of guard] (error) {specified error};
+\node[basic block,below right=of guard] (load) {address + load};
+\draw[cfg edge] (source)--(guard);
+\draw[cfg edge] (guard)--node[left,font=\small] {fail}(error);
+\draw[cfg edge] (guard)--node[right,font=\small] {pass}(load);
+\end{tikzpicture}
+\caption{Lowering preserves exceptional behavior as well as the successful value.}
+\label{fig:ch63-lowering}
+\end{figure}
+
+Algorithm~\ref{alg:ch63-contract} describes a validation boundary, not a decision procedure for arbitrary program equivalence.
+Local proof rules, a solver in a decidable fragment, or finite tests have different evidential strength.
+An unsupported obligation must remain unresolved rather than being interpreted as a successful proof.
+
+\begin{algorithm}[htbp]
+\caption{Validate a proposed semantic lowering through explicit obligations.}
+\label{alg:ch63-contract}
+\begin{pseudocode}
+\Require source operation contract, target sequence, established input facts
+\Ensure accepted lowering only when every required obligation is discharged
+\State check target typing, widths, control edges, and memory dependencies
+\State formulate successful-value and final-memory obligations
+\State formulate required event, exceptional-outcome, and termination obligations
+\ForAll{required obligations}
+  \If{the selected proof mechanism cannot establish the obligation}
+    \State \Return unresolved or rejected
+  \EndIf
+\EndFor
+\State \Return accepted with recorded assumptions
+\end{pseudocode}
+\end{algorithm}
+
+There is no general finite complexity bound for discharging these semantic obligations: unrestricted equivalence is undecidable.
+The structural checks are finite graph checks, while the proof mechanism determines the remaining cost and completeness.
+Keeping that boundary visible prevents a useful executable specification from being mistaken for an automatic proof of every optimization.
+
+\section{Exercises}
+\label{sec:ch63-exercises}
+
+\begin{enumerate}
+\item\label{ex:ch63-stores} Execute the two stores and load for $p=1,q=2$, and then for $p=q=1$.
+Give both final memory maps and explain the swap decision.
+\item\label{ex:ch63-effects} Operation $a$ reads region $A$ and writes $B$; operation $b$ reads $B$ and writes $C$.
+Assume pairwise disjoint regions and no other effects.
+Does the sufficient swap rule accept? Identify the dependency.
+\item\label{ex:ch63-trap} Construct a program where a dead result cannot be removed because computing it can trap before an output operation.
+State what additional fact would permit removal.
+\item\label{ex:ch63-summary} A callee's summary changes from reading $A$ to writing $A$.
+Explain which cached caller optimization must be invalidated and why a type-only dependency is insufficient.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch63-reading}
+
+LLVM's documentation explains MemorySSA's access nodes and clobber queries~\cite{llvm-2026-memoryssa}.
+Firm and MIL offer contrasting graph and monadic approaches to exposing dependencies and representation choices~\cite{braun-2011-firm,jones-2018-mil}.
+The executable \code{Effect} model in \path{example-code/architecture-labs/labs.py} isolates the small sequential commutation rule used here.

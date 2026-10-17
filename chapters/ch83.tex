@@ -1,0 +1,227 @@
+\chapter{Termination and Reduction Orderings}
+\label{ch:rewrite-termination}
+
+An optimizer that repeatedly applies individually valid rules can run forever.
+Commuting two operands back and forth preserves meaning at every step yet never finishes.
+Termination therefore needs a decreasing global argument, not only semantic correctness of each local replacement.
+The argument must cover substitutions and contexts, because the rule engine applies schematic rules inside larger programs.
+
+\section{Find a measure that every step decreases}
+\label{sec:ch83-measure}
+For strings, rules with strictly shorter right sides decrease the natural-number length measure.
+For finite trees, removing add-zero and multiply-one nodes decreases tree size for every substitution.
+Let $|x|=1$ for a variable and $|f(t_1,\ldots,t_n)|=1+\sum_i|t_i|$.
+The rule $\operatorname{add}(x,0)\to x$ removes two nodes regardless of the size substituted for x.
+
+But a symbolic size comparison on schematic terms alone is insufficient when variable multiplicities change.
+The rule $f(x)\to g(x,x)$ duplicates the substituted term.
+Assigning the symbol f a large constant weight can make the schematic left look heavier for x of size one while failing for a sufficiently large substitution.
+Table~\ref{tab:ch83-measures} lists the obligations that a usable measure must satisfy.
+
+\begin{table}[htbp]
+\caption{A local decrease must survive every substitution and surrounding context.}
+\label{tab:ch83-measures}
+\centering
+\begin{tabular}{ll}
+\toprule
+Property & Required role \\
+\midrule
+well-founded strict order & excludes infinite descending chains \\
+substitution stability & schematic decrease holds for instantiated rules \\
+context monotonicity & replacing a smaller subterm decreases the whole \\
+strict orientation of all rules & every legal rewrite step is covered \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A \term{reduction ordering} is a well-founded strict order stable under substitution and contexts.
+If every rule decreases it, every step decreases it, so an infinite rewrite sequence would imply an impossible infinite descent~\cite{dershowitz-1982-orderings}.
+This proves termination of the specified relation.
+It does not prove confluence, an efficient bound on derivation length, or semantic validity.
+
+\section{Use polynomial interpretations with explicit domains}
+\label{sec:ch83-polynomial}
+An interpretation maps each symbol to a monotone function over a well-founded domain, commonly natural numbers.
+Variables range over arbitrary domain values.
+For the identity rules, interpret add and mul structurally as $1+a+b$ and zero and one as $1$; these are measures, not the arithmetic meanings of the symbols.
+Then add(x,zero) has measure $x+2$, strictly greater than x for every natural x.
+The same holds for mul(x,one).
+
+Figure~\ref{fig:ch83-potential} shows the potential decrease for the nested worked term.
+If v has measure one, the initial term has measure five, the intermediate identity wrapper has measure three, and the result has measure one.
+Every identity step drops two, so this particular family has exactly one step per wrapper.
+The tests construct up to 49 pairs of wrappers and check both trace length and normal form.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=14mm]
+\node[basic block] (a) {mul(add(v,zero),one): 5};
+\node[basic block,below=of a] (b) {add(v,zero): 3};
+\node[basic block,below=of b] (c) {v: 1};
+\draw[cfg edge] (a)--node[right,font=\small]{decrease 2}(b);
+\draw[cfg edge] (b)--node[right,font=\small]{decrease 2}(c);
+\end{tikzpicture}
+\caption{A concrete potential can bound the trace when every step has a known minimum decrease.}
+\label{fig:ch83-potential}
+\end{figure}
+
+Algorithm~\ref{alg:ch83-linear} checks a restricted affine interpretation.
+For a difference $c+\sum_i a_i x_i$ over natural variables, nonnegative coefficients and $c\ge1$ suffice for strict positivity.
+Requiring every symbol's argument coefficients to be positive supplies strict context monotonicity.
+These are sufficient syntactic checks for this domain, not a complete termination prover.
+
+\begin{algorithm}[htbp]
+\caption{Check a sufficient affine interpretation certificate over natural numbers.}
+\label{alg:ch83-linear}
+\begin{pseudocode}
+\Require finite rules and nonnegative affine symbol interpretations
+\Ensure accepted certificate proves every rule strictly decreasing, or unresolved
+\State require each argument coefficient to be positive
+\ForAll{rules $l\to r$}
+\State compose interpretations to obtain affine forms for $l$ and $r$
+\State subtract right coefficients from left coefficients
+\State require every variable coefficient nonnegative and constant difference positive
+\EndFor
+\State accept under the stated natural-number interpretation
+\end{pseudocode}
+\end{algorithm}
+
+With $V$ variables and $N$ total term nodes, direct coefficient-vector composition costs $O(NV)$ arithmetic operations; integer coefficient bit sizes add further cost.
+Failure means the proposed interpretation does not establish the decrease through this sufficient check.
+It does not establish nontermination.
+Searching coefficients requires a separate finite search or solver whose completeness and resource behavior must be stated.
+
+\section{Orient rules that preserve or increase size}
+\label{sec:ch83-path}
+Many useful rules do not shrink plain node count.
+Changing a representation can move a complex operator under simpler operators, or flatten a nested form without removing symbols.
+\term{Recursive path orderings} compare root precedence and recursively compare arguments while respecting the subterm property~\cite{dershowitz-1982-orderings}.
+Their power comes from structural descent, not a claim that every source-level algebraic identity can be oriented compatibly.
+
+A precedence $f\succ g$ can justify $f(x)\succ g(x)$ under an appropriate path ordering, while the subterm property gives $f(x)\succ x$.
+Comparing $f(a)$ with $g(b)$ also requires the relevant dominance checks on arguments; root precedence alone is not enough.
+Lexicographic versus multiset statuses change how argument tuples are compared.
+A production ordering implementation needs precise rules for variables, equal roots, statuses, and precedence ties before accepting a certificate.
+
+The chapter does not implement a general recursive path ordering checker.
+It uses the ordering literature to explain alternatives when the executed size-decreasing examples are insufficient.
+Similarly, dependency-pair methods separate potential recursive calls from surrounding construction and can prove systems beyond simple order orientation; their usable-rule, reduction-pair, and graph approximations require their own correctness premises~\cite{ohlebusch-2002-rewriting}.
+They should not be reduced to a slogan that finding no obvious syntactic cycle proves termination.
+
+\section{Distinguish semantic recursion from engine looping}
+\label{sec:ch83-engine}
+Consider commutativity $\operatorname{add}(x,y)\to\operatorname{add}(y,x)$.
+For unequal operands, the rule can immediately undo itself.
+Sorting operands by a stable total order would instead orient only out-of-order pairs, decreasing an inversion-like measure in a fixed associative representation.
+That implementation also needs to state whether reassociation and operand reordering preserve effects and arithmetic semantics.
+
+Table~\ref{tab:ch83-loop} contrasts ways to control repeated rewriting.
+A fuel limit guarantees the engine returns control, not that the mathematical system terminates.
+A visited-state set can detect a repeated state on a deterministic path, proving a cycle in that path, but unbounded growth can diverge without repeating any state.
+A node-size limit bounds memory only if it accounts for all retained structures, not just the current root.
+
+\begin{table}[htbp]
+\caption{Resource controls and termination proofs answer different questions.}
+\label{tab:ch83-loop}
+\centering
+\begin{tabular}{ll}
+\toprule
+Mechanism & What it establishes \\
+\midrule
+well-founded decrease & no infinite reduction under covered rules \\
+fuel & at most the configured number of performed steps \\
+repeated-state detection & a cycle when a state actually repeats \\
+term-size cap & bounded admitted term size, not normal-form existence \\
+heuristic rule phases & selected schedule, requiring separate termination analysis \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Algorithm~\ref{alg:ch83-bounded} is a safe publication wrapper for a budgeted normalizer.
+It must test redex absence after the final permitted step: using exactly all fuel does not imply incompleteness if the last step reached a normal form.
+The companion implements that final test and returns its status separately from the current term.
+
+\begin{algorithm}[htbp]
+\caption{Report normalization status independently of the number of performed steps.}
+\label{alg:ch83-bounded}
+\begin{pseudocode}
+\Require finite term, valid rules, nonnegative step budget
+\Ensure term, trace, and accurate normal-form status
+\State perform selected steps while both a redex and budget remain
+\State test whether the final term has any selected-strategy redex
+\If{no redex remains} \State return complete normal form and trace
+\Else \State return intermediate term, trace, and incomplete status
+\EndIf
+\end{pseudocode}
+\end{algorithm}
+
+The wrapper costs one additional redex search beyond the performed steps in the exhausted case.
+For a strategy intended to normalize the full relation, the final search must cover all allowed positions and rules.
+A phase that deliberately ignores some positions can only report normality relative to that phase.
+Figure~\ref{fig:ch83-outcomes} keeps these conclusions distinct.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=13mm and 14mm]
+\node[basic block] (run) {bounded rewrite run};
+\node[basic block,below left=of run] (done) {no redex: normal form};
+\node[basic block,below right=of run] (stop) {redex remains: incomplete};
+\draw[cfg edge] (run)--(done);\draw[cfg edge] (run)--(stop);
+\end{tikzpicture}
+\caption{Budget exhaustion must not be relabeled as a proof of normalization.}
+\label{fig:ch83-outcomes}
+\end{figure}
+
+\section{Construct the descent proof and its scope}
+\label{sec:ch83-proof}
+Assume a strict well-founded ordering greater-than that is stable under substitution and monotone under every admitted context.
+If l is greater than r for each rule, then an instance l substituted by sigma is greater than r substituted by sigma.
+Putting those two terms into the same context preserves the comparison.
+Thus each actual engine step decreases the whole represented term, not merely the matched fragment.
+An infinite reduction would induce an infinite descending chain, contradicting well-foundedness.
+This short argument identifies exactly where the substitution and context premises are used.
+
+It also explains why a heuristic cost model is usually not a termination certificate.
+Estimated target costs can decrease locally while context-sensitive sharing or register pressure increases globally.
+Costs can be negative, incomparable, or revised by a learned estimator between iterations.
+A stable syntactic potential used solely to control rewrite progress can coexist with a separate profitability model, but they should not be confused.
+The progress measure need not predict execution speed, and the speed estimate need not be well-founded.
+
+For a natural-number measure with minimum step decrease one, derivation length is at most the initial measure minus the minimum reachable measure.
+This yields a useful bound for the executed identity wrappers.
+It does not yield a polynomial source-size bound for every termination ordering: a measure can be enormous relative to input encoding, and intermediate terms can grow while a lexicographic or structural ordering decreases.
+The time per step can also grow with those terms.
+Termination, derivational complexity, and practical optimizer latency remain three separate conclusions.
+
+\section{Combine passes without introducing an oscillation}
+\label{sec:ch83-composition}
+Two terminating passes can form a nonterminating repeated pipeline.
+One pass expands a representation and terminates because it visits each original node once; another contracts the expanded representation and also terminates.
+Repeating both until neither changes anything can recreate the same input forever.
+Each pass's internal proof says nothing about the composite loop unless the proofs share a global measure or the pipeline has an independent phase bound.
+
+A compiler can deliberately permit one expansion phase followed by one contraction phase and stop.
+It can also attach a bounded phase count, remember previously seen pipeline states, or require a lexicographic potential covering all phases.
+Repeated-state detection catches actual cycles but not indefinitely growing oscillations whose states never repeat.
+If the compiler's observable output must be deterministic, budget accounting and tie-breaking should not depend on unstable hash iteration order.
+
+Recursive and conditional rules require equally careful scope.
+A termination certificate for an unconditional overapproximation proves termination of any restriction of that relation, including rules whose conditions disable some steps.
+But a certificate for one restricted strategy does not automatically prove termination when the engine starts rewriting under lambdas or inside previously opaque nodes.
+The set of contexts allowed by the engine is part of the theorem.
+Changing it is a semantic and termination-policy change, even if the rule table itself is byte-for-byte identical.
+
+\section{Exercises}
+\label{sec:ch83-exercises}
+\begin{enumerate}
+\item\label{ex:ch83-size} Compute the size decrease of add(x,zero)$\to$x after substituting a term of size 17.
+\item\label{ex:ch83-duplicate} With interpretations $f(x)=10+x$ and $g(x,y)=1+x+y$, determine for which natural x the rule $f(x)\to g(x,x)$ decreases.
+\item\label{ex:ch83-fuel} Normalize add(v,zero) with one step of fuel.
+Should its final status be complete? Contrast a self-loop rule.
+\item\label{ex:ch83-commute} Give the two-step cycle generated by unconditional add commutativity and name an additional canonical-order policy that blocks it.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch83-reading}
+Dershowitz develops simplification orderings and recursive path orderings~\cite{dershowitz-1982-orderings}.
+Ohlebusch treats more advanced termination techniques, including the conditions that make modular proof methods sound~\cite{ohlebusch-2002-rewriting}.

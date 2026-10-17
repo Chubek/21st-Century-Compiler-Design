@@ -1,0 +1,1402 @@
+arXiv:1711.04422v2 [cs.PL] 6 Apr 2018
+
+A Synthesizing Superoptimizer
+Raimondas Sasnauskas
+
+Yang Chen
+
+Peter Collingbourne
+
+SES Engineering
+raimondas.sasnauskas@ses.com
+
+Nvidia, Inc.
+yangchen@nvidia.com
+
+Google, Inc.
+pcc@google.com
+
+Jeroen Ketema
+
+Gratian Lup
+
+Jubi Taneja
+
+Embedded Systems Innovation by
+TNO
+jeroen.ketema@tno.nl
+
+Microsoft, Inc.
+gratilup@microsoft.com
+
+University of Utah
+jubi@cs.utah.edu
+
+John Regehr
+University of Utah
+regehr@cs.utah.edu
+
+Abstract
+
+signed for LLVM [12] but we have also used it to find new
+optimizations for the Microsoft Visual C++ compiler.
+Several trends convinced us that it was time to write a
+new superoptimizer. There has been increased pressure on
+compiler developers due to the adoption of higher-level programming languages and a proliferation of interesting hardware platforms. SAT and SMT solvers continue to improve;
+they are already more than capable of discovering equivalence proofs necessary to verify compiler optimizations involving tens to hundreds of instructions. Solvers are also a
+key enabler for program synthesis, which supports the discovery of new optimizations that are out of reach for naı̈ve
+search. Finally, verified compilers appear to be much more
+difficult to extend than are traditional compilers. Though we
+have not yet done so, a natural extension of superoptimization research would be to use a proof-producing solver to
+greatly reduce the effort involved in incorporating new optimizations into a proved-correct compiler [13, 16]. In summary, it appears to be a good time to re-evaluate some aspects of compiler implementation, including how middleend optimizers are constructed.
+Our contributions include the design and implementation
+of Souper, a synthesis-based superoptimizer for a domainspecific intermediate representation (IR) that resembles a
+purely functional, control-flow-free subset of LLVM IR.
+Souper implements an extension of Gulwani et al.’s synthesis
+algorithm [10], allowing it to synthesize LLVM’s bitwidthpolymorphic instructions.
+Souper has two intended use cases. First, its results can
+be turned into actionable advice for compiler developers;
+both LLVM and Microsoft compiler developers have implemented optimizations suggested by Souper. Second, Souper
+
+If we can automatically derive compiler optimizations, we
+might be able to sidestep some of the substantial engineering challenges involved in creating and maintaining a highquality compiler. We developed Souper, a synthesizing superoptimizer, to see how far these ideas might be pushed in
+the context of LLVM. Along the way, we discovered that
+Souper’s intermediate representation was sufficiently similar
+to the one in Microsoft Visual C++ that we applied Souper to
+that compiler as well. Shipping, or about-to-ship, versions of
+both compilers contain optimizations suggested by Souper
+but implemented by hand. Alternately, when Souper is used
+as a fully automated optimization pass it compiles a Clang
+compiler binary that is about 3 MB (4.4%) smaller than the
+one compiled by LLVM.
+
+1.
+
+Introduction
+
+An ahead-of-time compiler is typically structured as a frontend, a collection of optimizations, and a backend. The optimizations in the “middle-end” of the compiler are numerous,
+time-consuming to develop, hard to get right, and accrete
+assumptions about costs that are difficult to excise as hardware platforms evolve. An alternate strategy for implementing some parts of a middle-end is to use a superoptimizer:
+a program that looks at the code being compiled and uses a
+search procedure, a cost function, and an equivalence verifier to automatically discover better (or even optimal) code
+sequences. The idea dates back at least 37 years [8], and has
+been the subject of dozens of papers since then. We created
+Souper, a synthesizing superoptimizer that automatically derives novel middle-end optimizations; it was originally de1
+
+2018/4/9
+
+can run as an LLVM optimization pass, ensuring that its code
+improvements can be exploited by other passes, such as constant propagation and dead code elimination. When building LLVM itself, Souper discovers about 7,900 distinct optimizations, many of which cannot be performed by LLVM
+on its own, and applies them a total of 85,000 times. An
+Souper-optimized Clang-3.9 binary is almost 3 MB (4.4%)
+smaller than one built without Souper, though it is also about
+2% slower. (We do not yet know why; in this configuration,
+the only optimizations performed by Souper were replacing
+variables by constants. This should not hurt performance. In
+fact, versions of Souper based on earlier versions of LLVM
+did get speedups in this case.) Although the initial compilation of a program using Souper is often 5× to 25× slower
+than optimized compilation with LLVM, Souper’s discoveries are cached and subsequent compilations have much
+lower overhead. For example, the time for Souper with a
+warm cache to compile LLVM on our test machine is about
+nine minutes, as opposed to about eight minutes without
+Souper.
+
+2.
+
+%a:i64 = var
+%x:i64 = var
+%y:i64 = var
+%i = eq %a, %x
+%j = ne %a, %y
+%r = and %i, %j
+infer %r
+(a)
+
+%z = slt %x, %y
+pc %z 1
+(b)
+
+Figure 1. A simple Souper optimization. The left-hand side
+in (a) does not optimize. Adding the path condition in (b)
+allows Souper to synthesize the right-hand side (c).
+operand is either an integer constant or a value. Integer constants have explicit widths; for example, the largest signed
+8-bit value is 127:i8. Constants may be either signed or
+unsigned, but this is only a notational convenience: Souper,
+like LLVM and like processors, associates signedness information with instructions rather than with variables. The
+only data types are bitvector, tuple of bitvector, and a special
+block type. Most operations are polymorphic with respect to
+bit width, and a few type constraints are enforced:
+
+Souper Design and Implementation
+
+• All bitvectors are at least one bit wide
+
+The middle-end of a compiler is an exercise in compromises.
+Much high-level language information, especially about
+types and about structured control flow, has been thrown
+away. At the same time, the target platform is frustratingly
+out of reach, and it is difficult or impossible to take advantage of processor-level tricks such as conditional execution
+and special-purpose instructions.
+So, why have we developed a new middle-end superoptimizer? First, LLVM IR is the narrow waist in a large
+and growing ecosystem of frontends and backends; improvements made at this level can benefit many projects
+and billions of end users (via, for example, Android). Second, Souper excels at generating constants, particularly for
+Boolean valued variables that are used to control branches.
+Constants ripple through the rest of the middle-end and the
+full benefits are not realized until constant propagation, dead
+code elimination, and other optimization passes have exploited them. Generating constants in the backend would
+leave these benefits on the table. Third, the SSA form that
+many modern compilers use in their middle ends is effectively a functional programming language [1] that is highly
+amenable to automated reasoning techniques.
+2.1
+
+result %i
+(c)
+
+• Operand widths for instructions such as add must match
+• Comparison instructions return a single bit, and the first
+
+argument to a select instruction—LLVM’s version of
+the ternary ?: operator in C and C++—must be one bit
+wide
+• The sext (sign extend) and zext (zero extend) instruc-
+
+tions must extend their argument by at least one bit
+• The trunc (truncate) instruction must reduce the bitwidth
+
+of its argument by at least one bit
+• Checked math operations such as uadd.with.overflow
+
+return a tuple consisting of the possibly-wrapped result
+and a bit indicating whether overflow occurred
+• The extractvalue instruction, like its LLVM counter-
+
+part, extracts a bitvector from a tuple
+Souper does not perform type inference, but widths can
+be omitted in most situations where they are obvious from
+context.
+2.2
+
+An IR for Superoptimization
+
+Left-Hand Sides, Right-Hand Sides, and Path
+Conditions
+
+Souper does not have control flow, though it does provide
+two constructs for representing dataflow facts learned from
+control flow in the program being optimized. For example,
+Figure 1(a) shows the left-hand side (LHS) of a potential
+optimization: the infer keyword indicates the root node that
+Souper is being asked to optimize the computation of. Here
+%r is a Boolean value that is true when the 64-bit input %a is
+equal to %x and unequal to %y. In this case, Souper is unable
+to synthesize a better way to compute %r.
+
+Souper’s basic abstraction is a directed acyclic dataflow
+graph. Operations closely follow those in the LLVM IR,1
+though Souper’s IR is purely functional. Souper has 51 instructions, all derived from equivalents in the integer, scalar
+subset of the LLVM instruction set.
+The order of statements in Souper IR matters only in
+that a value may not be referenced before it is defined. An
+1 http://llvm.org/docs/LangRef.html
+
+2
+
+2018/4/9
+
+chooses its zeroth input, then %3 = 1. This fact, in turn,
+implies that %2, the remainder, is not equal to zero. The
+next two blockpcs establish that the remainder is not one or
+two. Together, these three conditions constrain the implicit
+default case of the switch operator, which is the case where
+the remainder is three. The next three blockpcs respectively
+constrain the three explicit switch cases. The overall effect
+is that Souper is able to reassemble information learned in
+the switch cases in such a way that it is feasible to derive the
+overall optimization.
+
+Now assume this left-hand side is augmented with the fact
+that %x is less than %y using a signed comparison. In Souper,
+such a fact is encoded as a path condition—an assertion that
+a variable holds a particular value, that typically comes from
+executing through a conditional branch in a program—that
+is shown in Figure 1(b). Given this additional information,
+Souper can prove that %r is true if %a equals %x, and therefore the second comparison and the and-instruction are unnecessary and can be dropped. Souper represents a synthesis result as a right-hand side (RHS) containing the result
+keyword. A right-hand side is a DAG that may refer to values on its corresponding left-hand side. A RHS is useful if it
+is cheaper to compute than its LHS.
+A left-hand and right-hand side can be concatenated to
+create a complete optimization. When presented with such
+an optimization, Souper’s role is not to synthesize, but rather
+to verify the correctness of the optimization—a relatively
+straightforward job.
+2.3
+
+2.5
+
+Since Souper has its own IR, it can run as a standalone
+tool. However, we commonly want to convert LLVM IR
+into Souper IR on the fly, in order to look for optimizations
+that can be applied to programs that we care about. For this
+purpose Souper uses LLVM’s APIs to access the in-memory
+representation of its IR.
+Souper’s extractor scans each instruction in an LLVM
+module—a collection of functions roughly equivalent to a
+C or C++ compilation unit—looking for those that return
+integer-typed values. Each such instruction leads to the construction of, and is the root of, an Souper left-hand side. The
+rest of the left-hand side is constructed by recursively following backwards dataflow edges from this root instruction.
+As the backwards traversal passes conditional branches and
+phi nodes it adds path conditions and blockpcs.
+To remain sound in the presence of loops, Souper must
+not extract any program point more than one time in a single
+left-hand side. In the vast majority of cases, LLVM’s builtin loop detection suffices, but LLVM does not detect irreducible loops, which occur rarely but which Souper must detect on its own. Souper’s backwards traversal is also stopped
+when it reaches a value that comes from another function,
+a load from memory, or an instruction that Souper lacks a
+model for, such as a floating point or vector instruction.
+Extraction is accompanied by canonicalization; arguments to commutative operations are sorted; Souper canonicalizes away as many comparison instructions as possible,
+for example turning greater-than into less-than and swapping the operands; BitCast, PtrToInt, and IntToPtr instructions simply pass on their bitvector values, throwing away
+LLVM-level type information; GetElementPointer, LLVM’s
+struct and array element address generation instruction, is
+reduced to adds and multiplies.
+
+Exploiting Correlated Phi Nodes
+
+When control flow in LLVM code arrives at the start of a
+basic block, each phi node [6] selects the value from its argument list that corresponds to the block’s immediate predecessor. Lacking control flow, Souper preserves information about correlated phi nodes using values of block type.
+Figure 2 shows an optimization that can only be performed
+using the knowledge that two phi nodes make correlated
+choices.
+2.4
+
+Extracting Souper IR from LLVM IR
+
+Reasoning About Incoming Control Flow
+
+Consider the C function in Figure 3(a). In each case of the
+switch statement, Souper can use path condition information
+extracted from control flow. For example, the Souper LHS
+corresponding to the value of a at the end of the first case
+(equivalently, corresponding to %4 in Figure 3(b)) is:
+%0:i32 = var
+%1:i32 = urem %0, 4:i32
+pc %1 0:i32
+%2:i32 = add 3:i32, %0
+infer %2
+
+This asserts that at this program point, the remainder is
+zero. The problem is that when we look at the program point
+where information about the remainder values is actually
+useful—at the end of g—we no longer have any path conditions, their information has been lost as the control flow
+edges come together. In other words, while path conditions
+capture useful information as conditional branches are executed, they cannot represent facts about convergent control
+flow.
+To support reasoning about merged paths, Souper has a
+blockpc construct: a reverse path condition tied to a value
+of the block type. The Souper IR in Figure 3(c) has six
+blockpcs, all tied to block %0. The first, blockpc %0 0
+%3 1:i1, asserts that when any phi node tied to block %0
+
+2.6
+
+Intrinsics
+
+We implemented 10 LLVM intrinsics as Souper instructions:
+• Six operations that perform integer math while checking
+
+for overflow: there are signed and unsigned variants of
+add, subtract, and multiply
+• ctpop: Hamming weight
+• bswap: byte swap
+
+3
+
+2018/4/9
+
+define i32 @f(i1 %0, i32 %1) {
+br i1 %0, label %3, label %5
+label %3:
+%4 = mul nsw i32 %1, 3
+br label %8
+int
+f(bool cond, int z) {
+int x, y;
+if (cond) {
+x = 3 * z;
+y = z;
+} else {
+x = 2 * z;
+y = 2 * z;
+}
+return x + y;
+}
+
+label %5:
+%6 = shl nsw i32 %1, 1
+%7 = shl nsw i32 %1, 1
+br label %8
+label %8:
+%.07 = phi i32 [ %4, %3 ], [ %6, %5 ]
+%.0 = phi i32 [ %1, %3 ], [ %7, %5 ]
+%9 = add nsw i32 %.07, %.0
+ret i32 %9
+}
+
+%0 = block 2
+%1:i32 = var
+%2:i32 = shlnsw %1, 1:i32
+%3:i32 = phi %0, %1, %2
+%4:i32 = mulnsw 3:i32, %1
+%5:i32 = phi %0, %4, %2
+%6:i32 = addnsw %3, %5
+infer %6
+
+⇒
+%7:i32 = shl %1, 2:i32
+result %7
+
+(c)
+
+(b)
+
+(a)
+
+Figure 2. A C++ function that can be optimized to “return z << 2” (a), its representation in LLVM IR (b), and a
+corresponding Souper LHS and RHS (c). The first line of the LHS defines a block value with two predecessors; each phi
+node attached to this block will have two regular value arguments. Then, the first argument to each phi node, %0, establishes
+that they are correlated: since they come from the same basic block, they must make the same choice. Without information
+about the correlation between the phi nodes, this optimization cannot be synthesized.
+define i32 @g(i32 %0) {
+label %1:
+%2 = urem i32 %0, 4
+switch i32 %2, label %9 [
+i32 0, label %3
+i32 1, label %5
+i32 2, label %7
+]
+label %3:
+%4 = add i32 %0, 3
+br label %9
+unsigned
+g(unsigned a) {
+switch (a % 4) {
+case 0:
+a += 3;
+break;
+case 1:
+a += 2;
+break;
+case 2:
+a += 1;
+break;
+}
+return a & 3;
+}
+
+(a)
+
+label %5:
+%6 = add i32 %0, 2
+br label %9
+label %7:
+%8 = add i32 %0, 1
+br label %9
+label %9:
+%.0 = phi i32 [ %0, %1 ], [ %8, %7 ],
+[ %6, %5 ], [ %4, %3 ]
+%10 = and i32 %.0, 3
+ret i32 %10
+}
+
+(b)
+
+%0 = block 4
+%1:i32 = var
+%2:i32 = urem %1, 4:i32
+%3:i1 = ne 0:i32, %2
+%4:i1 = ne 1:i32, %2
+%5:i1 = ne 2:i32, %2
+blockpc %0 0 %3 1:i1
+blockpc %0 0 %4 1:i1
+blockpc %0 0 %5 1:i1
+blockpc %0 1 %2 2:i32
+blockpc %0 2 %2 1:i32
+blockpc %0 3 %2 0:i32
+%6:i32 = add 1:i32, %1
+%7:i32 = add 2:i32, %1
+%8:i32 = add 3:i32, %1
+%9:i32 = phi %0, %1, %6, %7, %8
+%10:i32 = and 3:i32, %9
+infer %10
+
+⇒
+result 3:i32
+
+(c)
+
+Figure 3. A C or C++ function that can be optimized to “return 3” (a), its representation in LLVM IR (b), and the
+corresponding Souper LHS and RHS (c). The Souper IR has no control flow, but rather uses blockpc instructions to represent
+dataflow facts derived from converging control flow. These are crucial in giving Souper the information that it needs to
+synthesize the optimization.
+
+4
+
+2018/4/9
+
+• cttz and ctlz: count trailing and leading zeroes
+
+extracting LLVM IR into Souper IR, it is conservatively
+modeled as zero. Poison values are modeled by noting that
+any poison value in an Souper expression will propagate
+to the root and trigger true undefined behavior unless it is
+stopped by reaching the not-chosen input of a phi or select
+instruction. Souper models this behavior faithfully: each phi
+or select is accompanied by an explicit path condition that
+only permits undefined behavior to propagate via its selected
+branch. The only immediate undefined behavior modeled by
+Souper is divide-by-zero; Souper simply asserts to the solver
+that this does not happen.
+Some LLVM instructions have optional flags that add undefined behaviors. For example, add is, by default, always
+defined, but add nsw is undefined when signed overflow occurs, add nuw is undefined when unsigned overflow occurs,
+and add nsw nuw is undefined upon either kind of overflow.
+Souper does not have flags, but rather provides separate instructions corresponding to these different behaviors: add,
+addnsw, addnuw, and addnswnuw. Similarly, the exact flag
+for division and right-shift, which makes operations with remainders undefined, is modeled by supporting sdivexact
+as well as sdiv and ashrexact as well as ashr.
+
+Combining several of these intrinsics, here Souper proves
+that the Hamming weight of an arbitrary 64-bit value, multiplied by its number of trailing zeroes, cannot overflow.
+%0:i64 = var
+%1:i64 = ctpop %0
+%2:i64 = cttz %0
+%3 = smul.with.overflow %1, %2
+%4 = extractvalue %3, 1
+infer %4
+
+⇒
+result 0:i1
+
+The prevalence of these instructions varies across programs but, for example, UBSan2 inserts a large number of
+overflow checks into a program as it is being compiled, and
+we would like to remove as many of these as possible.
+2.7
+
+Verifying Optimizations and Supporting
+Undefined Behavior
+
+Souper can be used to verify an optimization that was derived by hand or synthesized previously—perhaps by an untrusted solver or untrusted organization. Souper is capable,
+for example, of proving equivalence of the first three implementations of Hamming weight listed on the Wikipedia
+page,3 after they are compiled to LLVM and then extracted
+into Souper. To handle the fourth implementation, Souper
+would need to completely unroll the loop, and to handle the
+fifth, it would need to model loads from a lookup table.
+Verification follows the standard technique: Souper asks
+the solver whether there exists any valuation of the inputs
+that causes the left-hand and right-hand sides of the optimization to be unequal. If this query is unsatisfiable, equivalence has been proved and the optimization is sound. If the
+query is satisfiable, a counterexample has been discovered
+and it is presented to the user. This is all fairly straightforward unless undefined behavior is involved.
+LLVM has three kinds of undefined behavior. First, immediate undefined behavior, triggered by actions such as dividing by zero or storing to an out-of-bounds memory location. Second, an undef value that stands for an indeterminate
+register or memory location: it can return any value of its
+type. Third, a poison value that is more powerful than undef:
+instructions other than phi and select return poison if any
+input is poison. Phi and select only return poison if the selected input is poison. A poison value triggers true undefined
+behavior if it reaches a side-effecting operation.
+Souper does not model undef. This is an acceptable approximation since undef usually occurs in the context of
+uninitialized memory, and Souper has no model for memory. When Souper encounters an explicit undef value while
+
+2.8
+
+Synthesizing Optimizations
+
+The essence of synthesis is finding a cost-minimizing solution to an exists-forall formula. In other words, we want
+to prove that there exists a way to connect up a collection
+of instructions such that, for all inputs, the resulting RHS
+behaves the same as its LHS. Furthermore, the synthesized
+RHS should be the cheapest among all that satisfy the behavioral requirement.
+Given an equivalence checker, an algorithmically simple
+way to implement synthesis is to enumerate, in order of increasing cost, all RHSs, accepting the first one that passes
+the check. In practice, this algorithm fails to produce results
+within an acceptable amount of time when the cheapest RHS
+either contains non-trivial constants or requires more than a
+handful of instructions. To produce results in a more performant fashion, Souper uses an improved version of the
+CEGIS (counterexample guided inductive synthesis) algorithm developed by Gulwani et al. [10].
+CEGIS avoids exhaustive search and also avoids producing queries that contain difficult quantifiers. Rather, given a
+collection of instructions, it formulates a query permitting all
+possible producer-consumer relations between instructions,
+with the position of each instruction being represented as a
+line number. This query is satisfiable if there exists a way
+to connect the instructions into a RHS that is equivalent to
+the LHS for just the satisfying input. If this is the case, the
+instructions and constants in the RHS can be reconstructed
+from the model provided by the solver. Then, in a second
+step, CEGIS asks the solver if the straight-line program on
+the RHS is equivalent to the LHS for all possible inputs.
+If so, synthesis has succeeded. If not, constraints are added
+to prevent the solver from realizing this particular circuit a
+
+2 http://clang.llvm.org/docs/UndefinedBehaviorSanitizer.
+
+html
+3 https://en.wikipedia.org/wiki/Hamming_weight
+
+5
+
+2018/4/9
+
+of this equation for k = 7, a case known to not have any
+solutions, like this:
+
+second time, and the process is restarted. In the worst case
+CEGIS is no better than naı̈ve search, but in practice it performs well, and has been shown to be capable of generating
+RHSs of substantial complexity. Souper wraps CEGIS in a
+second loop that constrains the size of the synthesized RHS:
+it first attempts to synthesize a zero-cost RHS (no new instructions are generated—the RHS may only use a constant
+or an input), then a cost-one RHS (one instruction is generated), and so on.
+Our improved CEGIS implementation can synthesize all
+Souper instructions other than phi. Using the select instruction, Souper can synthesize conditional data paths. Our
+algorithm is novel in that it can synthesize right-hand sides
+composed of instructions that are polymorphic in the number of bits. This requires Souper to augment the query with
+constraints that enforce the bitwidth rules outlined in Section 2.1. A more difficult issue is that each instruction that
+is a candidate for synthesis has a fixed bitwidth: there is no
+bitwidth-polymorphism in the solver. For each synthesis attempt, Souper starts with a default bitwidth: the largest of
+any input and the target value. Each instruction is instantiated at that width. Next, for every input with a smaller bit
+width than the default bit width, two extra components, a
+zext and a sext, are instantiated that extend the input to
+the default width. Finally, if the default width is larger than
+the output bit width of the specification, Souper instantiates
+a trunc instruction that truncates to the output width. Similar transformations are applied to select’s conditional input
+(trunc) and to the output of comparison instructions (zext).
+These are heuristics and there is room for improvement.
+2.9
+
+%x:i32
+= var
+%y:i32
+= var
+%xsqr
+= mulnuw %x, %x
+%xcubed
+= mulnuw %x, %xsqr
+%ysqr
+= mulnuw %y, %y
+%xcubedplus7 = addnuw %xcubed, 7
+%cmp
+= eq %xcubedplus7, %ysqr
+pc %cmp 1
+infer %y
+
+The “nuw” variants of multiplication and addition assert
+that unsigned integer overflow is undefined, protecting us
+from undesirable wraparound effects. The path condition asserts that the equation holds and the infer line asks Souper
+for the value of y. It fails to synthesize a RHS.
+Similarly, Souper fails to synthesize a result when k = 1,
+because that case has multiple solutions: x = 0, y = 1 and
+x = 2, y = 3. On the other hand, for k = 785 there is a
+unique solution within the bounds and Souper finds it:
+result 32146:i32
+
+when asked to infer %x:
+result 1011:i32
+
+While we do not know of any use cases for solving Diophantine equations inside an optimizing compiler, we are
+gratified to know that the power is there should it be needed.
+2.10
+
+Validating Souper’s Ability to Synthesize
+
+Three Real Threats to Soundness
+
+We have observed miscompilations due to three causes other
+than the obvious one (defects in Souper’s implementation).
+First, an incorrect LLVM optimization can turn a defined
+program into an undefined one, but in a subtle way that
+is not exploited by an LLVM backend. There are known,
+long-standing bugs of this type in LLVM, and it is difficult to get them fixed because their effects are difficult to
+observe via end-to-end testing of the LLVM toolchain, and
+also because the LLVM community has not reached consensus on exactly what the fix should look like. Souper, on the
+other hand, readily notices and exploits undefined behaviors in order to perform computations more cheaply. This
+is a highly unsatisfactory state of affairs, but fixing them requires community-wide effort. In the meantime, the problem
+can be mitigated by turning off some problematic LLVM
+passes (SimplifyCFG, GVN, and InstCombine) or by adjusting Souper’s LLVM semantics (using a command line
+option) to prevent it from exploiting undefined behavior.
+A second, closely related problem is that some applications execute undefined behavior that happens to be benignly
+compiled by LLVM. In this case, the application, not LLVM,
+is wrong, but the end result can be the same: Souper notices
+and exploits the undefined behavior to break the application.
+From this perspective, Souper might be viewed as a hostile
+
+A synthesis implementation should be evaluated both in
+terms of soundness and ability to synthesize a RHS when
+it exists. We discuss soundness in more detail in Sections 2.10 and 2.11. Regarding synthesis power, we ensured
+that Souper can synthesize a subset of the “Hacker’s Delight” optimizations from Gulwani et al. [10] where the instructions involved can be mapped to Souper IR in a oneto-one fashion and where the RHS is not too large (P1–P17
+and P19 out of P1–P25). Our CEGIS implementation does
+not scale as well as Gulwani et al.’s, we believe this is due
+to the extra synthesis components and constraints relating to
+bitwidth rules.
+We ensured that Souper can synthesize specific instances
+of every optimization in Table 2 of Buchwald [4]. By “specific instances,” we mean that while Optgen can create a general rule such as ~x + c ⇒ (c - 1) - x that works for an
+arbitrary constant c, Souper must rediscover the optimization for every bitwidth and every value of c that appears in a
+program.
+Finally, we validated Souper’s synthesis by ensuring that
+it can solve discrete math problems. Consider Mordell’s
+equation, y 2 = x3 + k, in the domain of natural numbers,
+where k is a constant. We can encode a bounded version
+6
+
+2018/4/9
+
+2.12
+
+re-implementation of STACK [24] that breaks programs instead of providing helpful diagnostics. This risk can be mitigated in two ways. First, as above, UB exploitation in Souper
+can be disabled. This is not a complete fix, but it does prevent some particularly egregious problems. Second, every
+UB exploited by Souper can be detected by LLVM’s undefined behavior sanitizer.4 Developers should be using UBSan
+anyhow, since Souper is hardly the worst problem faced by
+an undefined C or C++ program.
+Third, when a solver is wrong, Souper will also be wrong.
+One time we saw a program that had been optimized by
+Souper misbehave, and the root cause was an incorrect result
+returned by the Z3 solver. We reported the bug and the Z3
+developers rapidly fixed it. Although we do not routinely
+check solvers against each other, we can do so on demand
+since Souper’s queries are in the SMT-LIB format supported
+by most solvers.
+
+Since Souper must invoke a solver multiple times to synthesize an optimization such as the ones shown in Figures 1–3,
+and since such invocations often result in the solver being
+killed when a timeout expires, we would like to amortize
+the costs of optimization synthesis. A reasonable solution is
+to cache the mapping of left-hand sides to right-hand sides,
+including the null right-hand side indicating failure to optimize.
+Souper’s first-level cache is a hash table in RAM, allowing very fast lookups for commonly-occurring left-hand
+sides that are likely to be encountered multiple times during
+a single compiler invocation. Souper’s second-level cache is
+Redis,6 a fast, networked key-value store.
+
+2.13
+2.11
+
+Caching
+
+Validating Soundness
+
+Implementation
+
+Souper is open source software and is implemented in
+about 9,500 lines of C++. Souper currently links against
+LLVM 3.9. Souper’s functionality can be invoked in a number of ways; there are command-line tools for processing
+Souper IR and LLVM IR, and Souper can be linked into a
+shared library that is dynamically loaded as an LLVM optimization pass. Souper’s LLVM pass registers itself using
+EP Peephole, an extension point designed for peepholelike passes. At the -O2 or -O3 levels, LLVM runs Souper
+five times during compilation, giving it multiple opportunities to interact with other optimization passes. Finally, we
+have implemented a compiler driver sclang that is a dropin replacement for clang except that it loads the Souper
+pass. This makes it easy to build arbitrary software packages
+using Souper.
+Souper uses Klee [5] as a library for emitting a query in
+SMT-LIB format [3]. By default, in order to model memory,
+Klee uses the theory of bitvectors and arrays. However, we
+observed that solvers such as Z3 can perform poorly in this
+theory and also that Souper does not require a model for
+memory, so we patched Klee to emit queries in the theory
+of quantified bitvectors.
+During the course of our work we ran into several degeneracies in Klee triggered by, for example, large Souper LHSs
+with many phi nodes. We fixed (and upstreamed) several
+issues, but in the end huge Souper queries still performed
+poorly, triggering apparently exponential behaviors. We currently work around these issues by enforcing a limit on LHS
+size: Souper simply drops any LHS that is over the specified
+limit, which is configurable but defaults to 1 KB of serialized IR. This mechanism saves a lot of execution time while
+dropping a small minority of queries.
+
+Validating any particular optimization produced by Souper’s
+synthesizer is not difficult: each result that it creates can be
+verified by Souper’s equivalence checker. The equivalence
+checker is much simpler and we have more confidence in it.
+We validated Souper’s soundness in several ways. First,
+we have stress-tested it using Csmith [25] and also by compiling significant programs, such as LLVM and SPEC CINT
+2006, that have good test suites. Several SPEC benchmarks
+misbehave after being optimized by Souper unless undefined
+behavior exploitation is disabled. This is hardly surprising
+since some of these benchmarks are known to execute undefined behaviors [7] and can even be broken by GCC if the
+wrong optimization options are used.5 Some LLVM 3.9 test
+cases give the wrong answers when LLVM has been optimized by Souper, even when undefined behavior exploitation is turned off. We believe these are due to undefined behaviors in LLVM, such as uses of uninitialized storage, that
+cannot be easily mitigated just by disabling undefined behavior exploitation in Souper. We discuss this issue further
+in Section 4. Second, we have validated Souper by looking
+at hundreds of optimizations by hand, by posting optimizations on the web where LLVM developers could see them,
+and by cross-checking them using Alive [14], which has an
+independent formalization of the semantics of the LLVM instruction set. In summary, we have made a good-faith attempt to validate Souper, but it remains a research-quality
+optimizer that may well harbor exciting bugs.
+4 http://clang.llvm.org/docs/UndefinedBehaviorSanitizer.
+
+html
+5 The release notes for GCC 4.8 include this note: “GCC now uses a more
+aggressive analysis to derive an upper bound for the number of iterations
+of loops using constraints imposed by language standards. This may cause
+non-conforming programs to no longer work as expected, such as SPEC
+CPU 2006 464.h264ref and 416.gamess. A new option, -fno-aggressiveloop-optimizations, was added to disable this aggressive analysis.”
+
+6 http://redis.io/
+
+7
+
+2018/4/9
+
+3.
+
+Experience with Souper as an Offline
+Optimization Generator
+
+3.1
+
+Improving LLVM
+
+There is one additional piece of the puzzle to solve before
+synthesized superoptimizer results can be presented to developers in a useful fashion: derived optimizations should
+be suppressed when LLVM already knows how to perform
+them. Souper gets LHSs that LLVM can optimize for two
+reasons. First, Souper gets run five different times by the
+LLVM optimizer, and during early phases many optimizations remain undone. Also, even when LLVM is finished optimizing, there remain opportunities that LLVM could optimize because it simply runs a fixed ordering of passes, it
+does not run to fixpoint. We could run LLVM’s optimizer to
+fixpoint, but this would be pointless because Souper would
+still extract many LHSs that LLVM can optimize, because
+many performable optimizations are rejected by profitability
+heuristics. Typically, rewriting a code sequence into a better code sequence is deemed unprofitable if values in the
+original sequence have external uses. To solve this problem we translate each Souper LHS back into LLVM IR
+and see if it optimizes. Because no value in the translated
+LLVM code has external uses, this is a fairly reliable way to
+avoid showing compiler developers optimizations that have
+already been implemented.
+In November 2014 and in July 2015 we presented ranked
+lists of optimizations derived by Souper while compiling
+LLVM to the LLVM community. The 2014 results contained
+only synthesized integer values and the 2015 results had synthesized instructions as well. This was a learning experience
+for us, particularly with respect to the importance of having
+good LLVM-specific profitability estimation methods. For
+example, this optimization eliminates an LLVM instruction
+and seems intuitively appealing:
+
+The goal is to give compiler developers actionable advice about missing optimizations. To do this, someone uses
+sclang to extract Souper left-hand sides from programs of
+interest. Since Souper finds many more optimizations than
+developers could reasonably implement, the crux is ranking
+them in such a way that desirable optimizations are found
+early in the list. We are not aware of any single best ranking
+function, but rather we have created several such functions
+that can be used together or separately.
+Static profile count The first time a given LHS is encountered, it is stored in Redis. Each subsequent time it is encountered, Souper simply increments a static profile count,
+also stored in Redis, that is associated with the optimization.
+Thus, counts are automatically aggregated across multiple
+compiler invocations. Implementing optimizations with high
+static profile counts will lead to optimizations that fire many
+times, presumably leading to benefits in terms of code size.
+Dynamic profile count To make programs faster instead of
+smaller, it is desirable to focus on optimizations that execute
+many times dynamically, as opposed to statically. We support dynamic profiling in Souper by optionally instrumenting each compiled code module to associate a 64-bit counter
+with each (potentially) optimized code site. These counters
+are atomically incremented each time the associated site is
+reached, and then when the program is shutting down the total values are added to dynamic profile counts in the Redis
+database. Counts can be lost if a program crashes or otherwise fails to execute its atexit handlers.7
+LHS complexity Since Souper does not have any default
+limit on the number of instructions it extracts, LHSs may be
+large. Developers are unlikely to want to implement recognizers for large instruction patterns, and furthermore such
+patterns are unlikely to be broadly applicable. Therefore,
+it makes sense to suppress large LHSs when ranking optimizations. Alternatively, we have experimented with depthlimited extraction of LHSs: this reduces the number of optimizations that can be synthesized, but the optimizations that
+remain are much more likely to be of interest to developers.
+
+%0:i64 = var
+%1:i64 = and 1:i64, %0
+%2:i1 = ne 0:i64, %1
+infer %2
+
+⇒
+%3:i1 = trunc %0
+result %3
+
+However, it turns out that this optimization is undesirable
+by convention, and in fact the LLVM optimizer will canonicalize the trunc back to the two-instruction version.
+We do not have a good way to quantify any improvements in LLVM’s optimizer that might have resulted from
+our work, but we do know that some of Souper’s suggestions were implemented. Here are some things that LLVM
+developers said:
+
+Benefit The benefit due to an optimization is the difference in cost between the LHS and RHS. So far we have employed only simple cost functions such as those that count
+instructions (perhaps weighting expensive instructions such
+as divides higher). Doing better than this has proved difficult.
+First, LLVM has many canonicalization rules which dictate
+that certain IR forms are preferable over others; these rules
+are, unfortunately, implicit and informal. Second, despite the
+“low level” in LLVM, it is fairly high level, delegating a lot
+of translation work to the backends, making it hard to determine a cost model at the LLVM level.
+
+• “Cool! Looks like we do lots of provably unnecessary
+
+alignment checks. :)”
+• “That’s a great post and really interesting data, thank
+
+7 http://man7.org/linux/man-pages/man3/atexit.3.html
+
+you!”
+8
+
+2018/4/9
+
+• “I’m pretty sure I’ve fixed the most egregious cases of
+
+x is in computing x | 0xff, the low eight bits of x are not
+demanded: their value is irrelevant to the program. Together,
+these analyses drive optimizations that remove useless instructions.
+The new optimizations that we implemented reduce the
+code size of the Windows kernel by a few KB (about a
+0.1% savings) and the code size of a Windows 10 build
+by 296 KB for x86 and 316 KB for x86-64 (about a 0.02%
+savings). However, the effect of optimizations on code size
+is complicated: there were some binaries in Windows that
+got larger; this was mostly caused by more functions being
+inlined.
+
+this going wrong with r222928.”
+• “IIRC, the following commits are a direct/indirect result
+
+of using [deanonymized name of SSO]” (followed by a
+list of seven commits)
+Additionally, we seen some other commits that mention
+Souper as a source, and we have watched a lot of optimizations with high profile counts disappearing from Souper’s
+output as LLVM’s optimizers have become stronger over
+time.
+We plan to continue periodically posting Souper-derived
+optimizations. In particular, it will be exciting to extract
+LHSs from novel sources of LLVM IR: Haskell, Swift, Rust,
+and UBSan output. We expect that each of these will contain
+idioms that are frequent and that are not well-optimized at
+present. In particular, LLVM is known to be very weak at
+eliminating the integer overflow checks inserted by UBSan.
+Removing these is becoming more desirable as production
+code is deployed with integer overflow checking turned on.8
+3.2
+
+4.
+
+Using Souper as an Online Optimizer
+
+Every time an optimization suggested by Souper in its offline
+capacity is implemented, Souper loses some of its power to
+optimize online. Nevertheless, we feel it is worthwhile to
+evaluate Souper online, though its power is less than it would
+have been a few years ago.
+When using Souper as an online compiler, we restrict it
+to synthesizing constants, since it should nearly always be a
+win to replace a value at the LLVM level with a constant. Replacing an LHS in LLVM with instructions from an Souper
+RHS introduces several performance-related difficulties that
+we have not yet solved. First, as discussed in Section 3, estimating profitability is difficult, especially in the presence of
+LLVM’s arcane canonicalization rules. Second, Souper abstracts away the fact that some of the values in a LHS are
+likely to have uses not visible in the Souper IR. These uses
+will prevent instructions on the LHS from being eliminated
+and may therefore dramatically reduce the benefit that is realized by applying a particular optimization. Third, naı̈vely
+replacing an LHS with a RHS can break SSA, since it is not
+necessarily the case that the inputs to an LHS dominate the
+root of a DAG of Souper IR. Of course, this can be fixed up,
+but the fix is not free since it forces values to be computed
+on code paths where they previously were not computed. In
+summary, there are significant challenges in automatically
+and profitably implementing arbitrary Souper-derived optimizations that we leave for future work.
+
+Improving Microsoft Visual C++
+
+The Visual C++ compiler IR is similar enough to LLVM that
+we were able to extract a subset of it directly to Souper IR
+(for the workflow described in this section, LLVM is not involved at all). In this extractor we limited each LHS to five
+instructions and we did not extract path conditions or blockpcs; this would be useful future work. We extracted LHSs
+for several major components of Windows, along with their
+static profile counts. In this section, we focus on LHSs extracted from the Windows kernel in its x86-64 configuration.
+Out of 15,846 unique LHSs that were extracted, Souper’s
+synthesizer discovered a cheaper RHS for 935 of them
+within a one-minute timeout. However, many of these optimizations were already supported—Visual C++ has a large
+collection of SSA-level peephole optimizations—but had
+not been performed since one or more of the values on the
+LHS had uses not visible in the Souper IR. We plan to implement a compiler-specific filter to automatically weed out
+these undesired optimizations, like the one that we implemented for LLVM, but we have not yet done so. Out of the
+remaining optimizations, we implemented 40 that had high
+static profile counts. We manually rewrote each of these in
+a generic form, verified the correctness of that form using
+Alive [14], and then implemented it in the Visual C++ compiler. Figure 4 shows some representative examples. Implementing the new optimizations required two new dataflow
+analyses to be added to the Visual C++ compiler. First, a
+bit estimator that attempts to prove that individual bits of
+values are zero or one. Second, a demanded bits analysis
+that attempts to show that some bits of a value have no influence on the computation. For example, if the only use of
+
+Experimental setup For the experiments reported in this
+paper, we used an Intel i7-5820K (3.3 GHz, six-core HaswellE) with 16 GB of RAM running Ubuntu 14.04. We configured the processor to use performance mode and disabled
+turbo mode to minimize dynamic frequency scaling effects.
+For the solver we used a current snapshot of Z3 version
+4.5.1. We used our patched Klee that emits queries in the theory of quantified bitvectors rather than the theory of arrays.
+Whenever possible, we ran compilations using all cores.
+However, actual benchmarks were run on a single core of an
+otherwise quiescent machine.
+Optimizing LLVM The LLVM-3.9 compiler and its Clang
+frontend are, together, nearly three million lines of C++. We
+
+8 http://android-developers.blogspot.com/2016/05/
+
+hardening-media-stack.html
+
+9
+
+2018/4/9
+
+%0:i16 = var
+%1:i16 = or %0, 5:i16
+%2:i16 = and %1, 4:i16
+infer %2
+⇒
+result 4:i16
+This example, and others like it, motivated
+us to implement a new bit estimator analysis in the Visual C++ compiler that identifies bits that are provably zero or one, making this optimization and many related ones
+easy to implement.
+
+%0:i64 = var
+%1:i64 = and %0, 31:i64
+%2:i64 = add %1, 1:i64
+%3:i1 = ult 32:i64, %2
+infer %3
+⇒
+result 0:i1
+Adding 1 to a value in range 0..31 cannot
+produce a result larger than 32. The bit estimator can be used to implement the family
+of optimizations suggested by this example.
+
+%0:i32 = var
+%1:i32 = xor %0, 4294967295:i32
+%2:i32 = and %1, 8:i32
+infer %2
+
+%0:i64 = var
+%1:i64 = mul %0, 2654435761:i64
+%2:i64 = and %1, 1:i64
+%3:i1 = ne %2, 0:i64
+infer %3
+
+⇒
+
+⇒
+
+%3:i32 = and 8:i32, %0
+%4:i32 = xor 8:i32, %3
+result %4
+
+%4:i1 = trunc %0
+result %4
+
+Instead of inverting the entire word and
+then isolating bit 3, we can first isolate the
+bit and then invert it. The resulting code
+contains a 1-byte immediate value instead
+of a 4-byte one. (Souper’s cost function is
+not currently clever enough to capture this
+fact—it was a matter of luck that this optimization was synthesized.)
+%0:i8 = var
+%1:i8 = lshr %0, 3:i8
+%2:i1 = eq %1, 0:i8
+infer %2
+⇒
+%3:i1 = ult %0, 8:i8
+result %3
+
+Since multiplying two odd numbers always
+yields an odd number, the result can be odd
+only if %0 is odd to begin with.
+
+%0:i32 = var
+%1:i1 = eq %0, 0:i32
+%2:i32 = select %1, 2:i32, 1:i32
+infer %2
+⇒
+%3:i1 = ult %0, 1:i32
+%4:i32 = zext %3
+%5:i32 = shl 1:i32, %4
+result %5
+Souper excels at replacing select instructions, which usually become CMOV instructions on x86/x86-64, with logical operations.
+%0:i1 = var
+%1:i8 = select %0, 1:i8, 0:i8
+%2:i1 = ne %1, 1:i8
+%3:i32 = select %2, 40:i32, 20:i32
+infer %3
+⇒
+%4:i32 = zext %0
+%5:i32 = ashr 40:i32, %4
+result %5
+Another select removal.
+
+%0:i32 = var
+%1:i64 = zext %0
+%2:i64 = udiv -1:i64, %1
+%3:i1 = ule 4:i64, %2
+infer %3
+
+%0:i32 = var
+%1:i32 = and %0, 131071:i32
+%2:i32 = mul %1, 65536:i32
+infer %2
+
+⇒
+
+⇒
+
+result 1:i1
+
+%3:i32 = shl %0, 16:i32
+result %3
+
+Dividing the largest unsigned 64-bit number by an unsigned 32-bit number cannot
+produce a value that is smaller than 232 − 1.
+We used the bit estimator to prove a lower
+bound on the value of %2, making is possible to fold the comparison to true.
+
+A value shifted right 3 times can be zero
+only if it is smaller than 23 = 8.
+
+Souper is good at removing useless instructions.
+%0:i64 = var
+%1:i64 = add %0, -10445360463872:i64
+%2:i64 = and %1, 4095:i64
+infer %2
+⇒
+%3:i64 = and 4095:i64, %0
+result %3
+Another useless instruction removed.
+
+Figure 4. Representative optimizations suggested by Souper for LHSs extracted from the Windows kernel. We implemented
+generalized versions of these, and others, in the Visual C++ compiler, adding a total of 40 new optimizations.
+
+10
+
+2018/4/9
+
+Time to Recompile LLVM (Minutes)
+
+90
+
+Is Souper acceptably fast? We simulated the experience a
+developer using Souper might have by incrementally compiling LLVM (without Clang) from its development trunk
+at the start of each day in October 2016. Build times are
+shown in Figure 5. For a developer not using Souper, the first
+build took a little over eight minutes, and so did most subsequent builds, because on most days the LLVM developers
+checked in patches to one or more widely-included header
+files, forcing a near-total recompilation. On a few days, no
+such changes were committed and incremental compilation
+was fast; it required less than one minute on October 23
+and 31.
+For the developer using Souper, compilation on October 1 took about 86 minutes because the cache was cold
+and the solver had to be called many times. However, for
+the rest of the month, this developer could take advantage of
+the fact that most of a large code base does not change frequently, meaning that most Souper queries were satisfied by
+the cache. The Souper user’s LLVM build was a little over a
+minute slower, on average, than the non-Souper build, during October 2–31.
+Souper has a mode where, instead of attempting to optimize every integer-typed LLVM value, it only attempts to
+optimize 1-bit values. In this mode, warm-cache compiles
+using Souper can be faster than LLVM alone: enough code
+gets eliminated early in compilation to more than make up
+for Souper’s execution costs.
+
+SSO
+No SSO
+
+80
+70
+60
+50
+40
+30
+20
+10
+0
+
+0
+
+5
+
+10
+
+15
+
+20
+
+25
+
+30
+
+Day of October 2016
+
+Figure 5. Time taken to incrementally compile the LLVM
+development trunk at the start of each day of October 2016,
+with and without Souper.
+
+compiled them using Souper; this took about 88 minutes
+with a cold cache and 14 minutes with a warm cache. At the
+end of compilation, Redis was using 362 MB of RAM and
+its database dump file was 149 MB. In contrast, compilation
+without Souper took 13 minutes. In both cases, the compilation was in release mode (full optimization, no debugging
+symbols) with assertions enabled.
+The Souper-optimized clang binary, which contains all
+of the LLVM internals, is 64.3 MB, in contrast with the nonSouper binary which is 67.2 MB: a savings of 2.9 MB. A lot
+of the code size savings appears to come from proving that
+assertions cannot fire; when assertions are disabled (turned
+into nops using the preprocessor), the Souper-optimized
+Clang binary is only about 600 KB smaller than the nonSouper version. When used to perform optimized compiles
+of C++ code, the Souper-optimized Clang is 2% slower than
+the default release build of Clang. We suspect, but cannot
+(yet) prove that we are running afoul of an unlucky combination of optimization interactions, since it should not be
+the case that replacing values with constants (and often small
+constants like 0 and 1 that are easy to materialize) results in
+worse code generation.
+When the test suite for the Souper-optimized LLVM/Clang
+is run, 92 out of about 17,000 test cases fail. For every one
+of these that we inspected, LLVM/Clang executed undefined
+behavior, which we believe to be the root cause of the failing
+test cases, with Souper simply exposing the problem. Our
+belief is not yet backed up by strong evidence, but we plan
+to work with the LLVM developers to eliminate the undefined behaviors, and see if the failures then go away. If they
+do not, the evidence points to a defect in Souper that we
+have been otherwise unable to locate. We noticed that all of
+the Souper optimizations that triggered test case failures involved blockpcs. The 2%-slower Clang executable described
+in this section was compiled by Souper in a mode that did
+not extract blockpcs.
+
+Optimizing SPEC CINT 2006 We compiled the C and
+C++ integer benchmarks from SPEC CPU 2006 using
+Souper, with undefined behavior exploitation turned off.
+A parallel build of the benchmarks using Souper took 26
+minutes with a cold cache, and this improved to 2 minutes
+15 seconds when the cache was warm. In contrast, building
+the benchmarks without Souper took 1 minute 5 seconds. At
+the end of the build, Redis was using 104 MB of RAM and
+its database dump file was 42 MB. Across all benchmarks,
+Souper looked at about 126,000 distinct LHSs and had a total of about three million opportunities to optimize a LHS.
+However, it discovered only 898 distinct optimizations, and
+applied them 2212 times.
+The effect of Souper on code size was uneven: seven
+benchmarks (bzip, perlbench, h264ref, gobmk, astar, hmmer,
+xalancbmk) became larger while five (omnetpp, libquantum, gcc, sjeng, mcf) became smaller. Total code size across
+all benchmarks was increased by about 2 KB, out of a total of about 12 MB. An increase in code size is anomalous
+since we are running Souper in a mode where it only replaces LLVM values with constants. The explanation is that
+LLVM’s inlining heuristics, which can be somewhat sensitive, are responding to Souper’s improvements and making different inlining decisions. We verified this by disabling
+LLVM’s inliner, in which case Souper makes all 12 of the
+benchmarks smaller with a total savings of about 15 KB.
+11
+
+2018/4/9
+
+The earliest superoptimizers Fraser’s 1979 paper [8] is
+the earliest work we know of that captures all of the essential ideas of superoptimization: extracting instruction sequences from real programs, searching for cheaper ways to
+compute them, and checking each candidate using an equivalence checker. Moreover, unlike much subsequent work,
+Fraser’s equivalence checker was sound. Subsequently, in
+1984, Kessler [11] developed a sound superoptimizer for a
+Lisp compiler.
+
+Performance of the SPEC benchmarks was also unevenly
+affected by Souper: five become faster (perlbench, bzip2,
+hmmer, libquantum, astar) and seven become slower (gcc,
+mcf, gobmk, sjeng, h264ref, omnetpp, xalancbmk). None of
+the differences was very large. The overall SPECint base2006
+rating was 36.3 without Souper and 36.0 with it (larger ratings are better). Again, we would not expect introducing
+constants to reduce performance; clearly, there are some
+interesting interactions between Souper and the rest of
+LLVM’s optimization pipeline. We have not yet analyzed
+the situation further. In general, the SPEC benchmarks have
+received a lot of attention from compiler developers and they
+are not a place where we expect to find much low-hanging
+fruit.
+
+5.
+
+Recent superoptimizers There has been significant progress
+in superoptimizers in recent years. Optgen [4], like Souper
+and unlike almost all of the other work described in this
+section, operates on IR rather than assembly language. It
+generates all optimizations up to a cost limit, rather than
+extracting code sequences from programs. Unlike Souper,
+it can synthesize optimizations containing symbolic constants. STOKE [20, 21, 23] is a sound superoptimizer that
+uses randomized search, rather than solver-based synthesis,
+to find cheap right-hand sides. It can handle many features
+that Souper cannot, including memory, floating point instructions, approximations, and even, in conjunction with the
+DDEC tool [22], loops. Chlorophyll [17] is a synthesis-aided
+compiler for a 144-core chip. Finally, GreenThumb [18] is
+a generic superoptimizer that can be easily retargeted; it has
+been used to optimize LLVM IR.
+
+Related Work
+
+Superoptimization for LLVM and GCC A superoptimizer
+by Sands [19] pointed out many opportunities for optimizations that had not yet been implemented in LLVM around
+2010 and 2011. This tool had many similarities to Souper: it
+extracted directed acyclic graphs of LLVM IR during compilation and then attempted to optimize them, it focused on the
+integer subset of LLVM, and it presented its results ordered
+by static profile count. On the other hand, Sands’ tool relied
+on testing to perform equivalence checking and was, therefore, unsound; this did not lead to miscompilations since it
+worked offline, and was only intended to generate suggestions for developers to implement. To synthesize right-hand
+sides, this superoptimizer applied various heuristic simplifications of the left-hand side. Analogously, the GNU superoptimizer [9] was an unsound, enumeration-based tool
+that was used to improve GCC’s code generation by deriving
+ways to turn code with control flow into straight-line code.
+
+Synthesis There has been enormous progress in program
+sketching and synthesis in the last few years. Our work
+mainly builds upon a single paper, Gulwani et al. [10].
+
+6.
+
+Future Work
+
+Every optimization discovered by Souper is specific: it is not
+parameterized by bitwidths, values of constants, or choice
+or ordering of instructions. On the other hand, optimizations implemented by compiler developers are almost always
+generic along one or more of these dimensions. It would
+be useful for Souper to automate some of this generalization, for example emitting an Alive [14] pattern for each optimization it discovers. Generalization would improve our
+rankings by preventing important optimizations that happen
+to have many different forms from hiding low in the rankings where they are unlikely to be looked at. Generalization
+would also present compiler developers with optimizations
+that are more like the ones that they will presumably implement, saving them the effort of generalization by hand. In
+particular, it can be very difficult to write a sound and precise
+precondition for an optimization, especially in the presence
+of undefined behavior.
+A middle-end superoptimizer cannot exploit target-specific
+code sequences. Our hypothesis is that future compilers
+should contain two superoptimizers. First, one in the middleend that, like Souper, tries to generate constants and perform
+other obviously-profitable transformations that can be exploited by other middle-end passes. Second, a target-aware
+
+An online superoptimizer Most previous superoptimizers
+have been intended for offline use: it has not been practical to run them during regular compiles. Bansal and Aiken’s
+tool [2] is one of the few exceptions: it achieved good performance by caching its results in a database (among other
+techniques). Additionally, it was sound, using a SAT solver
+to verify equivalence. This tool was a direct inspiration for
+Souper, though our work improves upon it in important
+ways, for example by using synthesis instead of enumeration
+to construct RHSs, by learning dataflow facts from diverging
+and converging control flow, and by extracting instructions
+that are related by dataflow rather than instructions that happen to be close to each other in the instruction stream. Bansal
+and Aiken’s tool, on the other hand, could deal with memory
+accesses and vector instructions, while Souper cannot.
+The original superoptimizer Massalin [15] coined the
+term superoptimizer to emphasize the fact that regular optimizers produce code that is far from optimal. His tool was
+offline and unsound, using enumeration to discover righthand sides and testing to rule out inequivalent ones.
+12
+
+2018/4/9
+
+backend superoptimizer that interacts with instruction selection, scheduling, and register allocation.
+Finally, we believe that Souper IR can be extracted from
+CompCert RTL in the same way that we extract it from
+LLVM IR and Microsoft Visual C++ IR. Synthesizing optimizations is then trivial. The research problem is to take the
+resulting equivalence proofs emitted by a proof-producing
+solver and integrate them into CompCert’s overall proof.
+
+7.
+
+of the ACM SIGPLAN 1992 Conference on Programming
+Language Design and Implementation, pages 341–352, 1992.
+[10] S. Gulwani, S. Jha, A. Tiwari, and R. Venkatesan. Synthesis
+of loop-free programs. In Proceedings of the 32nd ACM
+SIGPLAN Conference on Programming Language Design and
+Implementation, PLDI ’11, pages 62–73, 2011.
+[11] R. R. Kessler. Peep: An architectural description driven peephole optimizer. In Proceedings of the 1984 SIGPLAN Symposium on Compiler Construction, pages 106–110, 1984.
+
+Conclusion
+
+[12] C. Lattner and V. Adve. LLVM: A compilation framework
+for lifelong program analysis & transformation. In Proceedings of the International Symposium on Code Generation and
+Optimization: Feedback-directed and Runtime Optimization,
+pages 75–88, 2004.
+
+We created a synthesizing superoptimizer that is integrated
+with LLVM, and we showed that it can derive many optimizations that LLVM does not yet have. As a result of
+our work, some of these optimizations have been implemented by hand in LLVM, where they benefit all users of
+that toolchain. We also showed that when Souper is used to
+synthesize integer constants, it can be used as an online compiler that results in a significant code size reduction in some
+cases. Finally, we showed that Souper’s IR is generic enough
+that Microsoft Visual C++’s IR can be translated into it, and
+that Souper’s suggestions about missing optimizations were
+actionable by the MSVC compiler developers.
+
+[13] X. Leroy. Formal verification of a realistic compiler. Commun.
+ACM, 52(7):107–115, July 2009.
+[14] N. P. Lopes, D. Menendez, S. Nagarakatte, and J. Regehr.
+Provably correct peephole optimizations with Alive. In Proceedings of the 36th ACM SIGPLAN Conference on Programming Language Design and Implementation, pages 22–32,
+2015.
+[15] H. Massalin. Superoptimizer: A look at the smallest program.
+In Proceedings of the Second International Conference on Architectual Support for Programming Languages and Operating Systems, pages 122–126, 1987.
+
+References
+
+[16] E. Mullen, D. Zuniga, Z. Tatlock, and D. Grossman. Verified
+peephole optimizations for CompCert. In Proceedings of the
+37th ACM SIGPLAN Conference on Programming Language
+Design and Implementation, PLDI ’16, pages 448–461, 2016.
+
+[1] A. W. Appel. SSA is functional programming. SIGPLAN Not.,
+33(4):17–20, Apr. 1998.
+[2] S. Bansal and A. Aiken. Automatic generation of peephole superoptimizers. In Proceedings of the 12th International Conference on Architectural Support for Programming Languages
+and Operating Systems, pages 394–403, 2006.
+
+[17] P. M. Phothilimthana, T. Jelvis, R. Shah, N. Totla, S. Chasins,
+and R. Bodik. Chlorophyll: Synthesis-aided compiler for lowpower spatial architectures. In Proceedings of the 35th ACM
+SIGPLAN Conference on Programming Language Design and
+Implementation, PLDI ’14, pages 396–407, 2014.
+
+[3] C. Barrett, A. Stump, and C. Tinelli. The SMT-LIB Standard:
+Version 2.0. In A. Gupta and D. Kroening, editors, Proceedings of the 8th International Workshop on Satisfiability Modulo Theories, 2010.
+
+[18] P. M. Phothilimthana, A. Thakur, R. Bodik, and D. Dhurjati.
+Greenthumb: Superoptimizer construction framework. In Proceedings of the 25th International Conference on Compiler
+Construction, CC 2016, pages 261–262, 2016.
+
+[4] S. Buchwald. Optgen: A Generator for Local Optimizations,
+pages 171–189. London, UK, Apr. 2015.
+[5] C. Cadar, D. Dunbar, and D. Engler. KLEE: Unassisted and
+automatic generation of high-coverage tests for complex systems programs. In Proceedings of the 8th USENIX Conference
+on Operating Systems Design and Implementation, OSDI’08,
+pages 209–224, 2008.
+
+[19] D. Sands.
+Super-optimizing LLVM IR, Nov. 2011.
+URL
+http://llvm.org/devmtg/2011-11/Sands_
+Super-optimizingLLVMIR.pdf. Presentation at the 2011
+LLVM Developers’ Meeting.
+[20] E. Schkufza, R. Sharma, and A. Aiken. Stochastic superoptimization. In Proceedings of the Eighteenth International Conference on Architectural Support for Programming Languages
+and Operating Systems, ASPLOS ’13, pages 305–316, 2013.
+
+[6] R. Cytron, J. Ferrante, B. K. Rosen, M. N. Wegman, and F. K.
+Zadeck. Efficiently computing static single assignment form
+and the control dependence graph. ACM Trans. Program.
+Lang. Syst., 13(4):451–490, Oct. 1991.
+
+[21] E. Schkufza, R. Sharma, and A. Aiken. Stochastic optimization of floating-point programs with tunable precision. In Proceedings of the 35th ACM SIGPLAN Conference on Programming Language Design and Implementation, PLDI ’14, pages
+53–64, 2014.
+
+[7] W. Dietz, P. Li, J. Regehr, and V. Adve. Understanding integer
+overflow in C/C++. ACM Trans. Softw. Eng. Methodol., 25(1):
+2:1–2:29, Dec. 2015.
+[8] C. W. Fraser. A compact, machine-independent peephole
+optimizer. In Proceedings of the 6th ACM SIGACT-SIGPLAN
+Symposium on Principles of Programming Languages, POPL
+’79, pages 1–6, 1979.
+
+[22] R. Sharma, E. Schkufza, B. Churchill, and A. Aiken. Datadriven equivalence checking. In Proceedings of the 2013 ACM
+SIGPLAN International Conference on Object Oriented Programming Systems, Languages, and Applications, OOPSLA
+’13, pages 391–406, 2013.
+
+[9] T. Granlund and R. Kenner. Eliminating branches using a
+superoptimizer and the GNU C Compiler. In Proceedings
+
+13
+
+2018/4/9
+
+[23] R. Sharma, E. Schkufza, B. Churchill, and A. Aiken. Conditionally correct superoptimization. In Proceedings of the 2015
+ACM SIGPLAN International Conference on Object-Oriented
+Programming Systems, Languages, and Applications, OOPSLA 2015, pages 147–162, 2015.
+[24] X. Wang, N. Zeldovich, M. F. Kaashoek, and A. SolarLezama. Towards optimization-safe systems: Analyzing the
+impact of undefined behavior. In Proceedings of the TwentyFourth ACM Symposium on Operating Systems Principles,
+SOSP ’13, pages 260–275, 2013.
+[25] X. Yang, Y. Chen, E. Eide, and J. Regehr. Finding and
+understanding bugs in C compilers. In Proceedings of the
+32nd ACM SIGPLAN Conference on Programming Language
+Design and Implementation, PLDI ’11, pages 283–294, 2011.
+
+14
+
+2018/4/9
+
+

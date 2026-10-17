@@ -1,0 +1,228 @@
+\chapter{Case Study: Building an FFI and Native Extensions}
+\label{ch:ffi-case-study}
+
+The case study connects one native contract to two managed runtimes and exercises the ABI independently of either runtime.
+Its purpose is to make the obligations in the preceding chapters executable: exact integer conversion, explicit byte lengths, matching allocation and release, protected callbacks, and address-stable call metadata.
+The implementation lives in \code{example-code/ffi-labs/}.
+It uses C11, libffi, Lua 5.4, and the CPython C API, with Python models for selected layout and lifetime protocols.
+
+\section{Keep the supported surface explicit}
+\label{sec:ch76-scope}
+The reusable scalar call-plan API supports four kinds and at most eight arguments.
+Its targets must have trusted matching signatures, use the host default ABI, and remain loaded throughout execution.
+It does not infer types from symbols or expose arbitrary user-selected addresses through Lua or Python.
+The public managed operations are checked addition, copying a byte buffer into native ownership, copying it back, closing it, and visiting integer indices with a synchronous callback.
+
+Table~\ref{tab:ch76-files} maps these responsibilities to files.
+The native tests additionally use libffi directly for two aggregate types, promoted variadic arguments, and one executable closure.
+These fixtures verify selected ABI paths without expanding the scalar adapter's public promise.
+
+\begin{table}[htbp]
+\caption{The core contract is shared while each runtime owns its adaptation rules.}
+\label{tab:ch76-files}
+\centering
+\begin{tabular}{ll}
+\toprule
+File & Responsibility \\
+\midrule
+\code{bookffi.h}, \code{bookffi.c} & C core, scalar plans, versioned API table \\
+\code{python\_module.c} & Limited API module and capsule ownership \\
+\code{lua\_module.c} & Lua functions, userdata, protected callbacks \\
+\code{lua\_host.c} & embedded Lua host with protected evaluation \\
+\code{native\_test.c} & direct-call/FFI comparisons and native lifetimes \\
+\code{models.py} & restricted layout and sequential protocol models \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The tested target is Linux x86-64 with the ordinary System V ABI, 32-bit C \code{int}, 64-bit pointers, and the installed libffi.
+The Lua configuration uses 64-bit integers.
+The Python extension selects a 3.11 Limited API floor and is tested on the installed GIL-enabled CPython; no cross-version binary matrix is inferred from that header setting.
+Detailed dependency versions and test commands appear in the lab README and the expansion verification record.
+
+\section{Build a core with failure-atomic outputs}
+\label{sec:ch76-core}
+The checked add function computes its intermediate in signed 64-bit arithmetic.
+The largest possible magnitude from adding two signed 32-bit values fits that type.
+Only after checking the result against the signed 32-bit bounds does it write the output.
+Listing~\ref{lst:ch76-add} is included directly from the tested source.
+
+\begin{listing}[htbp]
+\caption{The native core publishes an integer only after validating the result range.}
+\label{lst:ch76-add}
+\inputminted[firstline=8,lastline=16]{c}{example-code/ffi-labs/bookffi.c}
+\end{listing}
+
+The buffer constructor checks the size limit and allocation-size addition before allocating.
+It copies only a nonzero count and permits a null data pointer for the zero-length case.
+The pointer returned by \code{bb\_data} is borrowed from a live buffer and becomes invalid after release.
+The managed wrappers never expose that pointer directly; they return a fresh language-owned byte value.
+
+Figure~\ref{fig:ch76-buffer} follows the Python constructor.
+The input export is released after the copy even if later capsule creation fails.
+If capsule creation fails, the payload and owner are freed; if it succeeds, the capsule destructor owns those obligations.
+The tests resize the original bytearray afterward to confirm the export is no longer outstanding.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=11mm]
+\node[basic block] (export) {acquire contiguous input export};
+\node[basic block,below=of export] (copy) {allocate owner and copy bytes};
+\node[basic block,below=of copy] (release) {release temporary input export};
+\node[basic block,below=of release] (publish) {publish capsule or free native ownership};
+\draw[cfg edge] (export)--(copy); \draw[cfg edge] (copy)--(release);
+\draw[cfg edge] (release)--(publish);
+\end{tikzpicture}
+\caption{The temporary input borrow ends independently of the published native object's lifetime.}
+\label{fig:ch76-buffer}
+\end{figure}
+
+The core functions assume valid native pointers and nonoverlapping ranges for their copies.
+They reject nulls and inconsistent counts where specified, but cannot prove arbitrary pointer validity from numerical values.
+In particular, the caller must not read or free a buffer after release, nor provide an undersized output region to a successful read.
+Opaque managed owners enforce a narrower accessible state space than unrestricted native callers have.
+
+\section{Prepare and invoke one known signature}
+\label{sec:ch76-plan}
+Checked addition has three arguments: two signed 32-bit values and a pointer to the output integer.
+Its status is an ordinary 32-bit C integer on the tested target.
+The wrapper creates typed argument slots, prepares a call interface, and invokes the known core function through libffi.
+Algorithm~\ref{alg:ch76-add} follows this complete path from a managed value pair to a managed result.
+
+\begin{algorithm}[htbp]
+\caption{Execute checked managed addition through the scalar foreign-call bridge.}
+\label{alg:ch76-add}
+\begin{pseudocode}
+\Require two language values; supported exact-integer conversion policy
+\Ensure managed sum or a language error with no uninitialized result read
+\State check both values' kinds and signed 32-bit ranges
+\State prepare address-stable plan for two int32 arguments and one pointer
+\State create typed slots and local result storage
+\State invoke the known native checked-add target through libffi
+\If{bridge failure or native status is not success}
+  \State translate status; do not read the arithmetic output
+\Else
+  \State convert initialized arithmetic output to a language integer
+\EndIf
+\end{pseudocode}
+\end{algorithm}
+
+For this fixed signature, adapter bookkeeping is constant apart from language integer conversion.
+The example prepares a fresh plan for each call to keep its ownership local and avoid a shared mutable cache.
+A production cache would key on the complete ABI and signature and retain immutable, address-stable metadata until all users finish.
+Caching by argument count alone would conflate, for example, two doubles with two pointers.
+
+\section{Bind ownership and errors separately in each runtime}
+\label{sec:ch76-bindings}
+The Python constructor obtains a contiguous buffer export, copies it, releases the export, and constructs a named capsule retaining the native owner.
+The close function clears only the payload; the capsule continues owning the small owner record until destruction.
+Every subsequent byte-read checks the payload for the closed state.
+The module counter lives in per-module state allocated by multi-phase initialization~\cite{python-2026-capi}.
+
+The Lua constructor accepts a string without numeric coercion, creates full userdata with a null payload, installs its cleanup metatable, and then creates the native copy.
+The same close method implements explicit close, garbage-collection cleanup, and Lua's to-be-closed scope handling.
+The input string remains rooted on the stack throughout construction~\cite{ierusalimschy-2026-lua}.
+The embedded host registers this same module implementation and evaluates its test script through an outer protected call.
+
+Figure~\ref{fig:ch76-errors} shows the error adapters around the shared visitor.
+For Python, a failed callback leaves the exception indicator set and the outer wrapper returns null.
+For Lua, the protected call retains the original error object on the stack and the outer wrapper re-raises it after native return.
+Both avoid publishing a partial visitor sum.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\node[basic block] (native) at (0,0) {native visitor returns status};
+\node[basic block,text width=4cm] (python) at (-3,-1.6) {Python: null plus exception};
+\node[basic block,text width=4cm] (lua) at (3,-1.6) {Lua: re-raise retained object};
+\draw[cfg edge] (native)--(python); \draw[cfg edge] (native)--(lua);
+\end{tikzpicture}
+\caption{A common native status maps back to each runtime's own error mechanism.}
+\label{fig:ch76-errors}
+\end{figure}
+
+\section{Test independent failure dimensions}
+\label{sec:ch76-tests}
+A round trip can hide matching bugs on both sides, so the native suite compares selected libffi calls against compiler-generated direct calls.
+It also compares structure offsets, sizes, and alignment against C's own operators.
+Boundary tests use a mathematical widened sum to distinguish valid arithmetic from overflow, and verify that failure preserves sentinels.
+Algorithm~\ref{alg:ch76-differential} describes the native differential method.
+
+\begin{algorithm}[htbp]
+\caption{Check a foreign-call path against a compiler-generated native oracle.}
+\label{alg:ch76-differential}
+\begin{pseudocode}
+\Require trusted declaration, native function, ABI descriptors, boundary-value cases
+\Ensure compared paths agree on status and defined output fields
+\ForAll{input cases}
+  \State initialize independent native and FFI output storage with sentinels
+  \State call the declared function directly
+  \State call the same function through libffi with independently built slots
+  \State compare statuses and every semantically defined result field
+  \State verify unchanged outputs where the failure contract requires them
+\EndFor
+\State compare descriptor layout with native size, alignment, and offsets
+\end{pseudocode}
+\end{algorithm}
+
+For $T$ tests and $A$ arguments, setup and comparison cost $O(TA)$ for fixed-size values, excluding the calls themselves.
+The method does not prove libffi correct for every signature.
+Direct and foreign paths share the same native function, so independent arithmetic expectations and lifetime tests remain necessary.
+Structure comparison uses fields, not padding bytes.
+
+Table~\ref{tab:ch76-tests} separates executed native mechanisms from bounded models.
+The registration model enumerates all $4^7=16{,}384$ event words of length seven, checking each legal prefix and rejecting illegal transitions.
+It does not test actual managed callbacks from foreign threads.
+
+\begin{table}[htbp]
+\caption{The test suite checks ABI, runtime, and protocol obligations through different oracles.}
+\label{tab:ch76-tests}
+\centering
+\begin{tabular}{ll}
+\toprule
+Check & Evidence \\
+\midrule
+scalar ABI & 49 boundary pairs; mixed banks; eight arguments \\
+aggregate ABI & Pair and Triple fieldwise direct-call comparisons \\
+variadic ABI & promoted doubles; unpromoted float rejection \\
+closure entry & 101 calls with retained bias context \\
+native threads & four workers, 1,000 independent calls each \\
+runtime ownership & copies, closed-state rejection, repeated close, collection \\
+runtime callbacks & nesting, conversion failure, original error identity \\
+protocol model & all seven-event registration words; moving handles \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The build matrix uses GCC and Clang, each with normal and address/undefined-behavior-sanitized native executables.
+The embedded Lua host runs in both configurations; dynamically loaded Lua and Python extensions run in ordinary interpreter processes without injecting sanitizer runtimes.
+This distinction prevents a sanitized-host result from being misreported as a sanitized CPython-extension result.
+The suite also checks plugin negotiation and closes its loader handle after the last possible use.
+
+\section{Extend only with a new contract and its checks}
+\label{sec:ch76-extension}
+Adding asynchronous callbacks requires retained roots, thread attachment or queued delivery, unregister acknowledgement, and a tested reclamation protocol.
+Adding zero-copy buffers requires an export owner, mutation rules, and coordination between outstanding views and close.
+Adding arbitrary aggregate signatures requires a type-description representation and lifetime discipline beyond the four-kind scalar union.
+Each is a meaningful extension, but none follows merely from adding a function name to the module table.
+
+The tests do not inject every allocator failure, test every operating system, or validate a cross-version Stable ABI distribution.
+Those are concrete next verification dimensions rather than claims established by the current matrix.
+The implemented result is a small interoperable system with explicit limits and independently checked examples of the mechanisms that broader FFIs need.
+
+\section{Exercises}
+\label{sec:ch76-exercises}
+\begin{enumerate}
+\item\label{ex:ch76-plan} Explain why copying a prepared \code{FxPlan} with a structure assignment can invalidate its internal ownership assumptions.
+\item\label{ex:ch76-error} For each of input $2^{80}$, addition overflow, and callback exception, identify the first rejecting component and the error returned to Python.
+\item\label{ex:ch76-cost} A buffer of $N$ bytes is constructed and immediately read back.
+Count the payload copies and their asymptotic time and storage costs.
+\item\label{ex:ch76-cache} Specify a safe cache key and metadata lifetime rule for reusing prepared scalar call plans across invocations.
+Explain why argument count is insufficient.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch76-reading}
+The libffi manual supplies the ABI adapter contracts used by the implementation~\cite{libffi-2026-manual}.
+The Lua and Python manuals define the runtime mechanisms that complete the ownership and error boundary~\cite{ierusalimschy-2026-lua,python-2026-capi}.
+The lab README records reproducible commands, and its solution file works every exercise from the eight FFI chapters.

@@ -2,14 +2,145 @@
 
 ## Agreed scope
 
+### Strings, rewriting, and functional-language implementation
+
+The maintainer approved 17 substantial new chapters, explicitly confirming an
+**FST-based spellchecker**. Source IDs 77–93 preserve all earlier filenames.
+
+| Source IDs | Chapters | Placement |
+| --- | --- | --- |
+| 77–80 | String representation/operations; matching/indexes; FSTs; spellchecker | After lexing overview |
+| 81–88 | Abstract/string reduction; terms/unification; termination; confluence/completion; engines; term graphs; compiler graphs; optimization/selection | After SSA and incremental databases |
+| 89–93 | Core semantics; inference/patterns; closures/lifting/combinators; lazy runtime; functional implementation | After type theory |
+
+Each chapter includes explicit notation, worked examples, two algorithms, two
+diagrams, two tables, and four solved exercises. The expansion supplies 34 of
+each artifact and 68 exercise answers. The new artifacts use the strict exports.
+
+`example-code/string-labs/` implements exact matching and a bounded Unicode
+edit-FST/dictionary-FST spellchecker with an independent distance oracle.
+`example-code/rewriting-labs/` implements finite rewriting and graph fixtures.
+`example-code/functional-labs/` implements inference, optimization, a strict
+interpreter/compiler/VM, and alternate lazy evaluation. The implementation/theory
+boundaries and source checks are recorded in `STRINGS-REWRITING-FUNCTIONAL.md`.
+
+### FFI, interoperability, and native extensions
+
+The maintainer approved eight new chapters and the C11/libffi, Lua 5.4, and
+CPython case studies. Source IDs remain stable and are interleaved as follows.
+
+| Source ID | Chapter | Placement |
+| --- | --- | --- |
+| 69 | FFI Foundations and Semantic Contracts | After calling conventions |
+| 70 | ABI Classification and Foreign-Call Lowering | After FFI foundations |
+| 71 | Data Layout and Marshaling | After runtime representation |
+| 72 | Ownership, Lifetimes, and Garbage Collection at Language Boundaries | After GC |
+| 73 | Callbacks, Reentrancy, and Threads | After foreign ownership |
+| 74 | Errors, Exceptions, and Unwinding across Language Boundaries | After callbacks |
+| 75 | Native Extension Models | After dynamic linking |
+| 76 | Case Study: Building an FFI and Native Extensions | After foreign errors |
+
+`example-code/ffi-labs/` contains the native core, scalar libffi plans, Lua module
+and embedded host, CPython Limited API module, ABI fixtures, finite models, and
+32 solved exercises. All 16 algorithms, 16 diagrams, and 16 tables are serialized
+through the strict exporter. `FFI-EXPANSION.md` records evidence and boundaries.
+
+### Distributed compiler-architecture expansion
+
+The maintainer approved eight new interleaved chapters, with supporting sections
+in existing IR, SSA, redundancy, memory, bytecode, JIT, speculation, vectorization,
+and linker chapters. Source IDs remain stable; printed numbers follow `index.ltx`.
+
+| Source ID | Chapter | Placement |
+| --- | --- | --- |
+| 61 | Compilers as Incremental Databases | After SSA |
+| 62 | Declarative Optimization and Equality Saturation | After value numbering |
+| 63 | Semantic, Memory, and Effect-Aware IRs | After memory optimization |
+| 64 | Binary Lifting and Cross-Architecture Translation | After the linker case study |
+| 65 | Adaptive Interpreters and Staged Compilation | After virtual machines |
+| 66 | Speculative IR, Deoptimization, and State Transfer | After speculation |
+| 67 | Continuous and Runtime-Managed Compilation | After state transfer |
+| 68 | Profile-Guided, Learned, and Spatial Compilation | After vectorization |
+
+`example-code/architecture-labs/` contains executable reference models and solved
+exercises. `ARCHITECTURE-EXPANSION.md` records scope, evidence, and model boundaries.
+All new algorithms, graphs, and tables use the existing strict exporter.
+
+### Assembly and linking expansion
+
+The maintainer approved eight additional substantial chapters: four on assembly
+and four on linking, with the two implementation case studies included.
+The selected target is **x86-64 and ELF64**, with C11 implementations embedding
+Lua 5.4 for assembler preprocessing and linker memory mapping.
+
+| Source ID | Chapter |
+| --- | --- |
+| 53 | Assembly Languages, Expressions, Symbols, and Sections |
+| 54 | Instruction Encoding, Fixups, and Relocatable Objects |
+| 55 | Lua Preprocessing, Macros, and Multi-Pass Layout |
+| 56 | Case Study: Building a Lua-Preprocessed Assembler |
+| 57 | Symbol Resolution, Archives, and Separate Compilation |
+| 58 | Memory Layout, Relocation, and Executable Images |
+| 59 | Dynamic Linking, Loading, TLS, and Link-Time Transformations |
+| 60 | Case Study: Building a Linker with Lua Memory Maps |
+
+Assembly chapters follow out-of-SSA; linking chapters follow the existing linking
+overview. `example-code/lua-toolchain/` contains the implementations, verification
+driver, native examples, chapter computation checks, and forty worked exercise
+answers. See `ASSEMBLY-LINKING-EXPANSION.md` for source and verification evidence.
+
+### Lexing and parsing expansion
+
+The maintainer approved four additional chapters, including the Aurocks case study,
+and retaining C output from the supplied Perl generator:
+
+| Source ID | Chapter |
+| --- | --- |
+| 49 | Regular Languages and Lexer Construction |
+| 50 | Predictive Parsing and Grammar Design |
+| 51 | Backtracking and Generalized Parsing |
+| 52 | Case Study: Building Aurocks |
+
+These follow the introductory parsing chapter. They include substantial pseudocode,
+original worked diagrams, computed tables, checked exercises, and executable tests.
+`support/aurocks.pl` generates C99 with cross-call backtracking, deferred actions,
+explicit ownership, and bounded search. See `FRONT-END-EXPANSION.md`.
+
+### Logic, analysis, and model-checking expansion
+
+The maintainer approved eight additional chapters and a ninth chapter developing
+a working model checker. Existing filenames and labels remain stable; printed
+chapter numbers follow the include order in `index.ltx`.
+
+| Source ID | Chapter | Placement |
+| --- | --- | --- |
+| 40 | Logic for Compiler Reasoning | After dominance, before dataflow |
+| 41 | Automated Reasoning and Its Limits | After logic |
+| 42 | Designing Sound Static Analyses | After abstract interpretation |
+| 43 | Relational and Path-Sensitive Analysis | After analysis design |
+| 44 | Interprocedural and Heap Analysis | After relational analysis |
+| 45 | Transition Systems and Temporal Properties | After interprocedural analysis |
+| 46 | Model-Checking Algorithms | After temporal properties |
+| 47 | Verifying Compiler Transformations | After model-checking algorithms |
+| 48 | Case Study: Developing a Model Checker | Before SSA and optimization clients |
+
+These chapters develop compiler-specific contracts, original worked examples,
+algorithms, diagrams, tables, and checked exercises. The case study supplies a
+self-contained C11 implementation. Every new algorithm, diagram, and table is
+also serialized in `pseudo-code/`, `graphs-code/`, or `tables-code/`.
+The historical outline and installment records below predate this expansion.
+
 The maintainer approved the 38-chapter outline below and subsequently removed
 all chapter word quotas. Choose length according to the material needed to
 explain and verify each chapter's subject.
 
-All 38 chapters and three appendices now have drafts. They are not a finished,
+All 93 chapters and four appendices now have drafts, including the type-theory
+chapter (`ch39.tex`) and the compiler-foundations appendix (`appendix-d.tex`).
+They are not a finished,
 independently verified textbook. The third refinement pass strengthens algorithm
 contracts, complexity arguments, examples, and exposition throughout the book;
-see `THIRD-REVIEW.md` for corrections and verification records.
+see `THIRD-REVIEW.md` for corrections and verification records, and
+`VERIFICATION-EXPANSION.md` for the nine-chapter expansion.
 Outstanding citation TODOs and implementation exercises remain review work.
 The chapter-status table and installment reports below are historical records
 of the earlier drafting stage, not the current file inventory.

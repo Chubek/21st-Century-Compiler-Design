@@ -1,0 +1,303 @@
+\chapter{Symbol Resolution, Archives, and Separate Compilation}
+\label{ch:link-symbols}
+
+Two object files can contain perfectly valid machine instructions and still fail to form a program.
+One may reference a function that neither defines.
+Both may define the same global name with incompatible intentions.
+A library may contain the missing definition but appear at a point in the command where the linker's extraction policy does not select it.
+These are not address-arithmetic failures; they arise before layout from the meaning of the set of objects that participates in the link.
+
+This chapter develops that meaning explicitly.
+Chapter~\ref{ch:linking-loading} provides the introductory pipeline; the following four chapters expand its stages and culminate in a working Lua-mapped static linker.
+The ELF symbol specification defines local, global, weak, and special-section states; production linker documentation defines additional search and policy choices~\cite{xinuos-2026-elf,gnu-2026-ld}.
+
+\section{Local spelling is not global identity}
+\label{sec:ch57-identity}
+
+An assembler may emit a private label named \code{loop} in each object.
+The linker must not merge those two labels merely because their spellings match.
+A local symbol's identity includes its owning object and symbol index.
+A relocation to that local symbol resolves within that object, even when another object's local symbol has the same name and offset.
+Figure~\ref{fig:ch57-local} makes the ownership boundary visible.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=17mm and 22mm]
+\node[basic block] (a) {alpha.o relocation};
+\node[basic block,right=of a] (b) {beta.o relocation};
+\node[basic block,below=of a] (al) {alpha.o local loop};
+\node[basic block,below=of b] (bl) {beta.o local loop};
+\draw[cfg edge] (a)--(al); \draw[cfg edge] (b)--(bl);
+\draw[dashed] (al)--node[below=3mm,font=\small] {same spelling; distinct identities}(bl);
+\end{tikzpicture}
+\caption{Local references remain object-qualified; a global name table must not absorb them.}
+\label{fig:ch57-local}
+\end{figure}
+
+Global symbols introduce a different lookup space.
+Each participating object can contribute declarations or definitions to the global name's resolution state.
+That state is not just the first numeric address encountered.
+It records which definitions compete, which references remain unsatisfied, and which binding rules apply.
+Final addresses are usually assigned only after this choice has selected an owning section and offset.
+
+The case-study linker uses a direct scan of participating symbol tables to select definitions.
+Its local path bypasses global lookup entirely.
+This is slower than a production hash table but makes the namespace distinction straightforward to inspect and test.
+
+\section{Resolve binding before assigning addresses}
+\label{sec:ch57-binding}
+
+For the ordinary defined-global and defined-weak cases, one strong global definition wins over weak definitions with the same name.
+Two strong definitions are an error under the case-study policy.
+When only weak definitions compete, the case study chooses the first in command-line object order.
+That tie policy is explicit rather than inferred from accidental hash iteration.
+Unresolved weak references evaluate to zero, while unresolved strong references fail the static link~\cite{xinuos-2026-elf}.
+
+Table~\ref{tab:ch57-binding} shows the implemented subset.
+It deliberately omits common symbols, unique symbols, symbol versions, and dynamic preemption; those mechanisms require additional states and rules.
+Trying to fit them into a Boolean \code{defined} flag is a common source of precedence bugs.
+
+\begin{table}[htbp]
+\caption{The static case study selects one definition using binding, not the order of the first reference.}
+\label{tab:ch57-binding}
+\centering
+\begin{tabular}{lll}
+\toprule
+Existing choice & New definition & Result \\
+\midrule
+None & weak & choose weak \\
+None & strong & choose strong \\
+Weak & weak & retain first weak \\
+Weak & strong & replace with strong \\
+Strong & weak & retain strong \\
+Strong & strong & duplicate-definition error \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{algorithm}[htbp]
+\caption{Select a definition for one global name in an ordered object set.}
+\label{alg:ch57-resolve}
+\begin{pseudocode}
+\Require all participating objects, one nonlocal name, strong/weak binding subset
+\Ensure selected definition or a duplicate-definition diagnostic
+\State $chosen\gets none$
+\ForAll{defined nonlocal symbols of that name in object order}
+  \If{both the new symbol and $chosen$ are strong}
+    \State \Return duplicate-definition error
+  \EndIf
+  \If{$chosen=none$ or a strong symbol replaces a weak choice}
+    \State $chosen\gets$ new symbol with its owning object
+  \EndIf
+\EndFor
+\State \Return $chosen$
+\end{pseudocode}
+\end{algorithm}
+
+Algorithm~\ref{alg:ch57-resolve} is linear in the scanned symbol population for one query.
+Calling it independently for every nonlocal symbol and relocation can be quadratic or worse in the combined symbol/reference counts.
+A production linker interns global names and accumulates resolution states once, reducing repeated search at the cost of a more involved update mechanism.
+The teaching implementation documents its scan-based bound instead of labeling all symbol lookup \enquote{constant time}.
+
+\section{Definitions carry more than binding}
+\label{sec:ch57-attributes}
+
+ELF symbol entries also contain type, visibility, size, and section index.
+A defined ordinary symbol in a relocatable object holds an offset within its section, not a final process address.
+An absolute symbol uses a special section index and keeps its value when sections move.
+A common symbol describes storage still to be allocated, with an alignment requirement and size.
+An undefined symbol's zero section index does not make it an absolute symbol at address zero.
+
+Common storage illustrates why old language and toolchain conventions remain visible at link time.
+Several tentative definitions can request one allocation, often taking the maximum size and strongest alignment under the target linker's policy.
+A real initialized definition can supersede that allocation request.
+Modern compiler defaults and language rules influence whether the assembler emits common symbols at all.
+Our linker rejects common symbols, so it never claims to implement those merging rules by accident.
+
+Visibility is another independent dimension.
+A hidden global can participate in resolution within the component being linked while being unavailable for external dynamic lookup.
+Protected visibility adds further preemption constraints.
+Static resolution and runtime interposition must therefore be described separately.
+The case study accepts default and hidden visibility for its fully static output and rejects unsupported visibility encodings.
+
+\section{Archives are demand-selected collections}
+\label{sec:ch57-archives}
+
+A static archive is a container of member objects plus indexing information, not one inseparable object.
+Linking the archive usually extracts only members selected by unresolved references under the linker's search policy.
+Once selected, a member contributes all of its definitions and references, not only the one symbol that caused extraction.
+That contribution can create new unresolved names and therefore new extraction opportunities.
+
+This is different from section garbage collection.
+Archive extraction chooses which whole objects enter the link.
+Section garbage collection later chooses which allocated sections of the selected objects remain live.
+If two functions share one selected text section, extraction alone cannot discard one of them.
+If they occupy separate sections, a later reachability pass may do so under its root policy.
+
+Use three archive members in two archives.
+Archive $A$ contains \code{draw.o}, which defines \code{draw} and references \code{blend}, and \code{helper.o}, which defines \code{helper}.
+Archive $B$ contains \code{blend.o}, which defines \code{blend} and references \code{helper}.
+The main object initially references \code{draw}.
+Table~\ref{tab:ch57-archive} follows a left-to-right search of main, $A$, then $B$.
+
+\begin{table}[htbp]
+\caption{A newly selected member can create a dependency on an archive already passed.}
+\label{tab:ch57-archive}
+\centering
+\begin{tabular}{lll}
+\toprule
+Search event & New selected member & Outstanding names \\
+\midrule
+Read main & main object & draw \\
+Search A & draw.o & blend \\
+Search B & blend.o & helper \\
+Stop without group rescan & none & helper remains unresolved \\
+Rescan A in a group & helper.o & none \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:ch57-archive} shows why simply seeing every archive once is insufficient for this order.
+The backward dependency is discovered only after $B$ contributes its member.
+Some linkers retain more archive information and can provide different behavior; the exact command-line search semantics are tool-specific.
+GNU-style archive groups explicitly request repeated searches until extraction reaches closure~\cite{gnu-2026-ld}.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=14mm and 19mm]
+\node[basic block] (main) {main: needs draw};
+\node[basic block,right=of main] (draw) {A: draw.o};
+\node[basic block,below=of draw] (blend) {B: blend.o};
+\node[basic block,left=of blend] (helper) {A: helper.o};
+\draw[cfg edge] (main)--(draw); \draw[cfg edge] (draw)--node[right,font=\small] {needs blend}(blend);
+\draw[back edge] (blend)--node[below=3mm,font=\small] {needs helper}(helper);
+\end{tikzpicture}
+\caption{The archive order and the dependency direction differ, motivating an explicit group-rescan policy.}
+\label{fig:ch57-archive}
+\end{figure}
+
+\section{Extraction is a monotone fixed point over members}
+\label{sec:ch57-closure}
+
+\begin{algorithm}[htbp]
+\caption{Search an archive group to member-extraction closure.}
+\label{alg:ch57-archive}
+\begin{pseudocode}
+\Require ordered archives, current definitions and unresolved strong references
+\Ensure no unselected member in the group satisfies an outstanding extraction demand
+\Repeat
+  \State $changed\gets false$
+  \ForAll{archives and their members in the declared search order}
+    \If{an unselected member defines a demanded name}
+      \State mark the member selected before processing its contents
+      \State incorporate its definitions using the resolution rules
+      \State incorporate its undefined references and recompute demands
+      \State $changed\gets true$
+    \EndIf
+  \EndFor
+\Until{no member was selected}
+\end{pseudocode}
+\end{algorithm}
+
+The monotone set is the set of selected members, not the set of unresolved names.
+An unresolved name can disappear when satisfied and a different one can appear from the selected object.
+With $M$ members, at most $M$ successful selections occur, so repeated full scans terminate.
+If each sweep inspects all member summaries of total size $I$, a coarse bound is $O((M+1)I)$ plus the cost of incorporating selected objects and resolving names.
+An archive index and a demand worklist avoid much of the repeated scanning.
+
+Unresolved weak references do not normally trigger archive extraction under the ELF rule~\cite{xinuos-2026-elf}.
+That distinction is necessary for optional facilities represented by weak names.
+Another subtle consequence is that a weak definition already selected from an ordinary object can satisfy a name before a later archive containing a strong definition is searched.
+The strong definition wins only if its member enters the link.
+Resolution over selected objects is not equivalent to resolution over every definition physically present in every archive.
+
+\section{Separate compilation preserves a contract, not complete type knowledge}
+\label{sec:ch57-abi}
+
+An ELF linker can often confirm that a name is defined without knowing whether callers and callees agree on its language-level type.
+The symbol's broad type may say function, but not encode a complete C prototype or calling-convention proof.
+Two translation units can agree on spelling while disagreeing on argument classification, structure layout, or return convention.
+Successful linking therefore does not establish ABI compatibility.
+
+The demo uses a leaf helper returning an integer in \code{eax} and a startup routine that moves it into \code{edi} for the Linux exit syscall.
+It needs no library initialization and does not claim a general C runtime startup sequence.
+The function call convention and the system-call convention are different interfaces, even though both use registers.
+The AMD64 supplement and operating-system ABI define those details~\cite{matz-2012-amd64}.
+
+Table~\ref{tab:ch57-checks} distinguishes checks available at different layers.
+LTO can recover richer IR-level information when all participating toolchains provide compatible representations, but it does not remove the need for object-level ABI and relocation checks.
+Assembly objects and prebuilt libraries can remain outside the IR-level view.
+
+\begin{table}[htbp]
+\caption{Finding a symbol definition proves less than agreement on the function's complete interface.}
+\label{tab:ch57-checks}
+\centering
+\begin{tabular}{p{0.30\linewidth}p{0.57\linewidth}}
+\toprule
+Layer & Representative obligation \\
+\midrule
+Source type checker & Call arguments match the visible declaration. \\
+Compiler ABI lowering & Arguments and results use the target convention. \\
+Assembler & Instruction operands and relocation fields are well formed. \\
+Static linker & Selected definitions, ranges, and layout satisfy object contracts. \\
+Loader & Segments and runtime dependencies can be established. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Retain a resolution explanation}
+\label{sec:ch57-diagnostics}
+
+For an undefined name, report at least the referencing object and spelling; when possible include relocation and source information.
+For duplicate strong definitions, report both defining objects rather than only the second one encountered.
+For archive extraction, a trace can state which unresolved name selected which member and what new demands that member introduced.
+Such an explanation turns command-line-order debugging into a graph problem the reader can inspect.
+
+Figure~\ref{fig:ch57-resolution} depicts a weak choice being replaced by a strong definition while local references remain outside this competition.
+The winning identity must then be used consistently by every affected relocation.
+Reusing a stale address cached when the weak definition was first seen would create a mixed program in which some references bind strongly and others weakly.
+A clean phase boundary resolves identities first and computes their final addresses after layout.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=15mm and 22mm]
+\node[basic block] (refs) {references to answer};
+\node[basic block,below left=of refs] (w) {weak default};
+\node[basic block,below right=of refs] (s) {strong definition};
+\node[basic block,below=of s] (v) {one selected identity};
+\draw[dashed,->] (refs)--node[left,font=\small,fill=white,inner sep=2pt] {candidate}(w);
+\draw[cfg edge] (refs)--(s); \draw[cfg edge] (s)--(v);
+\draw[back edge] (w)--node[below,font=\small] {superseded}(s);
+\end{tikzpicture}
+\caption{Binding selects one owning definition before layout assigns its address to all references.}
+\label{fig:ch57-resolution}
+\end{figure}
+
+\section{Implementation boundaries and scaling}
+\label{sec:ch57-implementation}
+
+The working linker consumes explicitly named object files.
+It implements the local/global/weak subset above, but not archive parsing or automatic member extraction.
+The archive algorithm is exercised separately as a small model accompanying the chapter, so the distinction between implemented executable linking and a modeled extension remains visible.
+Adding archives requires validating the container, its member sizes/alignment, and its name/index conventions before invoking the existing object parser.
+
+Production linkers also need policies for duplicate sections, COMDAT groups, symbol versioning, and target-specific special symbols.
+Their large symbol tables benefit from compact interned names, cached resolution state, and concurrent parsing.
+Parallelism must preserve deterministic conflict diagnostics and output order where promised.
+A faster implementation of an unspecified winner policy is still an unspecified linker.
+
+\section{Exercises}
+\label{sec:ch57-exercises}
+\begin{enumerate}
+\item\label{ex:ch57-local} Two objects each define local loop at offset zero and global helper in only the second. Describe the lookup key for all three identities.
+\item\label{ex:ch57-weak} Process weak f, strong f, weak f in that order. Repeat with the strong definition first. State the selected owner and whether either order is an error.
+\item\label{ex:ch57-group} Trace main, archive B, archive A for the worked archive example without a group, then with repeated group scanning.
+\item\label{ex:ch57-extraction} A weak definition already satisfies f before an archive containing a strong f is visited. Explain why the strong definition need not replace it.
+\item\label{ex:ch57-complexity} A group has 12 members and a full-summary sweep costs 100 operations. Give the coarse maximum sweep cost under Algorithm~\ref{alg:ch57-archive}, excluding object incorporation.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch57-reading}
+The ELF symbol chapter specifies binding, visibility, undefined entries, and common symbols~\cite{xinuos-2026-elf}.
+GNU linker documentation specifies archive search commands and script behavior for that implementation~\cite{gnu-2026-ld}.
+Levine's book is a broader reference on symbol management and libraries; its author's site also records errata~\cite{levine-1999-linkers}.

@@ -1,0 +1,378 @@
+\chapter{Verifying Compiler Transformations}
+\label{ch:verifying-compiler-transformations}
+
+Replacing a multiplication by an addition can preserve every result while moving a division across a branch can introduce a new trap.
+Both changes may leave a well-typed, well-formed control-flow graph.
+A structural verifier cannot tell them apart: it checks the language of the IR, not the relationship between the old and new programs.
+This chapter turns that relationship into explicit proof obligations.
+It connects the analyses of Chapter~\ref{ch:designing-sound-analyses}, the solvers of Chapter~\ref{ch:automated-reasoning-limits}, and the state exploration of Chapter~\ref{ch:model-checking-algorithms} to the decision to accept an optimization.
+The goal is a validator that explains both its successes and its limits, rather than a second optimizer that silently repeats the first one's mistakes.
+
+\section{Choose the behavior before choosing the checker}
+\label{sec:ch47-behavior}
+
+Consider an eight-bit unsigned intermediate language.
+Its values are $0$ through $255$, addition and multiplication wrap modulo $256$, and division by zero produces a defined trap.
+The following three candidates pose different validation problems:
+\begin{enumerate}
+\item Replace $2x \bmod 256$ by $(x+x)\bmod 256$.
+\item Replace the unsigned comparison $((x+1)\bmod 256)>x$ by true.
+\item Move $18/d$ out of a conditional whose false arm returns zero.
+\end{enumerate}
+The first is valid for every value in the domain.
+The second fails at $x=255$: the original comparison is $0>255$, hence false.
+The third fails when the condition is false and $d=0$: the original returns zero and the moved operation traps.
+Neither the mathematical-integer identity $x+1>x$ nor the usual algebra of rational division describes this language.
+The validator must encode the selected language, including its exceptional outcomes.
+
+For a deterministic terminating fragment, define an observation as one of
+\[
+  \operatorname{return}(v,\tau)
+  \quad\text{or}\quad
+  \operatorname{trap}(k,\tau),
+\]
+where $v$ is the result, $k$ is a trap kind, and $\tau$ is the ordered sequence of observable events already emitted.
+A trap payload is not a returned value.
+Two observations are equal only if their constructors, relevant fields, and event sequences agree.
+If memory is observable, include the relevant final memory or a specified projection of it in the returned observation.
+Ignoring all memory while validating a store-elimination pass would change the question being proved.
+
+This observation model includes no undefined behavior.
+A source language that has undefined behavior needs a separate account of which executions impose obligations.
+For example, a validator can restrict a rewrite theorem to source-defined inputs, while still checking that the target does not introduce an error on those inputs.
+It must not classify a defined language trap as undefined behavior merely because both terminate an execution abnormally.
+The C draft distinguishes constraints, undefined behavior, and observable behavior; an IR validator needs its own corresponding definitions~\cite{wg14-2011-c11}.
+
+For nondeterministic programs, a single returned value is no longer the entire specification.
+Let $\mathcal{B}_S(i)$ and $\mathcal{B}_T(i)$ be the permitted source and target behaviors on input $i$ under a fixed environment model.
+One common \term{refinement} obligation is
+\[
+  \mathcal{B}_T(i)\subseteq\mathcal{B}_S(i)
+\]
+on the inputs for which the source specification imposes that obligation.
+Equality is a stronger requirement and may exclude legitimate reductions of nondeterminism.
+Which traces count, how termination is observed, and how undefined behavior is treated must be fixed before this inclusion has a useful meaning.
+This chapter's executable examples deliberately use the simpler deterministic, terminating semantics.
+
+\section{Three different objects can be verified}
+\label{sec:ch47-three-objects}
+
+A pass implementation, a particular translation, and an abstract model of a compiler service are different verification targets.
+Proving the pass implementation correct establishes a theorem about every accepted input, within the theorem's assumptions.
+\term{Translation validation} instead checks the particular input/output pair produced by a run of the compiler~\cite{pnueli-1998-validation}.
+Model checking a cache-invalidation protocol explores a model of the compiler's own operation; its safety result applies to that model and transfers to the implementation only through a justified modeling relation.
+Table~\ref{tab:ch47-verification-targets} keeps these scopes separate.
+
+\begin{table}[htbp]
+\centering
+\caption{The object being checked determines what a successful verification establishes.}
+\label{tab:ch47-verification-targets}
+\begin{tabular}{p{0.21\linewidth}p{0.34\linewidth}p{0.34\linewidth}}
+\toprule
+Target & Established obligation & Remaining connection \\
+\midrule
+Pass implementation & Every admitted translation preserves its contract & Implementation, semantic model, and proof assumptions agree \\
+One translation & This source/target pair satisfies the encoded relation & Other translations need their own validation \\
+Compiler-service model & All modeled executions satisfy the property & Real service behavior is represented by the model \\
+Test executions & These executions agree with the oracle & Untested inputs and behaviors remain open \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The third target is the focus of Chapter~\ref{ch:model-checker-case-study}.
+The second is particularly convenient at an optimizer boundary.
+The compiler proposes a changed region; a validator either accepts it or retains the old region.
+Rejecting a correct candidate costs an optimization opportunity.
+Accepting an incorrect candidate changes program behavior.
+That asymmetry justifies conservative failure when the validator cannot express an operation or a solver exhausts its resources.
+Figure~\ref{fig:ch47-validation-gate} shows the handoff.
+
+\input{figures/validation-gate}
+
+The optimizer can suggest a correspondence between variables, blocks, and memory locations.
+Those suggestions are useful witnesses, not trusted facts.
+The validator checks every premise it actually uses, including initial-state correspondence, operand availability, and exceptional exits.
+Otherwise an incorrect optimizer can supply an incorrect witness that persuades an equally trusting validator.
+
+\section{A local validator with explicit outcomes}
+\label{sec:ch47-local-validator}
+
+Start with acyclic regions containing fixed-width arithmetic, conditionals, and the defined division trap.
+Each region terminates, and its operations have exact symbolic encodings.
+Both regions receive the same logical inputs; temporary names are renamed apart.
+Let $P(i)$ be the candidate's precondition, and let $O_S(i)$ and $O_T(i)$ encode the two observations.
+The counterexample formula is
+\begin{equation}
+  P(i)\land\bigl(O_S(i)\neq O_T(i)\bigr).
+  \label{eq:ch47-counterexample}
+\end{equation}
+For these total, deterministic encodings, unsatisfiability establishes equality for every input satisfying $P$.
+Satisfiability provides an input at which the observations disagree.
+An unknown result establishes neither statement.
+
+The encoder represents each observation by a tag plus payloads.
+Its mismatch predicate compares payloads only when the tags make them meaningful.
+For example, two zero-division traps with equal event histories do not disagree because their unused result-bit fields differ.
+Conversely, equal result bits do not establish agreement between a return and a trap.
+An ordered event history can be encoded with a bounded event array and length for a bounded acyclic region, but the array bound must cover every possible path through that region.
+
+Algorithm~\ref{alg:ch47-validate-local} returns a proof result distinct from a tested counterexample and a failure to decide.
+Replaying a solver model with independent concrete semantics catches many encoding mistakes, although successful replay cannot establish that the encoding omitted no other behavior.
+
+\begin{algorithm}[htbp]
+\caption{Validate a deterministic, terminating local rewrite.}
+\label{alg:ch47-validate-local}
+\begin{pseudocode}
+\Require acyclic regions $S,T$, input precondition $P$, exact operation semantics
+\Ensure valid under $P$, a replayed counterexample, or inconclusive
+\State check structural validity, input alignment, and supported operations
+\If{a required check fails}
+  \State \Return inconclusive with the failed check
+\EndIf
+\State construct symbolic observations $O_S(i)$ and $O_T(i)$
+\State $q\gets P(i)\land(O_S(i)\neq O_T(i))$
+\State $r\gets\Call{Solve}{q}$
+\If{$r$ is UNSAT}
+  \State \Return valid under $P$ and the encoded semantics
+\ElsIf{$r$ is SAT with assignment $a$}
+  \State evaluate $P(a)$, $S(a)$, and $T(a)$ using concrete semantics
+  \If{$P(a)$ holds and the concrete observations differ}
+    \State \Return counterexample $a$ and both observations
+  \EndIf
+  \State \Return inconclusive: encoding or replay disagreement
+\Else
+  \State \Return inconclusive with the solver status
+\EndIf
+\end{pseudocode}
+\end{algorithm}
+
+For $N$ source and target instructions, a shared symbolic expression DAG avoids expanding the same definition once per use.
+Encoding cost must include the widths and operations, not merely count IR instructions.
+If bit-blasting produces $B$ Boolean nodes and clauses, the construction and storage can be linear in $B$ with a bounded-arity DAG encoding.
+The solver cost is additional and has no general polynomial bound for arbitrary Boolean inputs.
+Concrete replay is linear in the executed instruction and event counts under the stated fixed-width operation model.
+
+This algorithm is a design for a solver-backed validator, not a claim that a general SMT integration accompanies this book.
+The finite-domain implementation below evaluates the same equality obligation exhaustively for its small examples.
+It has no unknown solver result because it enumerates every member of an explicitly bounded domain.
+Applying its conclusion to a wider integer type requires a new proof or enumeration, not a change to the report heading.
+
+\section{Work the precondition, not just the identity}
+\label{sec:ch47-worked}
+
+For the doubling rewrite, the two formulas are
+\[
+  O_S(x)=\operatorname{return}((2x)\bmod256,\epsilon),\qquad
+  O_T(x)=\operatorname{return}((x+x)\bmod256,\epsilon).
+\]
+They agree by the distributive definition of multiplication by two over integers followed by the same reduction.
+At $x=137$, both return $18$, because $274=256+18$.
+No no-overflow premise is necessary for this wrapping language.
+
+For the comparison rewrite, $x=255$ gives a counterexample and every $x<255$ satisfies the proposed identity.
+Thus $P(x)\equiv x<255$ is sufficient.
+It is also necessary if the replacement is the constant true over the entire byte domain.
+A range analysis may establish $P$ at one program point, but that proof belongs to that point and program revision.
+If an earlier transformation introduces a new predecessor carrying $255$, the old range fact no longer justifies the replacement.
+The validator must either derive $P$ again or verify an analysis certificate against the changed graph.
+
+For the hoist, define $c\in\{0,1\}$ and $d\in\{0,\ldots,255\}$.
+The source returns $18/d$ if $c=1$, trapping if the divisor is zero, and returns $0$ otherwise.
+The target evaluates $18/d$ first and then chooses between that value and zero.
+At $(c,d)=(0,0)$ their observations differ.
+On $c=1$, both evaluate the division; on $d\neq0$, moving this pure, nontrapping division cannot create an event or trap in our fragment.
+The exact validity region for this particular rewrite is therefore
+\[
+  P(c,d)\equiv(c=1)\lor(d\neq0).
+\]
+This is more precise than requiring $d\neq0$ unconditionally.
+An implementation may choose that stronger precondition because its analysis can establish it cheaply.
+Rejecting a rewrite when the sufficient condition is unknown is preferable to silently treating unknown as true.
+
+Table~\ref{tab:ch47-finite-results} reports the finite checks performed by the accompanying C11 program.
+The empty event trace is fixed in these examples; a pass that moves effects requires a richer observation comparator.
+
+\begin{table}[htbp]
+\centering
+\caption{Exhaustive checks distinguish unconditional identities from guarded rewrite permissions.}
+\label{tab:ch47-finite-results}
+\begin{tabular}{p{0.42\linewidth}rrp{0.24\linewidth}}
+\toprule
+Rewrite & Inputs & Mismatches & First counterexample \\
+\midrule
+Wrapping doubling to addition & 256 & 0 & None \\
+Unsigned successor comparison to true & 256 & 1 & $x=255$ \\
+Hoist conditional division & 512 & 1 & $c=0,d=0$ \\
+Hoist under $(c=1)\lor(d\neq0)$ & 511 & 0 & None \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The implementation in \path{example-code/translation-checks/} keeps source and target evaluation functions separate and compares tagged outcomes.
+It enumerates both the candidate's full domain and the guarded subset, asserting the exact mismatch counts.
+It checks the derivation above rather than supplying evidence about a production compiler or an arbitrary transformation language.
+Chapter~\ref{ch:testing-validating-compilers} explains how to retain such witnesses as regression tests.
+
+\section{Loops require a relation between executions}
+\label{sec:ch47-simulation}
+
+Instruction-by-instruction equality fails for transformations that change control structure.
+Unrolling one loop iteration into two source iterations changes the number of loop-header visits.
+A \term{simulation relation} can instead associate states at selected semantic boundaries.
+It relates values, memory, and control positions that represent the same progress, rather than demanding equal program counters.
+Figure~\ref{fig:ch47-cutpoints} illustrates the grouping.
+
+\input{figures/validation-cutpoints}
+
+For a concrete example, let the source sum $0+1+\cdots+(n-1)$ with mathematical integers, initial $i=s=0$, and fixed nonnegative $n$.
+Its step executes $s\gets s+i$ followed by $i\gets i+1$ whenever $i<n$.
+The target uses an unrolled step only when $j+1<n$:
+\[
+  t\gets t+j+(j+1),\qquad j\gets j+2.
+\]
+After that loop, a scalar cleanup step runs if $j<n$.
+At paired cutpoints use $R(i,s,j,t)\equiv i=j\land s=t$.
+One unrolled target step changes $t$ to $t+2j+1$ and $j$ to $j+2$.
+Two source steps change $s$ to $s+i+(i+1)$ and $i$ to $i+2$.
+Substituting $i=j,s=t$ proves $R$ at the next paired point.
+The guard $j+1<n$ ensures both source steps are enabled.
+The cleanup step matches one source step, and both exits imply $i=j=n$ and $s=t$.
+
+For $n=5$, the paired states $(i,s)=(j,t)$ are $(0,0)$, $(2,1)$, $(4,6)$, then $(5,10)$ after cleanup.
+The source also visits $(1,0)$ and $(3,3)$ between the paired states.
+Those intermediate control points are deliberately absent from the relation; matching them to arbitrary target headers would create false obligations.
+The C lab checks both executions at every actual paired boundary for $0\leq n\leq64$, alongside the mathematical proof just given.
+That finite test range is a bug check, not the reason the unbounded mathematical theorem holds.
+
+Stuttering, where one side takes internal steps while the other stays at a boundary, needs a progress argument if termination or infinite observations matter.
+Without one, a target that loops forever taking unobservable steps might appear to match a source that returns immediately.
+Here $n-j$ is a nonnegative ranking expression at each enabled target loop step and decreases by two, or by one in cleanup.
+The source ranking expression $n-i$ decreases by one.
+Both terminate for finite nonnegative $n$, so equality at exits yields equality of their results.
+For fixed-width counters the guard and arithmetic require additional overflow checks; this mathematical proof alone cannot justify a machine-word loop rewrite.
+
+\section{Check analysis certificates independently}
+\label{sec:ch47-certificates}
+
+An optimizer often already has facts that could make validation cheaper.
+It may know a loop invariant, a range bound, or that a pointer targets one object.
+Treat these facts as a candidate certificate and verify their semantic obligations.
+Computing an invariant can be expensive and heuristic; checking a proposed invariant can be a finite set of implication queries.
+This separation resembles the distinction between discovering a proof and checking one.
+
+Let $I_B$ be a state predicate proposed at entry to block $B$, and let $T_e(\sigma,\sigma')$ encode the semantics of an edge including its block execution and guard.
+An entry obligation requires the initial-state predicate to imply $I_{\Entry}$.
+Each edge requires
+\[
+  I_B(\sigma)\land T_{B\to C}(\sigma,\sigma')
+       \Longrightarrow I_C(\sigma').
+\]
+A use of the certificate additionally requires $I_B$ to imply the specific safety or rewrite precondition at the point where it is used.
+If that point is inside $B$, compose the transfer of the preceding instructions before checking the precondition.
+An invariant at block entry does not automatically survive every assignment in the block.
+
+Algorithm~\ref{alg:ch47-check-certificate} checks the entry and consecution obligations for a fixed graph.
+All implication queries are discharged by asking whether the antecedent and the negation of the consequent are satisfiable.
+
+\begin{algorithm}[htbp]
+\caption{Check a proposed invariant map before trusting its clients.}
+\label{alg:ch47-check-certificate}
+\begin{pseudocode}
+\Require CFG with exact edge relations $T_e$, initial predicate $Init$, proposed predicates $I_B$
+\Ensure certificate accepted only if initialization and every edge preserve it
+\State require \Call{Solve}{$Init\land\neg I_{\Entry}$} to return UNSAT
+\ForAll{edges $e=(B,C)$}
+  \State $q\gets I_B(\sigma)\land T_e(\sigma,\sigma')\land\neg I_C(\sigma')$
+  \State require \Call{Solve}{$q$} to return UNSAT
+\EndFor
+\State on any SAT, UNKNOWN, unsupported encoding, or resource failure, reject the certificate
+\State \Return accepted for this CFG and these semantic parameters
+\end{pseudocode}
+\end{algorithm}
+
+Induction on finite path length proves that every reachable entry state satisfies its block predicate once all obligations hold.
+This is a safety invariant, not a termination theorem.
+The map containing false at every block would pass many edge implications vacuously, but the initialization obligation rejects it whenever initial states exist.
+The map containing true everywhere is inductive yet may imply no useful client precondition.
+Both checks, initialization and client implication, are essential.
+
+For $E$ CFG edges this validator asks $E+1$ consecution and initialization queries, followed by the client's implication queries.
+The formula-construction and solver costs depend on the predicates and transfer encodings; counting queries alone is not a running-time bound.
+Cache only checked obligations keyed by IR revision, semantic configuration, certificate, and relevant environment assumptions.
+Changing the graph, arithmetic width, alias model, or call summary changes what was proved.
+
+\section{A dataflow query as a model-checking problem}
+\label{sec:ch47-dataflow-query}
+
+Some compiler analyses can themselves be checked against a small state-space formulation.
+Fix one variable $v$ and view CFG blocks as abstract states.
+Label a block $U$ when it uses the incoming value of $v$ before redefining it, and label it $T$ when it contains no definition of $v$.
+The incoming value is live at $B$ exactly when a finite CFG path reaches a $U$ block and every preceding block on that path is $T$.
+For this abstract graph, that is the CTL property $E[\mathit{transparent}_v\mathbin{\mathrm{U}}\mathit{use}_v]$, using existential strong until and spelling out the two atomic labels.
+The corresponding least-fixed-point equation is
+\[
+  L=\mu X.\bigl(U\cup(T\cap\operatorname{Pre}_{\exists}(X))\bigr).
+\]
+Here $U$ and $T$ also denote their sets of labeled blocks, and $\mu$ selects the least fixed point.
+This is the usual backward may-liveness equation for one variable, expressed as a reachability property with a path restriction.
+
+Take edges $e\to u$, $e\to k$, $u\to r$, and $k\to r$.
+Block $u$ reads $v$, block $k$ assigns a fresh value to $v$, and block $r$ returns $v$.
+Block $e$ branches without reading or defining $v$.
+Then $U=\{u,r\}$ and $T=\{e,u,r\}$.
+Starting with the empty set gives successive approximations $\emptyset$, $\{u,r\}$, and $\{e,u,r\}$, after which nothing changes.
+The old value is not live at $k$: the read at $r$ sees the new definition.
+It is live at $e$ because the path through $u$ uses it before any redefinition.
+
+This formulation gives an independent oracle for a bit-vector liveness implementation on small graphs.
+It is exact for the CFG path abstraction, not necessarily for concrete executions: an infeasible branch can still supply a CFG path.
+Consequently, a positive answer is conservative evidence of possible use, not a concrete input that executes that use.
+A negative answer permits discarding the old value only with respect to the modeled uses; exceptional edges, deoptimization recovery, and other observable consumers must also be represented.
+This example connects dataflow and model checking through their shared fixed-point equations without claiming that every dataflow framework is reducible to this particular CTL formula~\cite{nielson-1999-principles,baier-2008-model-checking}.
+Schmidt develops the broader relationship using abstract interpretations and modal fixed-point properties~\cite{schmidt-1998-dataflow-model-checking}.
+
+\section{Implementation boundaries that affect trust}
+\label{sec:ch47-trust}
+
+The validator still depends on a trusted semantic encoder and a solver or proof checker.
+An UNSAT certificate can reduce reliance on the solver's search implementation when a separate checker validates it, but only for the supported proof language and theories.
+It does not establish that the encoder correctly modeled the input IR.
+Cross-check encoding rules with an independent interpreter on small domains, including division, shifts, exceptions, and conditional execution.
+Keep those tests separate from optimization tests so a shared mistake is easier to locate.
+
+Memory adds distinctions absent from scalar identities.
+Two loads from the same symbolic address need not return the same value if an intervening store can alias it.
+A call may modify reachable memory even when its result is unused.
+Removing a volatile read can change the event trace while leaving the returned integer unchanged.
+Do not import an unproved alias assertion from the optimizer into the validation formula; establish it from the modeled memory or verify its certificate.
+Chapter~\ref{ch:interprocedural-heap-analysis} supplies the abstractions on which such certificates can be based.
+
+Concurrency requires an explicit memory model and matching observations, not merely exploring all sequential interleavings of source instructions.
+An allowed hardware behavior under a relaxed memory model need not appear in that sequentially consistent model.
+The finite-state techniques of Chapter~\ref{ch:transition-temporal-properties} still apply to a chosen finite transition system, but the transition relation must encode the intended semantics.
+Unsupported concurrency or memory operations should produce an explicit unsupported result, not silently weaken the property.
+
+Production use also needs a failure policy.
+Retain an unmodified region or a valid baseline artifact until its replacement passes validation.
+A timeout records the candidate, precondition, semantic version, and solver status; it need not stop compilation if the original code is available.
+A replayed counterexample records the input and both observations and becomes a regression case.
+These policies keep validation failures diagnosable while allowing the optimizer's search to remain heuristic.
+
+\section{Exercises}
+\label{sec:ch47-exercises}
+
+\begin{enumerate}
+\item For the byte-domain rewrite $((x+1)\bmod256)>x\rightsquigarrow\operatorname{true}$, give the exact set of valid inputs, the sole counterexample, and a sufficient interval fact at the use site.\label{ex:ch47-byte-guard}
+\item Change the conditional-division example to emit an event before the division in the true arm, and hoist both operations before the branch. Describe a counterexample with nonzero $d$ that a returned-value-only comparator misses.\label{ex:ch47-event-hoist}
+\item Repeat the paired-loop trace for $n=6$. List all paired states and state why the cleanup does not execute. Explain which bound in the proof would fail if unsigned subtraction wrapped before the loop test.\label{ex:ch47-loop-pairs}
+\item A certificate has $I_B\equiv\operatorname{true}$ for all blocks. Which obligations of Algorithm~\ref{alg:ch47-check-certificate} can it satisfy, and why does this not justify division-check elimination?\label{ex:ch47-vacuous-certificate}
+\end{enumerate}
+Answers and checks are in \path{example-code/translation-checks/}.
+
+\section{Further reading}
+\label{sec:ch47-reading}
+
+Pnueli, Siegel, and Singerman formulate translation validation as checking the result of a translation rather than proving the translating implementation~\cite{pnueli-1998-validation}.
+Baier and Katoen develop simulation, trace properties, and abstraction, which supply the vocabulary needed to state exactly what a state-space check preserves~\cite{baier-2008-model-checking}.
+Nielson, Nielson, and Hankin connect analysis frameworks to their semantic justification; use that distinction when deciding which inferred facts are safe to turn into rewrite preconditions~\cite{nielson-1999-principles}.
+Huth and Ryan explain logical validity, program reasoning, and model checking with explicit proof obligations~\cite{huth-2004-logic}.

@@ -1,0 +1,382 @@
+\chapter{Transition Systems and Temporal Properties}
+\label{ch:transition-temporal-properties}
+
+A code cache can contain correct machine instructions and still execute freed memory.
+The missing invariant concerns the order of publication, invalidation, and reclamation.
+Likewise, a deoptimization routine can reconstruct each value correctly yet resume execution before all required values exist.
+These failures concern sequences of states, including choices made by other runtime components.
+A transition model makes those choices explicit; a temporal property states which sequences are permitted.
+The resulting proof concerns the model, so deciding what a state remembers is as important as choosing a checking algorithm.
+
+\section{A state records enough to predict the next step}
+\label{sec:ch45-state-model}
+
+Consider one compiled code-cache entry and one possible user of it.
+We abstract away instruction bytes and retain seven protocol states.
+State $c_0$ is empty; $c_1$ is emitting code; $c_2$ has code and reconstruction metadata ready; $c_3$ is published and pinned by a user; $c_4$ is unpublished but still pinned; $c_5$ is reclaimed; and $c_6$ is reclaimed while a user still holds a pin.
+A pin represents a claim that prevents reclamation.
+We model one compilation and one use, with no reuse of the entry after reclamation.
+The model therefore says nothing yet about address reuse, generation counters, or two simultaneous users.
+
+Figure~\ref{fig:ch45-cache} gives the transitions.
+The self-loop at $c_1$ represents an emission step that has not finished; the loops at $c_3$ and $c_4$ represent a user that has not released its pin.
+In this deliberately small model, publication and acquisition of the first pin form one atomic step.
+A model of the actual publication protocol would separate these events if another thread could intervene.
+The dashed edge represents a proposed, faulty reclamation rule, and is absent from the baseline model.
+
+\begin{figure}[tbp]
+\centering
+\input{figures/model-cache-protocol.tex}
+\caption{The baseline cache protocol waits for the last pin; the dashed candidate edge reclaims too early.}
+\label{fig:ch45-cache}
+\end{figure}
+
+Formally, a finite \term{Kripke structure} is $K=(S,I,R,AP,L)$.
+The finite, nonempty set $S$ contains states; the nonempty subset $I\subseteq S$ contains allowed initial states; $R\subseteq S\times S$ is the transition relation; $AP$ is a finite set of atomic propositions; and $L:S\to 2^{AP}$ gives the propositions true at each state.
+We require $R$ to be total: every state has at least one successor.
+Section~\ref{sec:ch45-deadlocks} explains how to satisfy that requirement without silently treating a stuck execution as successful termination.
+An edge represents one modeled step, not a unit of physical time.
+
+An \term{atomic proposition} is an observable Boolean fact, such as $\mathit{pinned}$ or $\mathit{error}$.
+It is not an arbitrary name attached to an edge.
+For this example $I=\{c_0\}$, and Table~\ref{tab:ch45-cache-labels} computes the relevant labels.
+The proposition $\mathit{freed}$ distinguishes completed reclamation from the initial absence of storage.
+In the error state, $\mathit{pinned}$ remains true because the outstanding user's claim is exactly what makes reclamation invalid.
+
+\begin{table}[tbp]
+\centering
+\caption{State labels expose the difference between absence of code and premature reclamation.}
+\label{tab:ch45-cache-labels}
+\begin{tabular}{lrrrrrr}
+\toprule
+State & resident & metadata & published & pinned & freed & error \\
+\midrule
+$c_0$ & 0 & 0 & 0 & 0 & 0 & 0 \\
+$c_1$ & 1 & 0 & 0 & 0 & 0 & 0 \\
+$c_2$ & 1 & 1 & 0 & 0 & 0 & 0 \\
+$c_3$ & 1 & 1 & 1 & 1 & 0 & 0 \\
+$c_4$ & 1 & 1 & 0 & 1 & 0 & 0 \\
+$c_5$ & 0 & 0 & 0 & 0 & 1 & 0 \\
+$c_6$ & 0 & 0 & 0 & 1 & 1 & 1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A CFG vertex is usually a program point shared by many executions.
+A transition-system state can instead contain $(\mathit{pc},\mathit{store},\mathit{phase},\mathit{pending})$.
+Two executions at the same instruction with different pin counts are distinct states if their legal next steps differ.
+Conversely, several machine instructions may be summarized by one edge if the abstraction justifies that summary.
+Calling a CFG a transition system does not supply the missing store or prove that an infeasible CFG path is executable.
+
+Finite source code does not imply a finite state space.
+Unbounded heaps, mathematical integers, recursion, and unbounded thread creation all require bounds or abstraction.
+Fixed-width values and a fixed memory bound give a finite model, but their Cartesian product may still be enormous.
+The seven cache states are a protocol abstraction, not an enumeration of the implementation's bytes.
+Chapter~\ref{ch:model-checking-algorithms} states the simulation obligation that connects such an abstraction to a concrete system.
+
+The initial set is part of the specification.
+Checking only $c_0$ proves a cold-start property; adding $c_4$ permits a snapshot taken during invalidation.
+An unconstrained initial pin or metadata bit can introduce counterexamples before the first modeled instruction.
+Conversely, an initial invariant that already assumes the property being checked can hide precisely the initialization bug of interest.
+
+\section{Termination, errors, and total transitions}
+\label{sec:ch45-deadlocks}
+
+With a total relation, a \term{path} is an infinite sequence $\pi=s_0s_1\ldots$ satisfying $(s_i,s_{i+1})\in R$ for every $i\geq0$.
+An initial path starts in $I$.
+A finite execution that halts is represented by repeating its final state forever.
+This convention lets one temporal semantics describe both termination and continued execution.
+It does not assert that the runtime continues executing instructions after return.
+
+We distinguish three terminal outcomes before adding loops: normal halt, explicit error, and unexpected stuckness.
+For a raw successorless state, Algorithm~\ref{alg:ch45-totalize} records the outcome and adds the loop.
+Existing labels are retained.
+The input contract requires normal and error terminals to have no outgoing edges; a state with a real enabled transition is not a terminal merely because its name contains \code{done}.
+For the cache, $c_5$ is a normal terminal and $c_6$ is an error terminal.
+
+\begin{algorithm}[tbp]
+\caption{Totalize a finite model while retaining terminal outcomes.}
+\label{alg:ch45-totalize}
+\begin{pseudocode}
+\Require raw finite model $(S,I,R_0,AP,L)$, adjacency lists, terminal classification
+\Ensure total $R$ and labels distinguishing halt, error, and deadlock
+\State $R\gets R_0$
+\ForAll{$s\in S$}
+  \If{$\Succ_{R_0}(s)=\emptyset$}
+    \If{$s$ is classified as normal termination}
+      \State $L(s)\gets L(s)\cup\{\mathit{halt}\}$
+    \ElsIf{$s$ is classified as explicit failure}
+      \State $L(s)\gets L(s)\cup\{\mathit{error}\}$
+    \Else
+      \State $L(s)\gets L(s)\cup\{\mathit{deadlock},\mathit{error}\}$
+    \EndIf
+    \State $R\gets R\cup\{(s,s)\}$
+  \EndIf
+\EndFor
+\State \Return $(S,I,R,AP\cup\{\mathit{halt},\mathit{error},\mathit{deadlock}\},L)$
+\end{pseudocode}
+\end{algorithm}
+
+Scanning an adjacency-list representation costs $O(|S|+|R_0|)$ time and adds at most $|S|$ edges.
+If successor counts are already available, the additional scan costs $O(|S|)$.
+Label insertion is constant time for these three reserved Boolean flags.
+The transformation does not change which old states are reachable, but it does specify the meaning of temporal statements after termination.
+For example, $\mathbf{X}\mathit{halt}$ is true at a normal terminal and false at an error terminal lacking $\mathit{halt}$.
+The property $\mathbf{F}\mathit{halt}$ rejects both a genuine infinite execution without halt and an error terminal that repeats forever.
+
+Without totalization, a universal next operator at a dead end might be defined vacuously true, while an existential next operator is false.
+Different finite-trace logics make other choices.
+Neither interpretation should enter an implementation accidentally through an empty successor loop.
+All temporal formulas and algorithms in these two chapters use the totalized, infinite-path convention unless a fairness restriction is explicitly stated.
+
+\section{Safety, progress, and the meaning of a counterexample}
+\label{sec:ch45-safety-liveness}
+
+The cache invariant $\mathit{pinned}\Rightarrow\mathit{resident}$ holds in every baseline reachable state.
+Adding $c_4\to c_6$ gives the finite witness
+\[
+ c_0,c_1,c_2,c_3,c_4,c_6.
+\]
+At its final state, the implication is false; no continuation can undo the fact that it was false there.
+This is the characteristic shape of a \term{safety property}: each violating infinite trace has a finite prefix whose every infinite extension violates the property.
+The definition concerns the property over labeled traces, not merely whether a particular checker prints a finite diagnostic.
+
+A \term{liveness property} permits every finite trace prefix to be extended to a satisfying infinite trace.
+For example, a request must eventually receive a response.
+An arbitrary finite delay alone does not establish a violation, because a response can still occur later.
+The cache requirement that entry into $c_4$ eventually leads to $c_5$ fails on
+\[
+ c_0c_1c_2c_3(c_4)^\omega,
+\]
+where $\omega$ means infinite repetition.
+There is no finite deadline in the requirement.
+An implementation that reports failure merely after a large number of iterations has checked a bounded-response property instead.
+
+Safety and liveness are semantic classifications, not a list of keywords.
+Properties can combine them.
+A requirement that reclamation is safe and eventually happens has both an invariant part and a progress part.
+Moreover, the model can make a liveness failure inevitable after a finite prefix, for example by entering an absorbing error state.
+That observation does not turn the unrestricted trace property \enquote{eventually halt} into a safety property.
+It uses information about which extensions the particular model allows.
+
+Not all safety properties are state invariants over the original state variables.
+Suppose a deoptimization protocol emits mutually exclusive events $\mathit{fail}$, $\mathit{rebuild}$, and $\mathit{commit}$, with $\mathit{none}$ for steps without an event.
+We want to forbid a commit after a guard failure until a reconstruction event has occurred.
+A three-state monitor remembers the relevant history: $C$ means clear, $P$ means pending reconstruction, and $B$ means violation.
+From either nonbad state, a failure enters $P$ and a reconstruction enters $C$; a commit from $P$ enters $B$; all other events preserve the state.
+State $B$ is absorbing.
+The event sequence $\mathit{fail},\mathit{none},\mathit{commit}$ yields monitor states $P,P,B$.
+The sequence $\mathit{fail},\mathit{rebuild},\mathit{commit}$ yields $P,C,C$.
+
+Algorithm~\ref{alg:ch45-monitor} constructs the product with this deterministic monitor.
+The initial states are just before the first event, and each transition carries one event $e(s,t)$.
+For ordinary state-labeled Kripke input, an event can be stored in the target state; if two incoming transitions have different events, split that state or retain an explicit event component.
+The product is again a state model, with $\mathit{violation}$ labeling states whose monitor component is $B$.
+
+\begin{algorithm}[tbp]
+\caption{Turn a finite-history deoptimization obligation into reachability.}
+\label{alg:ch45-monitor}
+\begin{pseudocode}
+\Require total finite model $(S,I,R)$, edge events $e$, monitor $Q=\{C,P,B\}$ and $\delta$
+\Ensure reachable product states and edges, initialized before the first event
+\State $D\gets\{(s,C)\mid s\in I\}$; $W\gets$ queue containing $D$; $R_P\gets\emptyset$
+\While{$W\neq\emptyset$}
+  \State remove $(s,q)$ from $W$
+  \ForAll{$t\in\Succ(s)$}
+    \State $q'\gets\delta(q,e(s,t))$; $R_P\gets R_P\cup\{((s,q),(t,q'))\}$
+    \If{$(t,q')\notin D$}
+      \State add $(t,q')$ to $D$ and $W$
+    \EndIf
+  \EndFor
+\EndWhile
+\State \Return $D,R_P$, with bad states $\{(s,B)\in D\}$
+\end{pseudocode}
+\end{algorithm}
+
+For a monitor with $|Q|$ states, the product has at most $|S||Q|$ states and $|R||Q|$ edges.
+With constant-time indexed membership and monitor transitions, construction takes $O(|Q|(|S|+|R|))$ time.
+The bound concerns this finite deterministic monitor, not translation of an arbitrary temporal formula.
+The invariant that the monitor component equals the fold of $\delta$ over the path's events proves that reaching $B$ is equivalent to violating the stated ordering rule.
+For multiple concurrent deoptimizations, one global pending bit is insufficient: a reconstruction for one activation must not clear another activation's obligation.
+The identity of the obligation belongs in the model.
+
+\section{Linear-time formulas quantify over complete paths}
+\label{sec:ch45-ltl}
+
+\term{Linear temporal logic} (LTL) describes one infinite path at a time.
+We write $\pi,i\models p$ when $p\in L(s_i)$.
+Boolean connectives have their ordinary meanings at position $i$.
+The temporal operators are defined by
+\begin{align*}
+ \pi,i\models\mathbf{X}\varphi
+ &\quad\Longleftrightarrow\quad \pi,i+1\models\varphi,\\
+ \pi,i\models\varphi\,\mathbf{U}\,\psi
+ &\quad\Longleftrightarrow\quad
+ \exists j\geq i:\ \pi,j\models\psi
+ \text{ and }\forall k\in[i,j):\pi,k\models\varphi.
+\end{align*}
+The until operator is \emph{strong}: the $\psi$ position must exist.
+The interval before it may be empty, so $\psi$ now is sufficient.
+Define $\mathbf{F}\varphi=\mathit{true}\,\mathbf{U}\,\varphi$ and $\mathbf{G}\varphi=\neg\mathbf{F}\neg\varphi$.
+Thus \enquote{eventually} includes the current position, and \enquote{always} includes it too.
+
+The model satisfies an LTL formula when \emph{every} initial path satisfies it:
+\[
+ K\models_{\mathrm{LTL}}\varphi
+ \quad\Longleftrightarrow\quad
+ \forall\pi\text{ starting in }I:\ \pi,0\models\varphi.
+\]
+Universal path quantification is the model-checking convention, not an operator that LTL permits us to insert inside a path formula.
+A single satisfying execution does not establish an LTL property of the model.
+
+For the baseline cache,
+\[
+ \mathbf{G}(\mathit{published}\Rightarrow\mathit{metadata})
+ \quad\text{and}\quad
+ \mathbf{G}(\mathit{pinned}\Rightarrow\mathit{resident})
+\]
+both hold by inspection of all reachable labels.
+The response property $\mathbf{G}(\mathit{draining}\Rightarrow\mathbf{F}\mathit{freed})$, where $\mathit{draining}$ labels only $c_4$, fails on the infinite waiting path above.
+By contrast, the stronger bounded rule $\mathbf{G}(\mathit{draining}\Rightarrow\mathbf{X}\mathit{freed})$ already fails on a single waiting step at $c_4$.
+The formulas ask different engineering questions.
+
+Atomicity affects formulas containing $\mathbf{X}$.
+Splitting publication into two steps changes what \enquote{next} means, even if it introduces no new observation beyond repeating a label.
+LTL without $\mathbf{X}$ is invariant under stuttering of labels, but this fact alone does not justify collapsing a concurrent protocol: the collapse must still preserve the relevant paths~\cite{baier-2008-model-checking}.
+In particular, hiding an intermediate state where published code lacks metadata hides the actual invariant violation rather than a harmless stutter.
+
+\section{Branching-time formulas retain choices at each state}
+\label{sec:ch45-ctl}
+
+A pass manager may always retain a route to a consistent analysis cache without guaranteeing that it ever takes that route.
+Figure~\ref{fig:ch45-pass} models this distinction.
+State $a$ begins a transformation, $b$ has invalidated analysis information and may retry, $c$ has rebuilt valid information, and $d$ has finished.
+The propositions $\mathit{valid}$ and $\mathit{done}$ label $\{c,d\}$ and $\{d\}$, respectively.
+The only initial state is $a$.
+
+\begin{figure}[tbp]
+\centering
+\input{figures/model-pass-choices.tex}
+\caption{A rebuild remains available at every retry, but the retry loop can postpone it forever.}
+\label{fig:ch45-pass}
+\end{figure}
+
+\term{Computation tree logic} (CTL) evaluates state formulas.
+Each temporal operator is paired with an existential path quantifier $\mathrm{E}$ or a universal path quantifier $\mathrm{A}$.
+For example, $s\models\mathrm{EX}\varphi$ means that some successor satisfies $\varphi$, while $s\models\mathrm{AX}\varphi$ means that every successor does.
+The formula $\mathrm{E}[\varphi\,\mathrm{U}\,\psi]$ requires one path with a future $\psi$ state and $\varphi$ at all preceding positions.
+The formula $\mathrm{EG}\varphi$ requires one path whose every state satisfies $\varphi$.
+The universal variants require the corresponding condition on every path from the state.
+The model satisfies a CTL formula when every state in $I$ satisfies it.
+
+Crucially, the operands of these operators are themselves state formulas, so path quantifiers can nest.
+The formula $\mathrm{AG}\,\mathrm{EF}\mathit{done}$ says that from every reachable state there exists a path to completion.
+It is true at $a$: from $b$ choose $c$, then $d$; from $c$ choose $d$; and at $d$ the eventual target is already true.
+But $\mathrm{AF}\mathit{done}$ is false at $a$, because $ab^\omega$ never completes.
+The existential choice inside $\mathrm{AG}\,\mathrm{EF}$ can be different at each visited state.
+It does not oblige the outer path to follow that choice.
+
+Table~\ref{tab:ch45-ctl-truth} records the complete calculation.
+For $\mathrm{EG}\neg\mathit{done}$, states $a$ and $b$ can reach and remain on the retry loop without seeing $d$; state $c$ must reach $d$ on its next step.
+For $\mathrm{AX}\mathit{valid}$, $b$ fails because one of its successors is $b$ itself.
+These are state-by-state truth values, not frequencies or probabilities.
+
+\begin{table}[tbp]
+\centering
+\caption{A path to completion exists everywhere, although completion is not inevitable everywhere.}
+\label{tab:ch45-ctl-truth}
+\begin{tabular}{lccccc}
+\toprule
+State & $\mathrm{EF}\mathit{done}$ & $\mathrm{AF}\mathit{done}$ & $\mathrm{AG}\,\mathrm{EF}\mathit{done}$ & $\mathrm{EG}\neg\mathit{done}$ & $\mathrm{AX}\mathit{valid}$ \\
+\midrule
+$a$ & T & F & T & T & F \\
+$b$ & T & F & T & T & F \\
+$c$ & T & T & T & F & T \\
+$d$ & T & T & T & F & T \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+LTL $\mathbf{F}\mathit{done}$ under universal model semantics agrees here with CTL $\mathrm{AF}\mathit{done}$.
+That agreement for one formula is not an equivalence of the logics.
+CTL can express the continuing availability of alternatives, as in $\mathrm{AG}\,\mathrm{EF}\mathit{done}$, which universal LTL cannot generally express.
+Conversely, LTL can express path properties such as eventual permanent stability, $\mathbf{F}\mathbf{G}p$, that have no equivalent CTL formula in general~\cite{huth-2004-logic}.
+Choose the logic to match the intended requirement rather than translating words by matching operator names.
+
+\section{Fairness is an assumption about allowed paths}
+\label{sec:ch45-fairness}
+
+The retry loop is a real behavior of the transition relation.
+We may exclude it only by stating a justified environment or scheduler assumption.
+A \term{fairness constraint} selects a subset of infinite paths; it does not delete an arbitrary edge or declare every infinite execution acceptable.
+For sets $J_1,\ldots,J_m\subseteq S$, a generalized B\"uchi fairness condition requires each $J_i$ to be visited infinitely often.
+Write $\mathcal{F}(\pi)$ for that condition.
+Fair LTL checking asks whether every initial path satisfying $\mathcal{F}$ satisfies the property.
+
+On the pass model, choose $J_1=\{c,d\}$.
+The path $ab^\omega$ is unfair, whereas $ab^nc d^\omega$ is fair for every finite $n\geq1$.
+Under this restriction, $\mathbf{F}\mathit{done}$ holds.
+The model has not acquired a finite upper bound on retries: the fair paths still permit arbitrarily large $n$.
+Because $c$ is followed by $d$ and $d$ repeats, this particular fairness condition says that the rebuild is eventually taken.
+It must be justified by the scheduler or by a separate progress argument; it cannot serve as an independent proof of the same progress obligation.
+
+For actions, \term{weak fairness} requires an action that remains continuously enabled from some point onward to occur infinitely often.
+Equivalently, it cannot remain enabled forever while being ignored forever.
+\term{Strong fairness} imposes the corresponding obligation when the action is enabled infinitely often, even if enabling is intermittent.
+If $\mathit{enabled}_a$ and $\mathit{taken}_a$ are encoded as observations with a consistent step convention, the respective conditions can be written
+\[
+ (\mathbf{F}\mathbf{G}\mathit{enabled}_a\Rightarrow\mathbf{G}\mathbf{F}\mathit{taken}_a),
+ \qquad
+ (\mathbf{G}\mathbf{F}\mathit{enabled}_a\Rightarrow\mathbf{G}\mathbf{F}\mathit{taken}_a).
+\]
+For a one-shot action, taking it may disable it permanently, making the antecedent false on the completed path.
+In the cache model the release action is continuously enabled while waiting at $c_4$.
+Weak fairness for release excludes $c_4^\omega$; it says nothing about a runtime in which the user can permanently block before release becomes enabled.
+
+Fair CTL also restricts its path quantifiers, including nested ones.
+An existential witness must have a fair infinite continuation, even when its until target is reached immediately.
+If a state has no fair continuation, universal fair-path formulas can become vacuously true there.
+A useful accompanying check is that every intended initial state has at least one fair continuation.
+The ordinary CTL algorithms in Chapter~\ref{ch:model-checking-algorithms} do not silently apply these restrictions.
+
+For compiler engineering, record the state variables, step boundaries, initial condition, terminal classification, and fairness assumptions beside the property.
+A successful check of the seven-state cache protocol does not establish a memory-ordering theorem for a lock-free implementation.
+A successful fair progress check does not establish that the operating system schedules a blocked worker.
+These are boundaries of the mathematical claim, and they identify the additional models or proofs needed before using the result to change an optimizer or runtime.
+
+\section{Exercises}
+\label{sec:ch45-exercises}
+
+\begin{enumerate}
+\item\label{ex:ch45-cache-witness}
+Add only the dashed edge $c_4\to c_6$ to the cache model.
+Find a shortest violation of $\mathbf{G}(\mathit{pinned}\Rightarrow\mathit{resident})$, count its transitions, and decide whether the publication-metadata invariant still holds.
+
+\item\label{ex:ch45-terminal-policy}
+A raw model has initial state $u$, edges $u\to h$ and $u\to z$, and no other edges.
+State $h$ is a normal terminal; $z$ is unclassified stuckness.
+Apply Algorithm~\ref{alg:ch45-totalize} and evaluate $\mathrm{EF}\mathit{halt}$, $\mathrm{AF}\mathit{halt}$, and $\mathrm{AG}\neg\mathit{error}$ at $u$.
+
+\item\label{ex:ch45-monitor-history}
+Run the deoptimization monitor on $\mathit{fail},\mathit{rebuild},\mathit{fail},\mathit{commit}$.
+Explain why a Boolean flag meaning \enquote{some reconstruction has occurred} is insufficient.
+Does adding the event $\mathit{rebuild}$ after the final commit repair this trace?
+
+\item\label{ex:ch45-branching}
+In the pass model add a new state $e$ with only $e\to e$, add $b\to e$, and label $e$ with neither $\mathit{done}$ nor $\mathit{valid}$.
+Compute $\mathrm{EF}\mathit{done}$ and $\mathrm{AG}\,\mathrm{EF}\mathit{done}$ at all five states without fairness.
+Explain the different effects of an optional failed route and a permanently lost route to completion.
+
+\item\label{ex:ch45-fairness-gap}
+An infinite execution alternates states $u,v,u,v,\ldots$.
+An action $a$ is enabled exactly at $u$ and is never taken.
+Does the execution satisfy weak fairness for $a$? Strong fairness?
+Explain why the answer changes if $a$ is enabled at both states.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch45-reading}
+
+Baier and Katoen develop transition-system semantics, safety and liveness, and fairness with careful separation of the different assumptions~\cite{baier-2008-model-checking}.
+Huth and Ryan give a complementary treatment of LTL and CTL that is useful when checking the scope of nested path quantifiers~\cite{huth-2004-logic}.
+The \emph{Handbook of Model Checking} connects these semantic choices to automata, symbolic representations, and verification tools~\cite{clarke-2018-handbook}.

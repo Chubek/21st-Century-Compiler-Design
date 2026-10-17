@@ -1,0 +1,770 @@
+2009 12th Euromicro Conference on Digital System Design / Architectures, Methods and Tools
+
+Iterative Algorithm for Compound Instruction Selection with Register
+Coalescing
+Minwook Ahn, Jonghee M. Youn, Youngkyu Choi, Doosan Cho, Yunheung Paek
+School of Electrical Engineering and Computer Science
+Seoul National University
+Seoul, Korea
+{mwahn,jhyoun,ykchoi,dscho}@optimizer.snu.ac.kr, ypaek@snu.ac.kr
+has become a common practice to rely on hand-crafted
+code in order to fully exploit these instructions.
+More recently, several efforts have been made
+[2][3][4][5][12] to address this complex problem, bringing
+some convincing promise of their approaches. Basically,
+they aim to tackle the problem by dealing mainly with
+instruction selection, a crucial phase of code generation.
+However, according to our observation, some decision
+taken at the instruction selection phase to choose a
+compound instruction is adversely affected by the
+techniques applied later at the register allocation phase,
+which usually causes detrimental impact on the code
+quality at the end. Particularly in our study, we will focus
+investigation on the effect of register coalescing [8]. The
+goal of register coalescing is to simplify register allocation
+by reducing the number of temporaries in the code. This
+can be attained by, whenever possible, removing redundant
+temporaries used in the operands of move (or copy)
+instructions. In this process, it also helps the compiler to
+discover a useless move instruction whose operands are all
+assigned to the same register. Upon detecting a useless
+move, the compiler can get rid of it immediately for most
+normal cases such as when the code has no compound
+instructions. However, complexity arises when the move
+appears in the code as a member of a compound instruction.
+This nullified compound instruction (NCI) with a useless
+move is actually a basic instruction with only a single
+operation, undermining the potential performance gains
+that could be earned via the other compound instruction
+which is selected instead of it during instruction selection
+and is not nullified. In this work, we propose an approach
+based on an iterative algorithm in which the discovery of a
+useless move in a compound instruction after coalescing is
+iteratively reported as a feedback to the instruction selector
+in order to find an alternative compound instruction.
+The paper is structured as follows. Section II first relates
+our work with others’. Section III explains the instruction
+selection algorithm for compound instructions that we used
+in this work. Section IV discusses how this algorithm is
+extended to collaborate with register coalescing, iteratively
+improving the code quality. Section V shows the
+experimental results and Section VI concludes.
+
+ABSTRACT—A compound instruction, encoding several ALU or
+memory operations within an instruction word, has been regarded
+as an efficient way of improving performance. In the compiler for
+embedded processors, the code generation algorithm for
+compound instructions has been built by dealing mainly with
+instruction selection which is a crucial phase of code generation.
+In this paper, we propose an iterative code generation algorithm
+for minimizing the detrimental impact of register coalescing that
+is applied to the code with compound instructions generated
+earlier from the instruction selection phase.
+Keywords-compound instruction; register coalescing; nullified
+compound instructions
+
+I.
+
+INTRODUCTION
+
+Intellectual-property (IP) cores embedded in Systemon-a-Chip mostly suffer from severe design constraints on
+performance, energy and storage. At the same time, they
+are also required to be programmable in order to ensure
+reusability towards different applications. To meet all these
+design challenges, they are often implemented in the form
+of application specific instruction-set processors (ASIPs).
+The instructions of ASIP are normally compound
+instructions [1], such as add-mult and shift-move, each of
+which encodes more than one ALU or memory operations.
+Their main advantage for embedded processor cores is code
+size reduction in that several operations are packed inside
+one instruction word. In addition, they are usually designed
+to perform their internal operations in sequence or parallel
+within one machine cycle. It is therefore more efficient to
+execute one compound instruction for a set of operations
+than to separately execute multiple instructions for them
+since we can avoid the extra sequencing overhead needed
+for multi-cycle instructions. Therefore, if compound
+instructions are fully utilized, the running time reduction
+must be substantial.
+However, such advantages of compound instructions
+come with a downside: they complicate the compiler’s code
+generation. Recognizing parallel operations on Intermediate
+Representation (IR) for a compound instruction is in fact
+tantamount to solving a general pattern matching problem
+on graphs, which is of NP-complete complexity [3]. This
+indicates that even with a modest number of compound
+instructions added, the compilation time will increase
+drastically so that even after a long exhaustive search, the
+compiler may not find an optimal code. Since many
+embedded processors are heavily armed with compound
+instructions, their code quality produced by conventional
+tree parsing [6] has been less than acceptable, and thus it
+
+978-0-7695-3782-5/09 $25.00 © 2009 IEEE
+DOI 10.1109/DSD.2009.144
+
+II.
+
+RELATED WORK AND MOTIVATION
+
+Like others for NP-hard problems, the existing
+techniques for compound instruction selection, noted in the
+previous sections seek to attack the problem either by using
+fast algorithms for approximate solutions, or by resorting to
+
+513
+
+expensive ones for better solutions. In [4], Leupers solves
+this problem by integer linear programming (ILP).
+Although the ILP-based algorithm may run up to
+exponential time, this approach exhibits good performance
+increase for several kernel codes. In [5], Leupers, et al. try
+to solve a similar problem with a different, yet still
+expensive algorithm based on constraint logic
+programming. They also demonstrate that their algorithm
+can generate optimal code from data flow graphs. However,
+the goal of these two approaches is somewhat different
+from ours since both target SIMD-style compound
+instructions. We consider a SIMD instruction to be a
+limited form of compound instructions in that it is just a
+collection of parallel homogeneous operations while
+general compound instructions which we target here allow
+heterogeneous operations inside.
+The techniques for general compound instruction
+selection can be found in [3], [2] and [12]. In the first work,
+they took an ILP-based approach, so again their technique
+is expensive as the ones listed above. In an effort to
+alleviate the time complexity of other techniques,
+Scharwaechter, et al. proposed a more practical approach
+[2]. In their work, they solve an optimization problem of
+generating compound instructions with parallel operations,
+called the multi-output instructions (MOIs). Although this
+is an NP-hard problem, they circumvent the complexity
+with a polynomial time algorithm based on a heuristic [9],
+and successfully compute approximated solutions. Despite
+such approximation of optimal solutions, they claim to
+acquire quite encouraging results in an experiment with
+various benchmarks. Dietmar et. al. proposed a similar
+approach for the near optimal instruction selection on a
+graph, which is based on Partitioned Boolean Quadratic
+Problem (PBQP) [12]. In some special cases including
+pre/post increment addressing modes, div-mod instructions
+and SIMD extensions frequently found in embedded
+systems, they show a good performance increase in several
+benchmark codes.
+III.
+
+the parser visits each node of an IR tree in a bottom-up
+manner, applying dynamic programming to compute the
+costs of all rules for the instruction patterns applicable to
+the node. Then the covering phase follows: from the root,
+the parser walks down the tree choosing a derivation with
+minimal cost that covers the IR tree. In order to employ
+compound instructions, cburg does two modifications to
+this conventional instruction selection algorithm. One is
+applied to the code-generator generation stage, and the
+other to the code generation stage.
+
+Figure 1 the compound instruction selection process
+
+COMPOUND INSTRUCTION SELECTION
+
+For the generation of the compound instruction in our
+compiler, we choose the algorithm in [2] and implement it
+in our compiler. The major advantage of the algorithm in [2]
+over the ILP-based algorithms is its fast polynomial time
+complexity. This advantage in fact has been pivotal for our
+iterative compilation infrastructure because if the
+exponential time algorithm should be used for instruction
+selection, the compilation time would increase so
+enormously while iterating between instruction selection
+and register allocation until NCIs are all cleared.
+At the core of the compound instruction selection
+algorithm, there is a code generator-generator, called cburg,
+which automatically builds a code generator from a target
+processor description written in a tree grammar. cburg
+produces a code generator that can allow the user to express
+MOIs as well as other ordinary instructions. Basically it
+produces a code generator which uses the conventional tree
+parsing and the dynamic programming strategy for
+instruction selection. First, it begins with the labeling phase:
+
+Figure 2 an example of building compound instruction in [2]
+
+First in the code-generator generation stage, all nontreeshaped rules for compound instructions are split into sub514
+
+rules of tree shape because they are not directly applicable
+to the tree parser. The latter rules are called split rules, and
+the former ones complex rules in contrast to other treeshaped rules for either basic or compound instructions
+called simple rules. This task is done at the split rule
+extraction (SRE) phase in Figure 1. These rule examples
+are shown in Figure 2(a) where a rule ri is accompanied by
+a tuple. The first element in the tuple represents a set of
+operations and the second its associated cost. For instance,
+the rule r6 consists of two parallel operations add and mov,
+and its cost is one. In the example, while r1, r2 and r3 are
+simple rules, r4, r5 and r6 are complex ones, thus being
+divided respectively into pairs of split rules (r41,r42), (r51,r52)
+and (r61,r62). In such a manner, split rules are extracted
+from every complex rule when cburg constructs an
+instruction selector for a target processor. But as seen from
+Figure 2(a), their costs are not yet determined at the SRE
+phase.
+The build code gen (BCG) phase stores all the rules
+including split rules into the newly built instruction selector.
+At this phase, the information is collected about which split
+rules can be correctly grouped to form a complex rule. Next
+in the code generation stage, the candidate set selection
+(CSS) phase first identifies a cluster of nodes in a forest of
+IR trees corresponding to a single basic block, called a
+compound instruction candidate (CIC), which has a
+member-wise match to a valid set of split rules forming a
+complex rule. For example, given the forest of IR trees in
+Figure 2(b), the cluster B comprising tree nodes 1 and 4 in
+Figure 2(c) can be a CIC because these two member nodes
+are matched respectively to the rules r41 and r42 split from
+the complex rule r4. Likewise, D, E, F and G are CICs. On
+the other hand, the rules A, C and H are removed from the
+candidate list since their nodes in each cluster cannot be
+executed in parallel due to the data dependences between
+them.
+The CICs computed above will be used to cover the IR
+trees later at the precover and cover phases shown in Figure
+1, and finally at the emit code phase, emitted into the output
+code as their corresponding MOIs (i.e., compound
+instructions with parallel operations). But due to some
+interference imposed among them, not all CICs will be
+selected for being considered in the covering phase. For
+instance, although the five CICs are computed in Figure
+2(c), we cannot select B and D simultaneously because
+otherwise the tree node 1 in Figure 2(b) will be wrongly
+covered twice. From this example, we glean a fact that we
+have to select CICs carefully for a valid covering in a way
+that none of the selected ones interfere each other in the
+covering.
+To refine the work in [2] for a more formal approach,
+we have modeled the interference constraints via a
+candidate interference graph (CIG), where we classify the
+interference into two types and handle them properly
+according to their types in the CIC selection. A node n in
+the graph stands for a CIC, and an edge for the interference
+between its adjacent nodes, enforcing only one of the nodes
+to be selected. One type of interference represented by the
+edges is the covering interference, denoted by the solid
+
+lines in Figure 2(d). This is defined to be when its adjacent
+CIC nodes share the same split rule so that selecting both
+would raise a conflict in the covering, as in the case
+between B and D. The other is the dependence interference,
+denoted by the dotted lines in Figure 2(d). This type of
+interference comes to exist between two CICs if selecting
+one CIC to cover IR trees brings new dependence among
+the internal nodes of the other. To explain this, assume that
+the CIC D is selected to cover the tree nodes 1 and 5 in
+Figure 2(b). Then this selection newly introduces the data
+dependence between nodes 3 and 4 of G passing through
+the nodes of D. Since this dependence serializes the
+execution of its internal nodes, G can be no longer selected
+for a possible generation of its corresponding MOI in the
+code.
+In a CIG, each CIC node m is weighted. The weight,
+denoted by wm, is defined by the opportunity cost Co of a
+complex rule r for the compound instruction corresponding
+to m:
+wm = Co(r) = ∑Cs(ri) - Cc
+where Cc is the cost of the compound instruction in terms
+of size and latency. When ri is the i-th split rule from r, let
+r′i be a simple rule representing the same instruction pattern
+as ri. Then we say the two rules ri and r′i are equivalent.
+Here, we define Cs(ri) to be the cost of r′i, and ∑Cs(ri) the
+total cost of all the simple rules each corresponding to a
+split rule from r.* For instance, we see in Figure 2(a) that
+we have Cs(r41) = 1, which is equal to the cost of the
+simple rule r3 since both rules represent the operation of the
+instruction sll. Figure 2(e) shows each cost Co of the three
+complex rules. Accordingly, the weights of the CICs are
+calculated as follows:
+wB = 0.5 and wD = wE = wF = wG = 1.
+The weight wm is elaborated to quantify the net-profit
+earned by generating one compound instruction
+corresponding to the CIC m instead of a list of basic
+instructions functionally equivalent to the instruction. In
+fact, the main task of the CSS phase is to find a set of
+compatible CICs with maximum profit (or equivalently,
+maximum weight sum). We say two CICs are compatible if
+they obey the interference constraints. In our example, we
+have four sets of compatible CICs: {B,E}, {B,F}, {D,E}
+and {F,G}. The two sets {D,E} and {F,G} equally have
+the maximum profit (= 2). In our example, let us assume
+the latter set to be selected at the CSS phase. The problem
+of selecting such an optimal CIC set is the same as the
+maximum weighted independent set (MWIS) problem. For
+the MWIS problem, there were developed numerous
+heuristic-based approximation algorithms, paving the way
+to efficiently solving the optimal CIC-set selection problem.
+Thus, the original problem with k CIC nodes is formulated
+as an instance of the MWIS problem, and solved by a
+heuristic-based technique in O(k2) time [9].
+
+*
+
+515
+
+We here assume that there is a unique simple rule corresponding to each
+split rule. For most existing processors, this assumption holds.
+
+In the next phases, the resulting CIC set is utilized by
+the tree parser that traverses the IR trees, using dynamic
+programming to efficiently generate the instructions for the
+final code. Although the CICs with maximal profit do not
+always guarantee the parser the code with optimal cost,
+they at least provide the parser with a good starting point in
+its search for the optimality. However, recall that the
+complex rule matching to a CIC is nontree shaped, and thus
+that the rule as a whole cannot be recognized by the tree
+parser. The only way for the rule to participate in the
+parsing is via its tree-shaped split rules. That is, during tree
+parsing, in lieu of a complex rule for a CIC, its split rules
+compete individually with other simple rules at each tree
+node for being selected as an instruction by the parser. For
+this reason, after an optimal CIC set is computed, we must
+calculate the cost of every split rule ri from the complex
+rule r matching to each CIC in the set, as follows:
+C(ri) = C(r′i) – Co(r) / n for the i-th split rule ri
+
+must often be applied for split rules before the actual
+covering work. The details about these phases are beyond
+the scope of this paper, so we refer to [2] for more
+description.
+
+Figure 3 the code from Figure 2(h) after register allocation
+
+IV.
+
+ITERATIVE CODE GENERATION
+
+This section starts with a discussion using an example
+how register coalescing nullifies the compound instructions
+residing in the input code. Then, we present our code
+generation infrastructure where the instruction selection
+and register allocation (with coalescing) phases run
+iteratively until all NCIs disappear. In accordance with this
+change for iterative code generation, we have modified the
+original algorithms for register coalescing in [8] as well as
+for compound instruction selection in Section III.
+A major factor that affects the complexity of register
+allocation is the number of temporaries in the code.
+Register coalescing [8] is an important optimization
+technique devised to ease the complexity by removing
+redundant temporaries. In the popular register allocation
+algorithm [7], the interference graph (IG) is used to
+represent the live range of each operand value as a node (or
+a temporary). The IG visualizes with an edge the
+interference of the live ranges of two temporaries. A node
+in the IG is marked if it is trivially colorable, meaning that
+its corresponding temporary can be assigned any register,
+irrespective of the register assignments of its neighbors. It
+has a significant degree if the number of its neighbors is
+higher than that of the available colors/registers; otherwise
+it has a low degree [8]. Only the nodes of low degree can
+be trivially colored. In the graph coloring, register
+coalescing merges two nodes respectively representing the
+source and destination operands of a move into a new node
+whose adjacent edges are the union of those adjacent to the
+nodes being replaced [8]. Later when a register is assigned
+to the new node, the related move instruction becomes
+useless and must be eliminated. In this manner, register
+coalescing helps the compiler to eliminate many redundant
+moves in the code. For example in Figure 4(b) and (c), the
+instruction mov on the second line is simply eliminated
+after register coalescing.
+Although register coalescing is a useful optimization
+technique, it sometimes creates an unexpected side effect
+when it is applied to the code with compound instructions,
+as explained in Section I. Figure 3(b) shows the final code
+generated after applying register coalescing and allocation
+to the code in Figure 3(a). In this case, the compiler may no
+longer simply get rid of the useless move contained in
+addmov on the first line because the move alone cannot be
+separated and erased from the NCI at the register allocation
+phase. Recall that before register allocation, the code in
+
+where r′i is a simple rule equivalent to ri , and n is the
+number of split rules from r. In our example, since both F
+and G in the selected CIC set are matching to a complex
+rule r6, the costs of the split rules r61 and r62 are calculated
+from that of r6, as shown in Figure 2(f). Together with the
+split rules having newly assigned costs, the simple rules are
+labeled to each node in the IR trees at the labeling phase.
+At the subsequent covering phase, among the rules labeled
+together at each node, the tree parser will pick one rule that
+can lead it to the production of an optimal derivation
+covering the whole IR tree. For instance, the node 3 in
+Figure 2(g) is labeled with two rules r2 and r62. Likewise,
+all except the node 1 are labeled with multiple rules.
+Figure 2(h) presents the optimal derivation with cost 3
+which consists of three rules covering every node in the
+tree: r3←(1), r6←(2,5) and r6←(3,4). As a result, we have
+the three instructions, sll, addmov and addmov, among
+which the last two correspond respectively to the CICs F
+and G selected above. In Figure 3(a), we find the optimal
+output code generated from this derivation.
+According to the formula for C(ri), a complex rule
+shares its cost equally among its split rules, intending to
+enforce every split rule from the same complex rule with
+lower cost to share the same higher chance of winning over
+its opponent simple rules in the competition for covering
+the node. For example, consider the split rules r61 and r62
+for the selected CIC F. These rules have the same cost 0.5,
+which is only a half the cost of their respective opponent
+rules, r1 and r2, at nodes 2 and 5. Such advantage in their
+costs contributes largely to the simultaneous selection of
+these split rules for code generation.
+Passing thru the CSS phase, we become able to label
+the IR trees only with tree-shaped rules so that the ordinary
+tree parsing technique can be applied at the covering phase
+to choose the best rule for every tree node that might lead
+to an optimal derivation together with the rules chosen for
+other nodes. However, also noted in Figure 1 that unlike
+ordinary ones, this tree parser goes through two steps of
+covering process: precovering and covering. The precovering phase is essential since some special treatment
+
+516
+
+responsible for the NCI before it tries again to choose the
+next best compatible CIC set. But, this would be too
+aggressive and naïve a solution to address the NCI problem.
+The reason is obvious. Even if the CIC, say X, has its
+corresponding compound instruction nullified in the first
+trial, there is still a high probability that the instruction is
+not nullified again as far as X is chosen with different CICs
+and forms a new compatible CIC set for the next trial. This
+argument is drawn from the fact that the different mixture
+of CICs may produce a different result not only of covering
+but also of coalescing. So, only because it causes the NCI
+problem, simply eliminating X from the CIG may deprive
+us of a precious chance to discover an optimal code that
+could have been achieved with X taken into account. Thus,
+in our work, we instead augment the CIG with additional
+interference edges in order to better tackle the NCI problem.
+To describe this, consider the example in Figure 6.
+
+Figure 3(a) was the optimal code with the cost 3. But due to
+the NCI occurring in this code, the actual optimal code
+becomes the one in Figure 4(c) with the final cost 2.5. To
+obtain such code without any NCI, the instruction selector
+must have produced the code in Figure 4(b). Unfortunately,
+in the current implementation [2], this is impossible
+because this would mean that at the earlier CSS phase, the
+compiler should have chosen the CIC set {B,E}, which has
+a less profit than the original choice {F,G}.
+
+Figure 4 the optimal code from Figure 2(b)
+
+From the example in Section III, we have found that the
+policy of choosing the best compatible CIC set according to
+its profit at the CSS phase increases the chance of the
+chosen CIC being selected successfully as a compound
+instruction, but also found that the policy does not always
+guarantee the final code with minimal cost. This is because
+of the NCIs resulting from register coalescing, as already
+been discussed with examples. Unfortunately, whenever
+different compatible CICs are chosen, the mixture or order
+of instructions in the code is changed, thus altering the live
+ranges of temporaries as well. This implies that the
+colorability of each node in an IG can be known only after
+the CIC set is fixed. We therefore argue that in theory,
+unless all CIC sets are tested for possible coalescing
+beforehand, there are absolutely no means to determine at
+the CSS phase what choice of CIC would result in NCIs in
+the final code. Based on this analysis, we have modified the
+code generation algorithm, as shown in Figure 5, such that
+the register allocator has a feedback path to the instruction
+selector in order to inform the latter of the existence of
+NCIs.
+
+Figure 6 the code from Figure 2(b) by our iteration algorithm
+
+Once the first choice {F,G} fails due to the NCI
+addmov in the code of Figure 3(b), the instruction selector
+will choose the next compatible CIC set with maximum
+profit. With the same CIG, there is a chance to choose
+{F,G} again since the set is still among those with
+maximum profit. To deter the chance, we add new edges
+into the CIG in order to represent a different type of
+interference, denoted by the thick lines in Figure 6(a) and
+(b). This inference edge indicates the existence of mutual
+exclusion between its adjacent CIC nodes, imposing a
+constraint that in any circumstances, the nodes cannot be
+chosen together in order to prevent the NCI problem.
+Figure 6(a) displays the CIG refined with a new edge (F,G).
+Now, we have four compatible CIC sets {B,E}, {B,F},
+{D,E} and {G}, among which {D,E} is the only one with
+maximum profit 2. Figure 6(d) shows the code generated in
+the second iteration after labeling and covering as
+illustrated in Figure 6(c). Suppose that the final code
+generated from this code again has a NCI sllmov (see
+Figure 6(e)) after coalescing. Thus, we add an edge
+
+Figure 5 the overview of our algorithm avoiding NCI
+
+Upon the detection of an NCI, the instruction selector
+might simply eliminate from the CIG the CIC node
+517
+
+processor, called ODALRISC, recently developed by Lee, et
+al.[10]. The instruction set of ODALRISC has been
+described in LISA2.0, a commercial architecture description
+language from Coware [11]. The target processor originally
+has no compound instructions, so in our experiment, we use
+the LISA language to add several compound instructions to
+the original instruction set of our target processor, as listed
+in Table 1. In particular, LISA has been greatly useful to
+our experiment due to its simulator, automatically
+generated from our LISA description for the target, which
+enables us to test not only the correctness of our compiler
+generated code but also its performance. In fact, we have
+been able to add the instructions in Table 1, with help of
+the profiling results obtained from the LISA simulator
+running on the DSPstone benchmarks listed in Table 2.
+
+between D and E in the graph, as shown in Figure 6(b).
+Recomputing compatible CIC sets results in four sets,
+{B,E}, {B,F}, {D} and {G}, among which the first two
+sets have the maximum profit (= 1.5). In this case, since we
+can choose anyone for instruction selection, we choose
+{B,E} as shown in Figure 4(a). At last, after the three
+iterations, we obtain the final code with minimal cost as
+demonstrated in Figure 4(c). The general algorithm for our
+iterative code generation with the CIG refinement is given
+below.
+1. Let Ψ be the sets of compatible CICs computed from
+the CIG G at the CSS phase.
+2. Choose a CIC set ψ ∈ Ψ such that profit(ψ) ≥ profit(ϕ)
+for every ϕ ∈ Ψ.
+3. Evaluate the costs of all rules split from the complex
+rule forψ.
+4. Using these split rules along with all simple rules,
+generate the code through labeling and covering.
+5. Test if coalescing creates any NCI I in the code. If no
+NCI is found, jump to Step 7.
+6. Let X ∈ ψ be the CIC corresponding to I. If X is the
+only CIC inψ, then remove X from G. Otherwise, insert
+an interference edge (X,Y) into G for every Y ∈ψ, and
+go to Step 1.
+7. Emit the code as the final output after register allocation.
+In the worst case, the number of iterations can be O(k2)
+for k CIC nodes in G, since at every Step 6, either at least
+one edge is added to G, or one CIC is removed from G. For
+normal cases, it is further reduced to O(k) mainly because
+NCIs usually no longer appear at early iterations. Note that
+even the most time consuming steps, Step 1 [9] and Step 5
+[8], take O(k2). Thus, we predict that the overall instruction
+selection time will be O(n3) on average because k is
+asymptotically linear to n (the number of nodes in IR trees),
+as shown in Figure 7. Anyhow, as verified in our
+experiments, we have been able to maintain the
+compilation times in a reasonable time bound (O(n)) even
+if we additionally handle compound instructions for code
+generation. We will discuss these experimental results in
+the next section.
+
+Table 1 list of the newly designed compound instructions
+
+Table 2 benchmark codes
+
+For the comparative analysis, our compiler builds three
+versions of the output code, each with a different option as
+listed below:
+v1: The code is generated by conventional tree parsing [6]
+together with the register coalescing algorithm in [8]
+v2: The code is generated by the compound code generation
+algorithm in Section III together with the coalescing
+algorithm in [8]. The output code for basic blocks without
+CICs is generated in the same way as is in v1.
+v3: The code is generated in the same way as in v2 except
+for the NCIs are handled by our iterative algorithm in
+Section IV.
+
+Figure 7 Relation between the numbers of CICs (k) and of
+nodes (n) per forest for each basic block from our benchmarks
+
+V.
+
+EXPERIMENT
+Figure 8 Ratio of basic blocks with CICs
+
+This section empirically exhibits the effectiveness of
+our iterative algorithm on an academic 32-bit embedded
+
+518
+
+performance of our iterative algorithm against that of the
+original compound code generation algorithm in Section III
+with the basic blocks having CICs in the benchmark codes.
+Besides, for the other blocks without CICs, the versions v2
+and v3 as well as v1 all produce the same code, so it would
+be somewhat misleading if we include these blocks in the
+comparison. Figure 10 and Figure 11 respectively show the
+net-effectiveness of our algorithm (i.e., v3) in comparison
+with the other two versions with regard to code size and run
+times. Because some benchmark codes such as dot_product,
+iir_biquad_one_section and matrix have no NCIs as shown
+in Table 3, the code quality of v2 is identical to the one of
+v3. Still v2 has better code quality than v1 in those
+benchmark codes due to the compound instructions in
+codes. In the other codes like n_real_updates, since they
+have many NCIs, the reduction of code size for v3
+generated from the blocks with CICs is approximately up to
+8% when it is compared to v2. The run times of such code
+is reduced by up to 12% in the case of fir, as shown in
+Figure 11. This means that our algorithm successfully
+remedies the NCI problem.
+
+To see how many compound instructions are among all
+instructions in the output code, we divide the number Nc of
+all compound instructions by the total number N of
+instructions, as shown in Table 3. The percentage of
+compound instructions in the final code is relatively low,
+indicating that more sophisticated and diverse compound
+instructions may need to improve performance. Also, we
+compute the number Nn of all the NCIs found during the
+original algorithm in Section III, and divide Nn by Nc, in
+order to see how severely many compound instructions are
+nullified due to register coalescing. According to Table 3, a
+significant number of compound instructions become
+nullified for most benchmarks, consequently revealing
+evidence that without properly handling the NCI problem,
+the performance increase by using compound instructions
+will be heavily hampered, as explained in Section I.
+
+Figure 9 Code size/run times of v2 normalized to those of v1
+Table 3 Compound instruction ratio in v2 and the NCI ratio
+among those compound instructions
+
+Figure 10 Code size of v2 and v3 normalized to v1
+
+Figure 9 shows that the newly added compound
+instructions are usually helpful to improving the code
+quality. But, we still have chances to improving it through
+the removal of NCIs. In some benchmarks such as
+n_real_updates, where Nn/Nc is more than a half, the code
+quality of v2 is degrading compared to v1 in spite of
+exploiting compound instructions in the code, as shown in
+Figure 9. It is due to the fact that the useless move
+operations within the NCIs in v2 cannot be eliminated while
+the corresponding move instructions in v1 can be eliminated
+by register coalescing. Our algorithm successfully removes
+such overhead due to NCIs by iteratively removing such
+NCIs.
+Recall that during the iterations, our iterative algorithm
+is selectively applied only to the basic blocks with CICs,
+maintaining the compilation time at the minimum, as
+explained above. Thus, in this experiment, we compare the
+
+Figure 11 Run times of v2 and v3 normalized to v1
+
+Unfortunately, this code quality improvement comes
+with an extra cost of compilation time. Figure 12 shows the
+compilation time of our iterative algorithm. Compared to
+the compilation times for v1 and v2, the time for v3 is about
+3.4 times longer on average since our algorithm iterates
+instruction selection and register allocation until there are
+no more NCIs left. Especially in the cases of
+
+519
+
+n_complex_updates and n_real_updates, it takes
+approximately 10 times more time to generate v3 in
+comparison with those to generate v1 and v2. It is mainly
+because in those two benchmark codes, the average size k
+of their CIGs is bigger than in other codes. In
+n_complex_update, we have k = 39, while we have k = 6 on
+average in other codes. As we stated earlier, the number of
+the iterations of our algorithm is O(k2) in theory. However,
+as shown in Figure 13, the number of the iterations is
+linearly proportional to k in practice, conforming to what
+was predicted in Section IV. Therefore, we believe that our
+algorithm can compile the code with even bigger CIG
+within a reasonable amount of time.
+
+ACKNOWLEDGMENT
+This work was party supported by supported by the
+Korea Science and Engineering Foundation(KOSEF) NRL
+Program grant funded by the Korea government(MEST)
+(No. R0A-2008-000-20110-0), the Engineering Research
+Center of Excellence Program of Korea Ministry of
+Education, Science and Technology(MEST) / Korea
+Science and Engineering Foundation(KOSEF), grant
+number R11-2008-007-01001-0 and Seoul R&BD Program.
+REFERENCES
+[1] S. Vassiliadis, B. Blaner and R. Eichemeyer, SCISM: A scalable
+
+compound instruction set machine, IBM Journal of Research and
+Development, 1994
+[2] H. Scharwaechter, et. al. A code-generator generator for multi-output
+instructions. In Proceedings of the 5th IEEE/ACM international
+Conference on Hardware/Software Codesign and System
+Synthesis (Salzburg, Austria, September 30 - October 03, 2007).
+CODES+ISSS '07. ACM, New York, NY, 131-136.
+[3] R. Leupers and P. Marwedel, Instruction selection for embedded
+DSPs with complex instructions. In Proceedings of the Conference
+on European Design Automation (Geneva, Switzerland, 1996).
+European Design Automation Conference. IEEE Computer Society
+Press, Los Alamitos, CA, 200-205
+[4] R. Leupers, Code Selection for Media Processors with SIMD
+Instructions, in Proceedings of the conference Design, Automation,
+and Test in Europe ( Paris, France ) p.4-8, 2000
+[5] R. Leupers and S. Bashford, Graph-based code selection techniques
+for embedded processors, ACM Transactions on Design Automation
+of Electronic Systems (TODAES), volumn 5, issue 4, p.794-814,
+2000
+[6] A. Aho, M. Ganapathi and S. Tjiang, Code Generation Using Tree
+Pattern Matching and Dynamic Programming, ACM Transactions on
+Programming Languages and Systems, volumn 11, issue 4, p.491516, Oct 1989
+[7] G. Chaitin, Register Allocation and spilling via graph coloring. In
+Proceedings of the 1982 SIGPLAN Symposium on Compiler
+Construction, Boston, Massachusetts, United States, 1982, ACM
+Press New York, USA, 98-105
+[8] L. George and W. Appel, Iterated register coalescing, ACM
+Transactions on Programming Languages and Systems (TOPLAS),
+volume 18, issue 3, May 1996
+[9] S. Sakai, M Togasaki and K. Yamazaki, A Note on Greedy
+Algorithms for the Maximum Weighted Independent Set Problem.
+Discrete Applied Mathematics, volume 126 issue 2-3 p.313–322,
+March 2003.
+[10] I. Lee, D. Lee, and K. Choi, ODALRISC: A Small, Low power, and
+configurable 32-bit RISC processor, International SoC Design
+Conference, pp.25-26 Nov. 2008
+[11] http://www.coware.com
+[12] Dietmar Ebner et. al., Generalized Instruction Selection using SSAGraphs, in Proceeding of the ACM SIGPLAN-SIGBED conference
+on Languages, compilers, and tools for embedded systems, Tucson,
+AZ, USA, 2008, pp 31-40
+
+Figure 12 Compilation time of v2 and v3 normalized to v1
+
+Figure 13 Relation between numbers of CICs (k) and of
+iterations of our algorithm for our benchmark codes
+
+VI.
+
+CONCLUSION
+
+In this work, we make an effort to develop a practical
+compiler infrastructure where we can generate code
+targeting processors with compound instructions. We have
+modified the original infrastructure of our compiler such
+that instruction selection and register allocation iterate,
+properly treating the NCIs after register coalescing.
+Although our algorithm takes more time than the existing
+techniques which do not handle NCIs, it can produce better
+quality code which can exploit compound instructions. The
+code size is reduced by up to 8% within the basic blocks
+having CICs as compared to the original algorithm
+explained in Section III. The runtime is also reduced by up
+to 12%.
+
+520
+
+

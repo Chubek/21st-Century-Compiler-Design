@@ -1,0 +1,188 @@
+\chapter{String Representations, Unicode, and String Operations}
+\label{ch:strings-representation}
+
+A compiler can scan a source file correctly and still underline the wrong character in a diagnostic.
+The scanner counts bytes, the editor counts UTF-16 code units, and the display groups several code points into one visible cluster.
+A single integer called \code{length} cannot reconcile those coordinate systems.
+String processing begins by choosing what the symbols mean and which operations preserve their interpretation.
+
+\section{Define the sequence before counting it}
+\label{sec:ch77-sequences}
+For an alphabet $\Sigma$, a string $s\in\Sigma^*$ is a finite sequence of symbols.
+We write $|s|$ for its length in that alphabet, $\epsilon$ for the empty sequence, and $s[i:j]$ for the half-open slice from $i$ through $j-1$.
+Concatenation is written $uv$; a prefix has the form $s[0:j]$, and a suffix has the form $s[i:|s|]$.
+The alphabet might consist of bytes, Unicode scalar values, token kinds, or machine opcodes.
+Algorithms on sequences transfer between these domains only when their equality and indexing assumptions transfer too.
+
+Consider the text consisting of A followed by U+00E9.
+Its UTF-8 bytes are \code{41 C3 A9}; its scalar sequence has length two.
+Replacing U+00E9 with U+0065 followed by U+0301 changes the scalar count to three and the UTF-8 byte count to four without changing the canonically equivalent text.
+Table~\ref{tab:ch77-units} separates the counts.
+The table uses this particular combining sequence; it is not a claim that every scalar is a display cell.
+
+\begin{table}[htbp]
+\caption{Equivalent text can occupy different byte and scalar extents.}
+\label{tab:ch77-units}
+\centering
+\begin{tabular}{lrrr}
+\toprule
+Representation of A plus accented e & UTF-8 bytes & Scalars & Grapheme clusters \\
+\midrule
+A, U+00E9 & 3 & 2 & 2 \\
+A, U+0065, U+0301 & 4 & 3 & 2 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\term{Grapheme segmentation} identifies boundaries approximating user-perceived characters under a specified rule set~\cite{unicode-2026-segmentation}.
+It does not determine font shaping, terminal display width, or language-specific collation.
+An identifier table usually needs exact normalized-key equality, while cursor motion may need grapheme boundaries and sorting may need a locale-sensitive collation service.
+Those are different services and should have different APIs.
+
+\section{Choose storage for the update workload}
+\label{sec:ch77-storage}
+A flat immutable buffer supports compact sequential scans and simple sharing by slices.
+Appending by allocating a new flat buffer copies the old prefix; repeated single-character appends can therefore cost quadratic total time.
+A growable builder reserves spare capacity and supports amortized constant-time append under geometric growth, with occasional linear relocation.
+A rope stores concatenation as a tree, trading pointer chasing for cheaper structural edits when its balancing and chunk-size policies are maintained.
+
+Figure~\ref{fig:ch77-rope} represents two chunks without pretending that their addresses are contiguous.
+With a balanced rope of $C$ chunks, locating a byte by stored subtree lengths costs $O(\log C)$ plus work within the selected chunk.
+Without balancing, a chain of appends can make that lookup linear in $C$.
+Scalar indexing additionally needs decoding or a per-chunk index; byte lengths alone do not provide scalar offsets.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=13mm and 15mm]
+\node[basic block] (r) {concat: byte extent 7};
+\node[basic block,below left=of r] (a) {chunk: 3 bytes};
+\node[basic block,below right=of r] (b) {chunk: 4 bytes};
+\draw[cfg edge] (r)--(a);\draw[cfg edge] (r)--(b);
+\end{tikzpicture}
+\caption{A rope stores structural concatenation and must maintain lengths and balance explicitly.}
+\label{fig:ch77-rope}
+\end{figure}
+
+Compiler source managers often retain immutable input bytes and store token spans as byte offsets.
+That permits exact reproduction of spelling and stable references into one source snapshot.
+An incremental editor can use a different mutable representation, but an edit must create a new snapshot identity or translate affected spans.
+A span from yesterday's buffer is not valid merely because today's buffer has the same total length.
+
+\section{Validate decoding at the boundary}
+\label{sec:ch77-decoding}
+A UTF-8 decoder classifies the leading byte, checks the required continuation bytes, reconstructs a scalar, and rejects overlong encodings, surrogate values, and values beyond U+10FFFF.
+Algorithm~\ref{alg:ch77-decode} makes the rejection policy explicit.
+It is a specification-level decoder sketch, not the implementation used by the Python companion, which delegates decoding to Python's strict UTF-8 reader.
+For $B$ bytes a full validation scan costs $O(B)$ and can record scalar-start offsets in $O(S)$ storage for $S$ decoded scalars.
+
+\begin{algorithm}[htbp]
+\caption{Decode bytes while recording original scalar boundaries.}
+\label{alg:ch77-decode}
+\begin{pseudocode}
+\Require byte buffer with known extent; strict UTF-8 policy
+\Ensure scalar sequence and byte-offset map, or first malformed-byte diagnostic
+\State $p\gets0$; initialize output and offset map
+\While{$p$ is before the end}
+\State classify leading byte and required sequence length
+\State check extent and continuation-byte shapes before reading them
+\State reconstruct value; reject overlong, surrogate, or out-of-range values
+\State append scalar and its original byte offset; advance by sequence length
+\EndWhile
+\State append final byte extent to the boundary map
+\end{pseudocode}
+\end{algorithm}
+
+For \code{41 C3 A9}, the boundary map is $[0,1,3]$.
+Scalar slice $[1,2)$ therefore maps to byte slice $[1,3)$.
+The final extent entry lets a half-open slice ending at the string's end use the same conversion rule as an interior slice.
+A malformed input policy that inserts replacement characters must instead define which original byte span each replacement covers; silently switching from strict to replacement decoding changes identifier equality.
+
+\section{Normalization is not source preservation}
+\label{sec:ch77-normalization}
+\term{Unicode normalization} gives canonically or compatibly equivalent sequences a specified normal form~\cite{unicode-2026-normalization}.
+NFC performs canonical decomposition followed by canonical composition; NFKC additionally uses compatibility mappings.
+Case folding is another transformation, and it can expand a scalar into several scalars.
+For example, the companion's caseless key for \code{Straße} is \code{strasse}.
+These transformations can change offsets and spelling; they should not overwrite the original source buffer used for diagnostics.
+
+The spellchecker uses the explicit policy NFC, then case fold, then NFC again.
+The final normalization accounts for sequences introduced by case folding.
+Algorithm~\ref{alg:ch77-key} keeps the display spelling separate from the lookup key.
+The companion merges dictionary frequencies when distinct spellings normalize to the same key and returns canonical keys, not a recovered original presentation.
+That is a documented interface choice rather than a general typography policy.
+
+\begin{algorithm}[htbp]
+\caption{Construct a caseless lookup key without changing the original text.}
+\label{alg:ch77-key}
+\begin{pseudocode}
+\Require validated scalar sequence $s$ and fixed Unicode normalization/case policy
+\Ensure canonical lookup key; original spelling remains available separately
+\State $n\gets\operatorname{NFC}(s)$
+\State $f\gets\operatorname{casefold}(n)$
+\State return $\operatorname{NFC}(f)$
+\end{pseudocode}
+\end{algorithm}
+
+The cost includes the library's normalization work and the expanded output size, not merely the number of input code points.
+Canonical ordering of long combining sequences needs particular care before claiming a linear bound for an arbitrary implementation.
+The lab places limits both before and after normalization so an expansion cannot bypass the query-length policy.
+Production persistence formats should record the normalization policy and Unicode data version; changing either can merge or split keys and require rebuilding an index.
+
+\section{Compose operations with explicit ownership and coordinates}
+\label{sec:ch77-operations}
+Table~\ref{tab:ch77-operations} lists useful operation contracts.
+Substring search reports positions in the sequence it actually searches.
+If that sequence is a normalized copy, its offsets cannot automatically be used to highlight the original text.
+A transformation-aware source map may need ranges rather than a one-to-one scalar map because composition merges input scalars and case folding can duplicate them.
+
+\begin{table}[htbp]
+\caption{String operations need units, equality policies, and lifetime rules.}
+\label{tab:ch77-operations}
+\centering
+\begin{tabular}{ll}
+\toprule
+Operation & Contract to state \\
+\midrule
+slice & byte/scalar/cluster indices; owner retention \\
+concatenate & copying versus structural sharing \\
+compare & binary, normalized, or locale-sensitive equality/order \\
+search & alphabet and coordinate system of reported matches \\
+intern & canonicalization policy; table lifetime \\
+replace & overlap policy; new offset mapping \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:ch77-coordinates} keeps the lookup and diagnostic paths apart.
+An intern table can store one canonical key and many source occurrences.
+Hash equality is only a candidate filter: unless collisions are excluded by construction, compare the actual keys after hash agreement.
+A hash-consed identifier also needs a table-lifetime contract; its numeric ID is not stable across arbitrary rebuilds unless deliberately persisted.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=13mm and 12mm]
+\node[basic block] (source) {immutable source bytes};
+\node[basic block,below left=of source] (span) {original diagnostic spans};
+\node[basic block,below right=of source] (key) {decoded normalized keys};
+\draw[cfg edge] (source)--(span);\draw[cfg edge] (source)--(key);
+\end{tikzpicture}
+\caption{Canonical lookup need not discard the original coordinates and spelling.}
+\label{fig:ch77-coordinates}
+\end{figure}
+
+\section{Exercises}
+\label{sec:ch77-exercises}
+\begin{enumerate}
+\item\label{ex:ch77-offsets} Compute the byte boundary map for A, U+0065, U+0301 encoded in UTF-8 and map scalar slice $[1,3)$ back to bytes.
+\item\label{ex:ch77-builder} A naive builder copies its complete prefix on each of $n$ one-byte appends.
+Compute the total copied prefix bytes and compare with geometric growth.
+\item\label{ex:ch77-key} Work the caseless keys for \code{Straße} and \code{STRASSE} and explain why their source spans must remain distinct.
+\item\label{ex:ch77-snapshot} Two source snapshots have equal byte lengths but different text before a stored token span.
+Explain why length equality does not validate the old span.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch77-reading}
+Crochemore, Hancart, and Lecroq develop strings as algorithmic sequences~\cite{crochemore-2007-strings}.
+The Unicode normalization and segmentation annexes specify the text-level distinctions that byte algorithms alone cannot resolve~\cite{unicode-2026-normalization,unicode-2026-segmentation}.
+Chapter~\ref{ch:ffi-marshaling} connects explicit string extents to native interfaces.

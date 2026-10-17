@@ -1,0 +1,222 @@
+\chapter{Case Study: Building and Optimizing a Functional-Language Implementation}
+\label{ch:functional-case-study}
+
+The case study connects parsing, inference, optimization, closures, list cases, and execution in one small language.
+It includes a strict source interpreter, a compiled stack machine, and an alternate lazy evaluator.
+Independent execution paths make it possible to catch compiler defects rather than testing generated code only against itself.
+The implementation is \code{example-code/functional-labs/fun.py} and uses only Python's standard library.
+
+\section{Define the deliverable before extending it}
+\label{sec:ch93-contract}
+The language implements unary higher-order functions, let polymorphism, restricted recursive functions, integers, booleans, conditionals, and homogeneous lists.
+It parses one validated S-expression and rejects trailing expressions.
+The parser limits token count to 10,000 and nesting depth to 100; those are resource policies, not language-theoretic bounds.
+Execution has a separate fuel counter and can also encounter host recursion and memory limits.
+
+Table~\ref{tab:ch93-parts} maps the executed components.
+The compiler emits structured stack code, not native machine code or an object file.
+Its branch and binding instructions contain nested code blocks; the VM executes those blocks recursively on the host stack.
+Consequently it does not promise proper tail calls or bounded host stack usage for source recursion.
+
+\begin{table}[htbp]
+\caption{The case study supplies several independent semantic paths but keeps its backend scope explicit.}
+\label{tab:ch93-parts}
+\centering
+\begin{tabular}{ll}
+\toprule
+Component & Implemented responsibility \\
+\midrule
+parser/validator & complete S-expression, arities, binder restrictions \\
+type solver & finite monotypes, schemes, occurs check, recursive placeholder \\
+strict evaluator & lexical closures and left-to-right evaluation \\
+optimizer & constant folding, selected identities, constant branch selection \\
+compiler/VM & structured stack code, closures, recursion, list cases \\
+lazy evaluator & thunks, memoization, black-hole detection, lazy fields \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The type checker runs before optimization in the CLI.
+An ill-typed unreachable branch is therefore still rejected rather than optimized away before checking.
+This gives the language a stable static contract independent of optimizer strength.
+Tests also re-infer optimized expressions so a transformation that corrupts typing is caught separately from a runtime mismatch.
+
+\section{Compile expressions to stack effects}
+\label{sec:ch93-code}
+Compiling a literal pushes one value; compiling a variable loads its bound cell's value.
+Compiling add first emits the left operand, then the right, then ADD, which pops two values and pushes one.
+Application follows the same operand order and APP enters a closure using its captured environment.
+Every complete expression block must finish with exactly one stack value relative to its empty local operand stack.
+
+Algorithm~\ref{alg:ch93-compile} describes the core compiler contract.
+It assumes validated typed syntax and separates code for unselected branches into nested blocks.
+Constructor cases likewise evaluate only the chosen branch at runtime.
+The VM checks its final local stack shape rather than silently accepting extra or missing results.
+
+\begin{algorithm}[htbp]
+\caption{Compile a typed expression into structured code producing one value.}
+\label{alg:ch93-compile}
+\begin{pseudocode}
+\Require validated typed expression and lexical binding contract
+\Ensure code block with net one result under the strict semantics
+\State literals and variables emit CONST or LOAD
+\State lambdas emit CLOSURE with parameter and compiled body block
+\State binary primitives emit left block, right block, then consuming opcode
+\State applications emit function block, argument block, then APP
+\State conditionals emit test block and IF holding two separate branch blocks
+\State lets and cases retain their lexical binders and nested compiled blocks
+\State verify stack effects and branch result compatibility
+\end{pseudocode}
+\end{algorithm}
+
+An efficient code builder can emit $O(N)$ instructions for $N$ syntax nodes in this structured representation.
+The reference compiler concatenates Python lists recursively, so a highly skewed expression can incur quadratic copying during code construction.
+The chapter does not advertise the linear builder bound as a property of that implementation.
+Replacing concatenation with an append-only builder is a straightforward extension whose emitted-code and evaluation-order tests should remain unchanged.
+
+Figure~\ref{fig:ch93-stack} works add(4,7).
+The stack evolves from empty to [4], then [4,7], then [11].
+An incorrect compiler that evaluates the right side first would not be exposed by this commutative example alone.
+Closure calls, conditionals, and termination-sensitive tests provide additional ordering evidence.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=13mm]
+\node[basic block] (a) {CONST 4: [4]};
+\node[basic block,below=of a] (b) {CONST 7: [4,7]};
+\node[basic block,below=of b] (c) {ADD: [11]};
+\draw[cfg edge] (a)--(b);\draw[cfg edge] (b)--(c);
+\end{tikzpicture}
+\caption{Primitive compilation preserves operand order and leaves one result on the stack.}
+\label{fig:ch93-stack}
+\end{figure}
+
+\section{Implement a small sound optimizer}
+\label{sec:ch93-opt}
+The optimizer folds integer add, multiply, and integer equality when both operands are literal integers.
+It removes add-zero and multiply-one wrappers and selects a branch when the test is a Boolean literal.
+It traverses lambda bodies, let values and bodies, and list-case branches without confusing binders with expressions.
+It does not inline, substitute by spelling, reassociate arithmetic, or erase multiplication by zero.
+
+Algorithm~\ref{alg:ch93-opt} gives the safe local decisions.
+Python's Boolean subtype relationship is again handled explicitly: a Boolean literal is not an integer constant for this source language.
+Selected identities preserve evaluation of their nonconstant operand, while selecting a constant branch removes only a branch that the source would not evaluate.
+These rules are sound under both the strict and lazy pure core contracts, though the two machines can differ on other programs.
+
+\begin{algorithm}[htbp]
+\caption{Apply local pure-core rewrites without erasing demanded divergent computation.}
+\label{alg:ch93-opt}
+\begin{pseudocode}
+\Require typed pure-core expression with exact integer and Boolean literal kinds
+\Ensure expression with the same permitted value/termination behavior
+\State recursively optimize expression children under binding-aware syntax cases
+\If{integer primitive operands are integer literals} \State fold exactly \EndIf
+\If{add has right literal zero} \State replace by left operand \EndIf
+\If{multiply has right literal one} \State replace by left operand \EndIf
+\If{conditional test is a Boolean literal} \State retain only its selected arm \EndIf
+\State otherwise rebuild the original operator with optimized children
+\end{pseudocode}
+\end{algorithm}
+
+The traversal visits every source node once, excluding large-integer arithmetic and tuple/list construction costs.
+Constant folding itself can increase integer bit length substantially, so a production compiler needs a constant-size policy as well as an expression-node budget.
+The small lab's input and evaluation limits do not constitute a complete denial-of-service defense for hostile numeric inputs.
+The README records that boundary rather than calling the implementation a hardened service.
+
+\section{Work recursion and constructor matching}
+\label{sec:ch93-examples}
+The checked-in sum program recursively matches a list and adds its head to the sum of its tail.
+On [4,7,9], the recursive results are zero at Nil, nine at the final Cons, sixteen at the preceding Cons, and twenty at the root.
+Table~\ref{tab:ch93-sum} records the complete return sequence.
+Strict interpretation, compiled VM execution, and lazy scalar evaluation all return twenty on this terminating pure input.
+
+\begin{table}[htbp]
+\caption{The list-sum case study exercises recursion, constructor dispatch, and field binding.}
+\label{tab:ch93-sum}
+\centering
+\begin{tabular}{lrr}
+\toprule
+Remaining list & Head contribution & Returned sum \\
+\midrule
+empty & 0 & 0 \\
+$[9]$ & 9 & 9 \\
+$[7,9]$ & 7 & 16 \\
+$[4,7,9]$ & 4 & 20 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The factorial example applies a recursively defined function to six and returns 720.
+The base test demands an integer equality; the recursive branch decrements by adding negative one.
+The recursion is not tail-recursive because multiplication remains after the recursive call.
+The language has no special subtraction syntax and no hidden native factorial primitive.
+
+The lexical capture test returns fifteen despite a later x=99 binding.
+The polymorphic identity test applies one let-bound function at Bool and Int types.
+The lazy sharing test counts one first-time force for x=18+5 even though x appears twice.
+Each example targets a different mechanism that a list-sum output alone would not distinguish.
+
+\section{Compare independent execution paths}
+\label{sec:ch93-tests}
+For every a and b from negative six through six and each of add, mul, and eq, the suite constructs a closed higher-order program calling a lambda on a.
+That yields 507 generated programs.
+It compares strict source execution, compiled VM execution, optimized compiled execution, lazy execution, and optimized lazy execution against independently computed host arithmetic expectations.
+Type inference runs before execution and after optimization.
+
+Figure~\ref{fig:ch93-oracles} separates source and compiled paths.
+The tests also exercise deliberate type errors, malformed syntax, recursive restrictions, original examples, CLI modes, and the strict/lazy termination difference.
+They do not infer semantic equivalence from two fuel-exhausted runs.
+The first-order rewrite lab separately checks trace replay and graph hazards rather than being folded into one opaque end-to-end test.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=13mm and 13mm]
+\node[basic block] (source) {typed source expression};
+\node[basic block,below left=of source] (eval) {strict source interpreter};
+\node[basic block,below right=of source] (vm) {compiled structured VM};
+\node[basic block,below=of source,yshift=-20mm] (compare) {compare result and independent expectation};
+\draw[cfg edge] (source)--(eval);\draw[cfg edge] (source)--(vm);
+\draw[cfg edge] (eval)--(compare);\draw[cfg edge] (vm)--(compare);
+\end{tikzpicture}
+\caption{Independent execution paths expose defects that self-comparison can miss.}
+\label{fig:ch93-oracles}
+\end{figure}
+
+\section{Extend the implementation without broadening claims accidentally}
+\label{sec:ch93-next}
+General algebraic types require declarations, constructor schemes, layout metadata, and pattern coverage.
+Native compilation requires concrete closure layouts, calling conventions, allocation, stack maps, and code emission.
+Proper tail calls require an explicit continuation or frame-reuse mechanism rather than recursive calls into Python.
+A production lazy runtime additionally needs concurrent thunk policy, exception memoization semantics, profiling, and a collector designed for its heap objects.
+
+These extensions exceed the tested core; the lab is not a production compiler or optimal graph reducer.
+
+\section{State the compiler simulation invariant}
+\label{sec:ch93-simulation}
+For the strict fragment, the central compiler invariant relates source environments to VM environments containing corresponding binding cells.
+Compiling an expression and executing its code should produce one stack result corresponding to the source value, while preserving the lexical meaning of every captured binding.
+For constants and variables this follows directly from CONST and LOAD.
+For primitives, the induction hypotheses for the two operand blocks supply their values in source order before the consuming instruction runs.
+
+Lambda compilation needs the relation to extend to closures: source syntax bodies correspond to compiled body blocks, and their captured environments must relate field by field or binding by binding.
+Application then uses those related closure environments, not the caller's unrelated shadowing bindings.
+Recursive let adds a pair of cells to the relation before constructing the closures, then fills both with their corresponding closure values.
+This explains why the recursive lambda restriction is part of the implementation proof rather than just a parsing convenience.
+
+Conditionals and cases select one related branch block producing one result.
+Stack assertions and differential tests check instances and structural consequences of this invariant, not a mechanized proof of the full simulation.
+
+\section{Exercises}
+\label{sec:ch93-exercises}
+\begin{enumerate}
+\item\label{ex:ch93-code} Compile add(4,7), showing instructions and stack after each instruction.
+\item\label{ex:ch93-sum} Run the list-sum program on [2,5], giving every recursive return value.
+\item\label{ex:ch93-opt} Explain why folding mul(app(loop,0),0) to zero is intentionally forbidden in the strict optimizer.
+\item\label{ex:ch93-backend} Name the runtime and backend components needed to replace the structured Python VM with native code while retaining closures and recursion.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch93-reading}
+Appel supplies a larger functional compiler architecture~\cite{appel-1998-modern}.
+Peyton Jones develops a compiled lazy runtime in detail~\cite{peytonjones-1992-stg}, and Shivers explains optimization-oriented higher-order control-flow recovery~\cite{shivers-1991-control}.
+The lab README and exercise solutions document reproducible execution and the remaining implementation boundaries.

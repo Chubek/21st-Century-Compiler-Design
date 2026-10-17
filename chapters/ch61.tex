@@ -1,0 +1,244 @@
+\chapter{Compilers as Incremental Databases}
+\label{ch:incremental-databases}
+
+Changing a function body from returning $7$ to returning $8$ requires new executable code, but may leave its type, calling convention, and callers' type checks unchanged.
+A compiler that treats the edit as a command to rerun every pass loses this distinction.
+A compiler that caches only by filename loses it too: the file changed, but many answers about it did not.
+The useful unit of reuse is a question with explicit inputs and a result whose meaning is stable across revisions.
+
+The database perspective is an organization of compiler state, not a requirement to store every instruction in SQL.
+It asks which facts are authoritative, which are derived, how dependencies are recorded, and which revision a result describes.
+SSA already exposes value dependencies; the next step is to make dependencies between compiler computations equally explicit.
+
+\section{Separate facts, queries, and snapshots}
+\label{sec:ch61-schema}
+
+A \term{compiler query} is a deterministic computation identified by a query kind and a key, such as the type of a stable function identity.
+Its provider reads inputs and other queries through a tracked interface.
+The provider must not secretly consult a mutable global option, the current directory, or a wall clock.
+Such a read would become an invisible dependency and could make a cached answer incorrect.
+Target features, language modes, imported interfaces, and compiler configuration therefore belong in the input model.
+
+Table~\ref{tab:ch61-schema} sketches a relational view of a small IR.
+Operand position matters: subtracting operand zero from operand one is not the same computation as the reverse.
+Block membership and control successors remain explicit, even when instruction nodes are shared or interned.
+A database schema does not remove dominance, typing, or effect-order invariants.
+Those are integrity conditions checked over a snapshot.
+
+\begin{table}[htbp]
+\caption{A relational IR separates stable identities from ordered references.}
+\label{tab:ch61-schema}
+\centering
+\begin{tabular}{ll}
+\toprule
+Relation & Representative fields \\
+\midrule
+Instruction & identity, opcode, type, owning block \\
+Operand & user identity, position, definition identity \\
+Successor & source block, edge position, target block \\
+Origin & IR identity, source identity, transformation identity \\
+Query result & key, value, dependencies, revision stamps \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A \term{snapshot} fixes the authoritative inputs seen by one evaluation.
+An edit creates a new revision instead of mutating inputs halfway through a provider.
+Stable identities are not byte offsets: inserting a comment should not necessarily rename every function below it.
+Conversely, preserving an identity must not falsely claim that its contents stayed unchanged.
+Identity and content fingerprints solve different problems.
+
+\section{Validate dependencies before recomputing}
+\label{sec:ch61-validation}
+
+The companion stores two stamps for each result: the revision in which its value last changed, and the revision in which it was last verified.
+Suppose a caller query was verified at revision zero.
+At revision one its type dependency is recomputed but still returns \code{int}.
+The type result's verification stamp advances while its change stamp stays zero.
+The caller can therefore reuse its old result.
+This is \term{early cutoff}: an input change stops propagating when a derived value is unchanged.
+The Rust compiler guide describes a production red-green validation scheme with this central distinction~\cite{rust-2026-incremental}.
+
+Algorithm~\ref{alg:ch61-query} assumes pure providers, immutable result values, exact equality, and an acyclic query graph within each evaluation.
+The dependency list is ordered by the provider's first read of each key.
+Validation stops at its first changed dependency.
+Continuing through the rest of the old list could evaluate a query that the new control path never requests and that is no longer valid.
+
+\begin{algorithm}[htbp]
+\caption{Demand a query in the current immutable revision.}
+\label{alg:ch61-query}
+\begin{pseudocode}
+\Require key $q$, revision $r$, pure tracked providers, cache
+\Ensure result equal to fresh evaluation in revision $r$
+\State record $q$ as a dependency of its caller
+\If{$q$ is an input}
+  \State \Return current input value
+\EndIf
+\State reject a recursive request for an active key
+\If{$q$ was verified in $r$}
+  \State \Return cached value
+\EndIf
+\State mark $q$ active
+\If{an old result exists}
+  \State validate old dependencies in read order, stopping at the first changed value
+  \If{all dependencies are unchanged since the old verification}
+    \State set verification stamp to $r$; unmark $q$; \Return old value
+  \EndIf
+\EndIf
+\State run the provider while recording a fresh dependency list
+\State retain the old change stamp if the result is equal; otherwise use $r$
+\State atomically replace the cached result and dependencies; unmark $q$
+\State \Return new value
+\end{pseudocode}
+\end{algorithm}
+
+For $V$ reached keys and $E$ reached dependency edges, one revision's validation traversal costs $O(V+E)$ plus provider execution and value-comparison costs, assuming expected constant-time map access.
+Each key is verified once per revision; a request for an already verified key is a cache lookup.
+This bound does not make providers cheap: parsing a changed file or comparing a large exact result still costs time.
+The teaching implementation uses exact Python equality rather than pretending that a fixed-width hash is a collision-free proof.
+A production implementation needs a documented fingerprint policy and stable serialization.
+
+Figure~\ref{fig:ch61-cutoff} shows why the changed body does not force the client to run.
+Table~\ref{tab:ch61-revisions} gives the actual values and cumulative provider counts.
+The third edit changes the type and does reach the client.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=16mm]
+\node[basic block] (body) {body: 7 becomes 8};
+\node[basic block,below=of body] (kind) {kind: int remains int};
+\node[basic block,below=of kind] (client) {client: reuse int-call};
+\draw[cfg edge] (body)--node[right,font=\small] {recompute}(kind);
+\draw[cfg edge,dashed] (kind)--node[right,font=\small] {unchanged answer}(client);
+\end{tikzpicture}
+\caption{Validation propagates a changed answer rather than merely a changed source file.}
+\label{fig:ch61-cutoff}
+\end{figure}
+
+\begin{table}[htbp]
+\caption{Exact result comparison suppresses one unnecessary client evaluation.}
+\label{tab:ch61-revisions}
+\centering
+\begin{tabular}{llll}
+\toprule
+Body & Kind & Kind evaluations & Client evaluations \\
+\midrule
+$7$ & int & $1$ & $1$ \\
+$8$ & int & $2$ & $1$ \\
+text value & text & $3$ & $2$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Queries can be reactive without being eager}
+\label{sec:ch61-reactive}
+
+An editor can subscribe to diagnostics while executable-code queries remain undemanded.
+A runtime can request machine code only when an entry point becomes hot.
+Both use the same invalidation mechanism but different roots of demand.
+Calling this arrangement reactive does not require immediately rebuilding every invalidated artifact.
+Invalidation records doubt; demand determines when to discharge it.
+
+Cycles need an explicit policy.
+Mutually recursive functions do not force type checking to be a cyclic cache recursion: declarations or strongly connected components can form the provider boundary.
+A monotone analysis over a finite domain can instead expose a fixed-point provider with its own convergence contract.
+Simply returning a partially computed cached value on recursion would silently change the analysis.
+Provider failures must also unwind active-key markers, so one diagnostic does not poison later requests.
+
+\section{Publish transformations as transactions}
+\label{sec:ch61-transactions}
+
+A relational optimizer may express a candidate as a join over opcode, operand, type, and effect facts.
+Matching an addition of zero is easy; establishing that its replacement dominates all uses and preserves semantic flags is the harder part.
+The query identifies candidates, while a checked transaction performs mutation.
+Algorithm~\ref{alg:ch61-transaction} prevents a worker from committing a result computed from a stale revision.
+Its validation work is proportional to the facts examined by the invariant checker, not necessarily to the number of changed rows.
+
+\begin{algorithm}[htbp]
+\caption{Commit an IR rewrite against the snapshot it actually inspected.}
+\label{alg:ch61-transaction}
+\begin{pseudocode}
+\Require immutable snapshot $S$, proposed edits $D$, current revision owner
+\Ensure either one valid new snapshot or no published change
+\State construct candidate snapshot $S'$ from $S$ and $D$
+\State check types, dominance, edge arity, and required effect ordering in $S'$
+\State enter the serialized publication operation
+\If{the current snapshot is not $S$}
+  \State \Return stale result
+\EndIf
+\State publish $S'$ with new input stamps and recorded provenance
+\State \Return committed
+\end{pseudocode}
+\end{algorithm}
+
+Immutable snapshots also let analysis workers run concurrently without observing half-rewritten use lists.
+An implementation may use persistent data structures or private copies; neither makes conflict resolution automatic.
+Two individually legal transformations can disagree about the same definition.
+Revalidation, merging with a proof, or retrying against the newer snapshot are distinct engineering choices.
+
+\section{Provenance is not an inverse compiler}
+\label{sec:ch61-provenance}
+
+\term{Provenance} records where an artifact came from and which decisions produced it.
+Inlining creates many machine locations from one source expression; common-subexpression elimination creates one value from several expressions.
+Constant folding maps many distinct source trees to the same constant.
+These many-to-one operations destroy the uniqueness needed for an inverse.
+A \term{bidirectional transformation} therefore needs an explicit update policy and retained information, not merely arrows drawn both ways.
+
+For example, folding both \code{2+3} and \code{1+4} gives $5$.
+An edit of that result to $6$ does not specify which operand to change or whether to replace the whole expression.
+Figure~\ref{fig:ch61-provenance} records both origins without choosing an invented source edit.
+Debugger locations, explanation tools, and deoptimization maps each select different information from this relation.
+Debug provenance can be approximate; reconstructing a running frame requires an executable state map, developed in Chapter~\ref{ch:speculative-state-transfer}.
+
+A restricted bidirectional editor can define a view function $view(s)$ and an update function $put(s,v)$ that uses both the old source $s$ and a requested view $v$.
+Two useful consistency requirements are $put(s,view(s))=s$ and $view(put(s,v))=v$ for admitted updates.
+The first preserves an unchanged view without rewriting the source; the second requires an accepted update to be reflected in the next view.
+Neither condition chooses a unique source edit when folding has erased structure.
+The tool must specify which updates it admits and which source fragments it may replace.
+
+For a constant-only view, replacing the whole expression by the requested literal satisfies the second requirement, but violates the first if applied unconditionally to an unchanged view of \code{2+3}.
+A policy can preserve the old source when the value is unchanged and replace the expression otherwise.
+That policy is deterministic and easy to describe, yet loses expression structure on edits.
+Keeping richer provenance can support less destructive policies, but their behavior remains a tool contract rather than a recovered inverse of optimization.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=15mm and 18mm]
+\node[basic block] (a) {source: 2+3};
+\node[basic block,right=of a] (b) {source: 1+4};
+\node[basic block,below=of a] (c) {IR constant 5};
+\draw[cfg edge] (a)--(c); \draw[cfg edge] (b)--(c);
+\node[basic block,below=of c] (p) {origin set: both expressions};
+\draw[cfg edge] (c)--(p);
+\end{tikzpicture}
+\caption{Retaining multiple origins supports explanation without defining a unique inverse edit.}
+\label{fig:ch61-provenance}
+\end{figure}
+
+\section{Implementation and exercises}
+\label{sec:ch61-exercises}
+
+The \code{Queries} class in \path{example-code/architecture-labs/labs.py} implements ordered validation, exact early cutoff, dependency replacement, and cycle rejection.
+Tests compare incremental answers with fresh evaluators over $100$ input combinations.
+They also remove a no-longer-reachable input to detect accidental evaluation of obsolete dependencies.
+The model is single-threaded, keeps all results in memory, and requires inputs and results to remain immutable between edits.
+
+\begin{enumerate}
+\item\label{ex:ch61-cutoff} A query returns the parity of input $x$, and its client returns that parity plus $y$.
+Starting with $(x,y)=(2,10)$, change $x$ to $4$, then $y$ to $11$.
+Compute the client results and identify which providers rerun.
+\item\label{ex:ch61-branch} A query reads a flag before conditionally reading a function body.
+Explain why validating the old body after observing a changed flag can be incorrect.
+\item\label{ex:ch61-hidden} A code-generation provider reads the target CPU from an untracked environment variable.
+Construct an edit sequence that makes its cache unsound and repair the dependency model.
+\item\label{ex:ch61-inverse} Give two source expressions that fold to the same constant and two different valid source edits for changing that constant.
+State what additional policy a source-update tool needs.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch61-reading}
+
+The Rust compiler guide explains ordered dependency validation and why unchanged results cut off propagation~\cite{rust-2026-incremental}.
+Firm illustrates how a graph representation exposes value and control relationships without requiring a relational storage engine~\cite{braun-2011-firm}.
+Chapter~\ref{ch:continuous-compilation} extends snapshot ownership to asynchronous runtime compilation and artifact retirement.

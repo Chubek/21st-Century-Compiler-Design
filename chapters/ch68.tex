@@ -1,0 +1,226 @@
+\chapter{Profile-Guided, Learned, and Spatial Compilation}
+\label{ch:profile-spatial-compilation}
+
+A legal specialization can make a program slower.
+Its guard costs time, its failure path may reconstruct state, and its code may displace another hot function from cache.
+Moving work to an accelerator can also lose when transfer and launch overhead exceed the computation saved.
+The compiler therefore needs a profitability model as well as a correctness argument.
+Profiles and learned models supply evidence for the former; they do not replace the latter.
+
+\section{Attach probabilities to observations, not truths}
+\label{sec:ch68-probabilities}
+
+A \term{profile annotation} records observations together with the region, version, and workload context that produced them.
+A branch taken $90$ times in $100$ observations has an empirical frequency of $0.9$.
+It is not proved to take that branch with probability $0.9$ on future inputs.
+The observations may be correlated, the workload may change, and instrumentation may miss events.
+Correctness must still cover every behavior permitted by the program contract.
+
+For a speculative region, let $p$ be an estimated success probability, $g$ the guard cost, $f$ the successful fast-path cost, $d$ recovery cost, and $b$ baseline cost after failure.
+Under this simplified mutually exclusive outcome model, the expected cost is
+\[
+C(p)=g+pf+(1-p)(d+b).
+\]
+This equation assumes the supplied costs already include the relevant work for each outcome.
+It must not count the same prefix in both fast and fallback paths or ignore a repeated side effect.
+
+Take $g=1$, $f=4$, $d=20$, and $b=10$ in synthetic cost units.
+Then $C(p)=31-26p$, so the specialization beats baseline cost $10$ only when $p>21/26$, approximately $0.808$.
+Table~\ref{tab:ch68-risk} computes two possible workloads.
+No measured speedup is claimed: these numbers are an inspectable decision example.
+
+\begin{table}[htbp]
+\caption{The same correct specialization can win or lose as the success frequency changes.}
+\label{tab:ch68-risk}
+\centering
+\begin{tabular}{lll}
+\toprule
+Estimated success & Expected speculative cost & Baseline comparison \\
+\midrule
+$0.9$ & $7.6$ & saves $2.4$ \\
+$0.7$ & $12.8$ & loses $2.8$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Make uncertainty affect policy}
+\label{sec:ch68-uncertainty}
+
+If plausible success probabilities lie in $[0.7,0.9]$, this candidate lacks a robust benefit under that interval model.
+Because $C(p)$ decreases with $p$ here, its worst value over the interval is $C(0.7)=12.8$.
+A policy that requires improvement throughout the interval rejects or postpones specialization.
+The interval is an input assumption in this example, not a statistically calibrated confidence interval.
+
+Algorithm~\ref{alg:ch68-policy} separates legality, estimated benefit, compilation cost, and a safety margin for profitability.
+For a remaining invocation count $H$, compilation cost $K$, and per-call saving $s$, the simplest amortization condition is $Hs>K$.
+Using the optimistic saving $2.4$ and $K=240$ requires more than $100$ remaining invocations.
+If $H$ itself is uncertain, the policy must account for that uncertainty too.
+
+\begin{algorithm}[htbp]
+\caption{Choose a specialization using a conservative finite candidate model.}
+\label{alg:ch68-policy}
+\begin{pseudocode}
+\Require candidates with established legality, cost intervals, horizon estimate, budget
+\Ensure selected candidate satisfies the stated profitability policy
+\State retain the baseline as the default choice
+\ForAll{legal candidates within compilation and memory budgets}
+  \State compute the worst modeled execution cost over the supplied uncertainty set
+  \State include compilation, recovery, transfer, and retention costs as applicable
+  \If{modeled total cost improves on baseline by the required margin}
+    \State retain the best candidate under the declared objective
+  \EndIf
+\EndFor
+\State \Return the selected version or baseline
+\end{pseudocode}
+\end{algorithm}
+
+For $M$ candidates and an uncertainty set evaluated in $U$ scenarios, the direct policy costs $O(MU)$ model evaluations.
+Analytic affine bounds reduce our interval example to endpoint evaluation.
+The policy is only as reliable as its model and uncertainty assumptions; rejecting doubtful work is a performance choice, not a proof that the baseline is always fastest.
+
+\section{Learn costs while keeping legality explicit}
+\label{sec:ch68-learning}
+
+A \term{learned cost model} predicts a property such as latency, throughput, code size, or relative candidate ranking from features and training observations.
+The compiler can use the prediction to order search or choose among legal schedules.
+Halide's learned autoscheduling work combines a learned model with search over schedules~\cite{adams-2019-learning}.
+LLVM's MLGO infrastructure integrates learned decisions into optimization settings such as inlining and register-allocation policy~\cite{llvm-2026-mlgo}.
+
+The smallest runnable example fits $\widehat{t}(n)=a+bn$ by least squares.
+Its synthetic samples are $(1,7)$, $(2,10)$, $(3,13)$, and $(4,16)$.
+The sums are $\sum n=10$, $\sum t=46$, $\sum n^2=30$, and $\sum nt=130$.
+With four samples, the denominator is $4\cdot30-10^2=20$, giving $b=(4\cdot130-10\cdot46)/20=3$ and $a=(46-3\cdot10)/4=4$.
+The predicted value at $n=5$ is $19$.
+This checks fitting arithmetic, not generalization to real hardware.
+
+Figure~\ref{fig:ch68-learning} shows the model's position in the optimization loop.
+Training labels require controlled measurement, a specified objective, and separation between training and evaluation workloads.
+Feature distributions can shift across programs, machines, and compiler versions.
+For a candidate unlike the training data, a fallback heuristic or additional measurement may be more reliable than a confident extrapolation.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=14mm]
+\node[basic block] (legal) {legal candidate schedules};
+\node[basic block,below=of legal] (model) {features and cost prediction};
+\node[basic block,below=of model] (select) {search and candidate selection};
+\node[basic block,below=of select] (measure) {validate and measure output};
+\draw[cfg edge] (legal)--(model); \draw[cfg edge] (model)--(select); \draw[cfg edge] (select)--(measure);
+\end{tikzpicture}
+\caption{Learning influences candidate selection while semantic constraints remain an independent gate.}
+\label{fig:ch68-learning}
+\end{figure}
+
+\section{Represent temporal relationships with a stated meaning}
+\label{sec:ch68-temporal}
+
+Two functions that execute close together may benefit from nearby code placement even if neither calls the other directly.
+We can record a \term{temporal affinity graph} whose nodes are artifacts and whose weighted edges count occurrences within a specified observation window.
+The window definition, directionality, normalization, and version identities are part of the data schema.
+The phrase describes this chapter's model; it is not an attribution of a universal standard graph representation.
+
+Temporal affinity is different from a happens-before relation, a dependence edge, or a proof of legal instruction reordering.
+The observed sequence $A,B,A$ yields proximity evidence for $A$ and $B$ but does not authorize exchanging their execution.
+Similarly, an IR annotated with branch frequencies must still preserve behavior for every permitted input; the annotations do not turn it into a probabilistic program.
+Probabilistic information about execution and semantics of probabilistic programs are separate concepts.
+
+\section{Place related artifacts under explicit constraints}
+\label{sec:ch68-placement}
+
+Consider three equal-sized artifacts in consecutive unit slots.
+Their symmetric pair weights are $w_{AB}=9$, $w_{BC}=8$, and $w_{AC}=1$.
+For a permutation $\pi$, use the toy distance objective
+\[
+J(\pi)=\sum_{i<j}w_{ij}|\pi(i)-\pi(j)|.
+\]
+Table~\ref{tab:ch68-placement} evaluates three orders; reversal preserves their costs.
+Placing $B$ between $A$ and $C$ gives $9+8+2=19$.
+The other two middle choices yield $26$ and $27$.
+
+\begin{table}[htbp]
+\caption{The toy placement objective favors short distances on heavily weighted pairs.}
+\label{tab:ch68-placement}
+\centering
+\begin{tabular}{lll}
+\toprule
+Order & Weighted distance calculation & Total \\
+\midrule
+$A,B,C$ & $9+8+2$ & $19$ \\
+$A,C,B$ & $18+8+1$ & $27$ \\
+$B,A,C$ & $9+16+1$ & $26$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Algorithm~\ref{alg:ch68-place} is exact because it enumerates every permutation.
+It costs $O(n!n^2)$ time for $n$ artifacts with dense pair weights, so it is suitable only for tiny instances and checking heuristics.
+Large layout systems use heuristics under real alignment, section, branch-range, and code-size constraints.
+Byte distance alone does not model cache sets, prefetching, page crossings, or branch predictors.
+
+\begin{algorithm}[htbp]
+\caption{Find the exact optimum of the small unit-slot placement model.}
+\label{alg:ch68-place}
+\begin{pseudocode}
+\Require $n$ equal-sized artifacts, symmetric nonnegative pair weights
+\Ensure a permutation minimizing the stated weighted-distance objective
+\State $best\gets$ infinity; $order\gets$ none
+\ForAll{permutations $p$ of the artifact IDs}
+  \State construct the position of each artifact in $p$
+  \State $cost\gets\sum_{i<j}w_{ij}|p^{-1}(i)-p^{-1}(j)|$
+  \If{$cost<best$}
+    \State $best\gets cost$; $order\gets p$
+  \EndIf
+\EndFor
+\State \Return $best,order$
+\end{pseudocode}
+\end{algorithm}
+
+Figure~\ref{fig:ch68-placement} displays the winning order with its two strongest affinities adjacent.
+The same idea can inform code layout, object clustering, or device placement, but each application needs its own capacity and access model.
+Rearranging physical objects also requires updating or preserving every reference according to the runtime's identity contract.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=23mm]
+\node[basic block] (a) {slot 0: A};
+\node[basic block,right=of a] (b) {slot 1: B};
+\node[basic block,right=of b] (c) {slot 2: C};
+\draw[cfg edge] (a)--node[above,font=\small] {$9$}(b);
+\draw[cfg edge] (b)--node[above,font=\small] {$8$}(c);
+\draw[dashed] (a.south) to[bend right=25] node[below,font=\small] {$1$, distance $2$}(c.south);
+\end{tikzpicture}
+\caption{The displayed arrows indicate affinity weights, not control-flow or ordering permissions.}
+\label{fig:ch68-placement}
+\end{figure}
+
+\section{Include transfer costs in heterogeneous execution}
+\label{sec:ch68-heterogeneous}
+
+Suppose a CPU takes $4n$ units for a task while a device takes $120+n$, including launch and transfer in the fixed term.
+The break-even point solves $4n=120+n$, hence $n=40$.
+At $n=41$ the device costs $161$ versus the CPU's $164$.
+Selecting the device solely because its kernel coefficient is smaller would lose on small inputs.
+
+Real placement can depend on data residency, queue delay, bandwidth, device memory capacity, energy, and synchronization.
+A result consumed immediately on the CPU may require a return transfer; a pipeline of device consumers may amortize that cost.
+Different devices may also implement different floating-point or atomic behavior, so semantic compatibility is a prerequisite to cost comparison.
+A runtime-owned optimizer can update placement as conditions change, but needs hysteresis to avoid repeatedly paying migration costs near a decision boundary.
+
+\section{Exercises}
+\label{sec:ch68-exercises}
+
+\begin{enumerate}
+\item\label{ex:ch68-threshold} Derive the exact success threshold for the speculative-cost example and compute both endpoint costs for $p\in[0.7,0.9]$.
+\item\label{ex:ch68-fit} Recompute the linear fit from the four supplied samples and predict cost at $n=6$.
+State what this calculation does not establish about measured hardware behavior.
+\item\label{ex:ch68-order} Enumerate the six three-artifact orders, group reversals, and verify the optimum and both other costs.
+\item\label{ex:ch68-device} Solve the CPU/device break-even point and compare costs at $n=20$ and $n=80$.
+Explain how retaining data on the device can change the model.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch68-reading}
+
+The Halide autoscheduler paper provides a concrete learned-model and search design~\cite{adams-2019-learning}.
+LLVM's MLGO documentation explains integration of learned optimization decisions into compiler infrastructure~\cite{llvm-2026-mlgo}.
+The companion implements the cost arithmetic, least-squares fit, and exhaustive tiny placement model with synthetic inputs; it does not report benchmark improvements.

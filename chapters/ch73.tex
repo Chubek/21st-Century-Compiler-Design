@@ -1,0 +1,187 @@
+\chapter{Callbacks, Reentrancy, and Threads}
+\label{ch:ffi-callbacks}
+
+A callback reverses the direction of control before the original foreign operation is finished.
+The native library may call managed code while holding a lock or while its own object is temporarily inconsistent.
+That managed code may call the library again, close an object, or start another operation.
+Correct register transfers alone cannot make this control flow safe.
+
+\section{Pair executable entry with retained context}
+\label{sec:ch73-context}
+A \term{callback registration} associates an executable entry point with the state required to invoke a particular callable.
+A C interface taking both a function pointer and a context pointer can use one static trampoline for many callback objects.
+The context identifies the runtime callable and any error or lifetime state.
+An interface accepting only a function pointer may instead need a generated trampoline, such as a libffi closure, whose entry recovers the context~\cite{libffi-2026-manual}.
+
+The running visitor accepts a callback, context, and count.
+For indices $0$ through $n-1$, the callback writes a signed 32-bit value and returns a status.
+The visitor accumulates values into a signed 64-bit sum and stops at the first failure.
+Its bound $0\le n\le10{,}000$ guarantees that summing any allowed callback results fits that accumulator.
+Figure~\ref{fig:ch73-roundtrip} shows the nested control path.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=12mm]
+\node[basic block] (managed) {managed visitor call};
+\node[basic block,below=of managed] (native) {native loop};
+\node[basic block,below=of native] (trampoline) {protected callback adapter};
+\node[basic block,below=of trampoline] (body) {managed callable};
+\draw[cfg edge] (managed)--(native); \draw[cfg edge] (native)--(trampoline);
+\draw[cfg edge] (trampoline)--(body);
+\path (body.east) ++(3,0) coordinate (outer);
+\draw[cfg edge] (body.east)--(outer) |- (native.east);
+\node[right,font=\small] at (outer |- trampoline) {may reenter};
+\end{tikzpicture}
+\caption{A callback can start another foreign operation before the first one returns.}
+\label{fig:ch73-roundtrip}
+\end{figure}
+
+For the callback $f(i)=i+2$ and $n=5$, the values are $2,3,4,5,6$ and the sum is $20$.
+If the callback fails at index $2$, the visitor has observed two successful values but does not publish their partial sum.
+It returns a failure with the caller's output unchanged.
+Table~\ref{tab:ch73-trace} records both paths.
+
+\begin{table}[htbp]
+\caption{The visitor publishes only a complete successful aggregate.}
+\label{tab:ch73-trace}
+\centering
+\begin{tabular}{rrrrl}
+\toprule
+Index & Value & Success sum & Failure-path sum & Failure-path action \\
+\midrule
+0 & 2 & 2 & 2 & continue \\
+1 & 3 & 5 & 5 & continue \\
+2 & 4 & 9 & 5 & stop; preserve output \\
+3 & 5 & 14 & -- & not called \\
+4 & 6 & 20 & -- & not called \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Preserve reentrant invariants}
+\label{sec:ch73-reentrant}
+The case study uses no global callback slot and holds no library mutex while calling managed code.
+Each invocation has its own context on the calling stack.
+The callable remains rooted by the original language arguments throughout the synchronous call.
+Nested visits therefore have separate counters, sums, and error state.
+
+This design supports reentrancy because the library's visible state is already consistent at the callback point.
+A production container visitor must choose a policy for mutation during iteration: prohibit it, detect a version change, snapshot the iteration set, or define stable iterator semantics.
+Releasing a mutex before calling user code avoids one deadlock pattern, but does not by itself preserve the container's iteration invariants.
+Reacquiring it afterward may reveal that the object has changed or closed.
+
+Algorithm~\ref{alg:ch73-callback} states the synchronous callback protocol.
+It costs $O(n)$ invocations and $O(1)$ native bookkeeping, excluding callback cost and recursion initiated by user code.
+The count bound limits this loop, not arbitrary computation inside the callback.
+
+\begin{algorithm}[htbp]
+\caption{Visit indices with a synchronous status-returning callback.}
+\label{alg:ch73-callback}
+\begin{pseudocode}
+\Require bounded count $n$, rooted callable, attached runtime thread, writable output
+\Ensure full sum on success; output unchanged on failure
+\State validate $0\le n\le10{,}000$; $s\gets0$
+\For{$i=0$ to $n-1$}
+  \State invoke callback through its runtime error boundary
+  \If{callback failed or result is outside int32 range}
+    \State return callback failure without publishing $s$
+  \EndIf
+  \State $s\gets s+\text{callback result}$
+\EndFor
+\State publish $s$; return success
+\end{pseudocode}
+\end{algorithm}
+
+\section{Make registration teardown wait for users}
+\label{sec:ch73-quiescence}
+Asynchronous registration requires stronger ownership than a synchronous stack context.
+The library can retain the callable and invoke it after registration returns.
+Unregistering must establish that no new invocation can start and that every previously admitted invocation has completed before freeing the context or trampoline.
+\term{Callback quiescence} is this absence of both future admission and active users.
+
+Figure~\ref{fig:ch73-stop} shows the legal retirement path.
+An atomic count alone is insufficient if a thread can read a raw context pointer before another thread frees it and only then try to increment the count.
+Admission must occur through a registry or other stable gate whose own lifetime outlasts every attempted admission.
+Algorithm~\ref{alg:ch73-retire} assumes such a gate and serializes admission and stopping under its mutex.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=12mm]
+\node[basic block] (open) {accepting; active count may grow};
+\node[basic block,below=of open] (stop) {stopped; active users finish};
+\node[basic block,below=of stop] (free) {active count zero; reclaim};
+\draw[cfg edge] (open)--(stop); \draw[cfg edge] (stop)--(free);
+\end{tikzpicture}
+\caption{Stopping admission precedes draining users and reclaiming callback state.}
+\label{fig:ch73-stop}
+\end{figure}
+
+\begin{algorithm}[htbp]
+\caption{Retire a registration through a stable serialized admission gate.}
+\label{alg:ch73-retire}
+\begin{pseudocode}
+\Require stable gate shared by every admission; caller is not its own active callback
+\Ensure no callback can use the reclaimed context
+\State under gate mutex: mark registration as not accepting
+\State remove it from future library dispatch under the library's unregister contract
+\State wait for active count to become zero, releasing the mutex while waiting
+\State detach context and trampoline from the registry
+\State release runtime root and executable closure storage through their owners
+\end{pseudocode}
+\end{algorithm}
+
+Bookkeeping is constant per admission and completion; retirement latency includes the longest outstanding callback and has no finite bound if a callback never returns.
+Calling this blocking retire operation from the callback it is waiting for would deadlock.
+Such APIs need deferred retirement or a nonblocking stop followed by later collection.
+The Python model exhaustively enumerates short abstract traces of enter, leave, stop, and collect; it validates the state invariant, not a concrete mutex implementation or memory-ordering scheme.
+
+\section{Attach the correct runtime on the correct thread}
+\label{sec:ch73-threads}
+A foreign-created thread is not automatically authorized to operate on managed objects.
+Runtime attachment, interpreter identity, and synchronization are separate requirements.
+In CPython, an attached thread state remains necessary on free-threaded builds, while GIL-enabled builds additionally serialize ordinary Python execution through the GIL~\cite{python-2026-capi}.
+A convenience attachment API intended for the main interpreter must not be assumed to select an arbitrary subinterpreter.
+Runtime shutdown creates another boundary: no callback may attempt attachment after its interpreter becomes unavailable.
+
+Lua's state and API require an embedding policy that serializes access unless the embedder provides an appropriate alternative arrangement~\cite{ierusalimschy-2026-lua}.
+The companion uses the calling thread and one active state; it does not dispatch callbacks from workers.
+Its native pthread test instead calls independent scalar plans and never touches a managed runtime.
+Table~\ref{tab:ch73-execution} distinguishes these verification claims.
+
+\begin{table}[htbp]
+\caption{Native parallelism and managed callback entry require different evidence.}
+\label{tab:ch73-execution}
+\centering
+\begin{tabular}{ll}
+\toprule
+Path & Case-study contract \\
+\midrule
+Lua or Python callback & synchronous, attached calling thread \\
+nested managed call & separate context; no shared callback slot \\
+native pthread workers & independent plans; no runtime object access \\
+asynchronous registration & protocol and finite model, not a native implementation \\
+libffi closure fixture & live context until all direct test calls finish \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+An event-queue design can move completion delivery back to the runtime's owning thread.
+The worker then manipulates only native data and posts a retained completion record.
+The queue still needs ownership transfer, shutdown draining, and cancellation rules; scheduling on the right thread solves only the entry-location part of the problem.
+
+\section{Exercises}
+\label{sec:ch73-exercises}
+\begin{enumerate}
+\item\label{ex:ch73-nested} Evaluate a visit of count three whose callback at $i$ visits count $i$ with callback $j+1$.
+\item\label{ex:ch73-stop} Trace enter, stop, collect, leave, collect, treating invalid transitions as rejected requests that leave the state unchanged.
+Which collection succeeds?
+\item\label{ex:ch73-self} Explain the deadlock if an active callback synchronously waits for its own registration's active count to become zero.
+\item\label{ex:ch73-thread} A worker holds a Python object pointer and a native mutex.
+Why do those facts alone not permit a Python call, even on a free-threaded build?
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch73-reading}
+libffi documents closure allocation and the lifetimes of closure metadata and user data~\cite{libffi-2026-manual}.
+The Python thread-state documentation distinguishes interpreter attachment, the GIL, and free-threaded execution~\cite{python-2026-capi}.
+Node-API's thread-safe function and asynchronous-work facilities illustrate explicit scheduling and ownership mechanisms for another runtime~\cite{node-2026-api}.

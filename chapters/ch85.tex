@@ -1,0 +1,254 @@
+\chapter{Rewrite Strategies and Efficient Rule Engines}
+\label{ch:rewrite-strategies}
+
+A correct rule collection is not yet an optimizer.
+The implementation must find applicable rules, select an occurrence, decide which facts justify side conditions, and schedule the next search after a change.
+A full-tree rescan is easy to understand but can spend most of its time rediscovering that unrelated nodes have not changed.
+Efficient engines make those dependencies explicit without weakening the rule contract.
+
+\section{Make strategy a first-class policy}
+\label{sec:ch85-strategy}
+An outermost strategy prefers positions nearest the root; an innermost strategy prefers positions without reducible descendants.
+Leftmost order breaks ties between incomparable positions.
+Rule priority breaks ties between patterns matching the same occurrence.
+These choices affect trace length, intermediate size, and sometimes whether a normal form is reached at all.
+They are not profitability proofs.
+
+The companion visits positions in preorder for its default strategy and sorts positions by decreasing depth for its alternate innermost-first policy.
+The latter is deepest-first with stable traversal ties; it should not be misdescribed as every possible conventional leftmost-innermost schedule.
+Table~\ref{tab:ch85-strategies} states what each policy controls.
+A budget is independent of these choices and can stop either policy before completion.
+
+\begin{table}[htbp]
+\caption{A deterministic engine specifies position, rule, and stopping policies separately.}
+\label{tab:ch85-strategies}
+\centering
+\begin{tabular}{ll}
+\toprule
+Policy & Question answered \\
+\midrule
+position order & which redex location is considered first? \\
+rule priority & which matching rule wins at that location? \\
+side-condition order & which analyses are consulted and when? \\
+revisit policy & which nodes become candidates after a change? \\
+stopping policy & fixed point, phase boundary, or budget exhaustion? \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+For the pure identity system, both executed strategies reach v from any finite nesting of add-zero and multiply-one wrappers.
+The test checks exact trace length and replay for 50 nesting depths.
+That evidence does not establish that every added rule or effectful operation remains strategy-independent.
+An engine should attach its strategy version to reproducibility records when selected output is not canonical.
+
+\section{Index patterns without skipping candidates}
+\label{sec:ch85-index}
+A root-symbol/arity index is a simple first filter for nonvariable left sides.
+Rules rooted at mul cannot match an add node, so they need not enter the full matcher.
+Deeper discrimination trees encode successive symbol tests across patterns and share common tests.
+Decision DAGs additionally share repeated tests or suffix decisions when their binding environments agree.
+
+Figure~\ref{fig:ch85-dispatch} separates cheap structural discrimination from variable consistency and semantic conditions.
+A structural filter can admit false candidates but must not omit any actual match.
+For nonlinear patterns such as pair(x,x), testing both child shapes still does not establish equality of the two matched subterms.
+The full matcher must retain the repeated-variable constraint.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=12mm]
+\node[basic block] (root) {root symbol and arity index};
+\node[basic block,below=of root] (shape) {shared structural tests};
+\node[basic block,below=of shape] (bind) {consistent metavariable bindings};
+\node[basic block,below=of bind] (side) {semantic side conditions};
+\draw[cfg edge] (root)--(shape);\draw[cfg edge] (shape)--(bind);\draw[cfg edge] (bind)--(side);
+\end{tikzpicture}
+\caption{Pattern indexing narrows structural candidates but does not discharge semantic premises.}
+\label{fig:ch85-dispatch}
+\end{figure}
+
+For $N$ nodes and $R$ rules, naive discovery attempts up to $NR$ matches per scan.
+Root indexing replaces $R$ with the candidate bucket size at each node, but a worst-case bucket can still contain every rule.
+More elaborate indexes have construction and update costs that should be amortized over the number of queries.
+The lab intentionally executes the naive matcher so its candidate completeness is inspectable; the chapter's indexed design is an engineering extension, not a benchmark claim about the reference implementation.
+
+Algorithm~\ref{alg:ch85-index} sketches safe indexed discovery.
+Its cost is index lookup plus the sum of attempted match and side-condition costs.
+Expensive conditions such as dominance or alias queries should run after cheap shape tests when this does not alter required diagnostic behavior.
+Caching their answers requires the analysis epoch in the cache key.
+
+\begin{algorithm}[htbp]
+\caption{Discover candidates through an overapproximating pattern index.}
+\label{alg:ch85-index}
+\begin{pseudocode}
+\Require node, complete pattern index, current analysis epoch
+\Ensure every admitted rewrite has a consistent match and valid premises
+\State retrieve candidate rules by root and structural discrimination
+\ForAll{candidates in declared priority order}
+\State run complete matcher, including repeated-variable checks
+\If{matching succeeds}
+\State query all semantic conditions against the current IR and epoch
+\If{every condition is established} \State yield rule and substitution \EndIf
+\EndIf
+\EndFor
+\end{pseudocode}
+\end{algorithm}
+
+\section{Revisit the dependency neighborhood}
+\label{sec:ch85-worklist}
+Replacing a node can expose a new parent pattern, invalidate a use-count condition, or remove the last reference to a child.
+An affected-node worklist is sound only if its dependency relation covers all such changes.
+For immutable trees, rebuilding ancestors identifies the direct structural neighborhood.
+For shared graphs, reverse-use lists identify every parent, not just the path through which the rewrite was found.
+
+Figure~\ref{fig:ch85-users} shows a shared node whose two parents both need reconsideration.
+Failing to enqueue one can miss an optimization; using a stale side-condition fact can do worse and authorize an invalid rewrite.
+Worklist duplicate suppression is safe when an already-enqueued node will observe the latest state at processing time.
+If the queue instead stores snapshots, it must detect and discard stale snapshots or revalidate them before commit.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=14mm and 16mm]
+\node[basic block] (n) {changed shared node};
+\node[basic block,above left=of n] (p) {parent p};\node[basic block,above right=of n] (q) {parent q};
+\draw[cfg edge] (p)--(n);\draw[cfg edge] (q)--(n);
+\end{tikzpicture}
+\caption{A shared update invalidates every dependent parent, not just one traversal path.}
+\label{fig:ch85-users}
+\end{figure}
+
+Algorithm~\ref{alg:ch85-worklist} makes validation part of commit.
+For $P$ processed candidates, total cost is the sum of discovery, condition, rewrite, and invalidation costs over those candidates.
+There is no general linear bound in original graph size when rewrites add nodes or reenable one another.
+If a known potential decreases, it can bound successful changes, but failed candidate checks still require accounting.
+
+\begin{algorithm}[htbp]
+\caption{Run an affected-node rewrite worklist with stale-match protection.}
+\label{alg:ch85-worklist}
+\begin{pseudocode}
+\Require valid IR, complete dependency neighborhood policy, resource budget
+\Ensure valid rewritten IR and explicit fixed-point or incomplete status
+\State enqueue initial candidates with version information
+\While{worklist nonempty and budget remains}
+\State take candidate; revalidate its node and required analyses
+\State discover an admitted rewrite under the selected strategy
+\If{a rewrite is selected}
+\State construct replacement; check invariants; commit change
+\State invalidate dependent facts and enqueue every affected neighborhood
+\EndIf
+\EndWhile
+\State distinguish empty-worklist completion from resource exhaustion
+\end{pseudocode}
+\end{algorithm}
+
+\section{Control growth and phase interaction}
+\label{sec:ch85-growth}
+Inlining, distributivity, and specialization can increase representation size.
+A bounded engine may cap node count, estimated code size, or accumulated cost, but must reject an expansion before losing its last valid representation.
+Persistent originals and transactional replacement support rollback when a candidate exceeds the budget or fails verification.
+An incomplete pass can still produce a correct improved program if every committed step was sound.
+
+Table~\ref{tab:ch85-phases} contrasts destructive and alternative-preserving designs.
+Equality saturation avoids committing immediately to one equivalent form but can consume large memory while retaining alternatives.
+Its budget does not prove global optimality of extraction, and tree-cost extraction does not automatically minimize shared machine-code cost.
+Combining the approaches can be useful: destructive canonicalization for cheap identities, bounded alternative search for a difficult region, then target-aware selection.
+
+\begin{table}[htbp]
+\caption{Search organization moves costs without replacing semantic validation.}
+\label{tab:ch85-phases}
+\centering
+\begin{tabular}{p{0.21\linewidth}p{0.29\linewidth}p{0.35\linewidth}}
+\toprule
+Organization & Retains & Main risk \\
+\midrule
+greedy rewriting & selected current form & phase-order opportunity loss \\
+phased rewriting & selected form per phase & oscillation across repeated phases \\
+backtracking search & explicit alternatives & exponential search growth \\
+equality saturation & compact equivalence alternatives & graph growth and extraction cost \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Diagnose the rule, premise, and representation separately}
+\label{sec:ch85-diagnostics}
+A failed rewrite check should distinguish no structural match, unmet semantic premise, stale analysis, invariant violation, and resource refusal.
+These outcomes have different remedies.
+Counting all of them as a generic pattern failure hides whether the rule was never relevant or relevant but unsafe under current facts.
+A trace should also record the arithmetic model and relevant flags, not only a printed before/after expression.
+
+Production compiler rule descriptions may generate matchers and combine rules with handwritten lowering code.
+The generated code still inherits the semantic assumptions of the rule definitions and the correctness of its index generator.
+Testing every small input for a bounded arithmetic domain gives strong finite evidence for that domain; it does not justify replacing the domain with floating point, checked integers, or effectful expressions.
+Chapter~\ref{ch:rewrite-optimization} makes this validation boundary concrete.
+
+\section{Preserve conditional facts across a successful rewrite}
+\label{sec:ch85-premises}
+Suppose a rule replaces a checked arithmetic operation with an unchecked one when a range analysis proves that overflow is impossible.
+The proof is about particular operands at a particular program point under a particular analysis state.
+It is not a permanent property of the printed opcode.
+If an earlier rewrite changes an operand or control predecessor, the cached range premise may no longer apply even though the node ID remains stable.
+A candidate record should therefore identify the facts it consumed and the version under which they were established.
+
+A conservative engine invalidates all affected facts after any edit that their preservation policy does not cover.
+An incremental engine can update them, but that update procedure becomes part of the soundness argument.
+For must-facts such as guaranteed nonnull or guaranteed range bounds, a merge must weaken facts appropriately; reusing the union operation from a may-analysis can accidentally strengthen a premise.
+The distinction between structural cache hits and semantic validity remains essential even when both are stored in hash tables.
+
+Conditional rules can also depend on the absence of uses.
+Replacing a node changes the use counts of its old and new operands, potentially enabling or disabling rules elsewhere.
+A worklist that only revisits the replacement's immediate parents is incomplete for this dependency.
+Production engines often categorize rule dependencies so a use-count change can trigger a smaller but complete neighborhood than a whole-function rescan.
+The lab's full rescan avoids this indexing subtlety at the cost of speed.
+
+\section{Make failed matches and repeated work measurable}
+\label{sec:ch85-measurement}
+Rule-engine profiling should count more than successful rewrites.
+Useful counters include candidate-index hits, complete matches, side-condition queries, rejected premises, stale records, committed edits, and requeued nodes.
+A rule applied only once can still dominate compile time if its expensive premise is checked at every node.
+Conversely, a frequently applied cheap identity may save downstream work by shrinking the graph early.
+Measurements should retain the input corpus and pipeline configuration so these counts can be interpreted.
+
+Reproducible scheduling helps diagnose regressions.
+If two equally ranked matches are ordered by allocation address or hash-table iteration, unrelated changes can alter output and obscure the cause of a performance shift.
+Assigning stable rule priorities and deterministic structural tie-breakers narrows that variability.
+Parallel engines may deliberately permit nondeterministic schedules, but should then validate semantic invariants and report the reproducibility policy rather than implying byte-identical output.
+
+Resource measurements also need representation awareness.
+A persistent trace can retain old subgraphs after they disappear from the current root.
+A node budget that counts only currently reachable nodes may therefore undercount actual memory.
+The engine should either include retained history, caches, and private replacements in its accounting or state that the budget bounds only admitted IR size.
+This is the same distinction that makes a product-state budget in the spellchecker different from a total-allocation limit.
+
+\section{Shrink failures without changing the disputed premise}
+\label{sec:ch85-shrink}
+Randomly generated terms and graphs can expose interactions that hand-written patterns miss, but a large failing graph is difficult to diagnose.
+A shrinking procedure removes unrelated substructure while preserving well-formedness and the observed disagreement.
+For typed terms, replacing a subtree with a smaller term of the same type avoids manufacturing a new type error that masks the original bug.
+For graph rewrites, shrinking must preserve the sharing, dominance, or use-count condition involved in the failure.
+Turning a shared node into two copied trees can accidentally eliminate the very defect being investigated.
+
+A useful failure record includes the original input, rule version, strategy, semantic mode, seed, budget, and independent oracle outcome.
+The shrinker reruns the same oracle comparison after every proposed reduction of the test case.
+If a smaller case fails only because it now exhausts fuel, that is not the same semantic counterexample unless budget exhaustion itself was the target bug.
+Retaining this distinction prevents a fuzzing workflow from converting a concrete wrong result into an inconclusive timeout and calling the reduction successful.
+
+The reference tests use exhaustive small families rather than a randomized shrinker.
+Their tiny counterexamples are already inspectable, and fixed iteration order makes failures reproducible.
+Adding randomized stress is a useful extension after the basic rule and certificate contracts are stable, not a substitute for establishing those contracts first.
+
+\section{Exercises}
+\label{sec:ch85-exercises}
+\begin{enumerate}
+\item\label{ex:ch85-priority} Two rules match the root but only the second rule's semantic premise holds.
+Explain why root indexing cannot select the first rule unconditionally.
+\item\label{ex:ch85-users} A shared add node has two parents; rewriting it changes a one-use predicate at both.
+List the invalidation and worklist obligations.
+\item\label{ex:ch85-stale} A queued match was found before a CFG edit.
+Why must a cached dominance condition be revalidated or invalidated before commit?
+\item\label{ex:ch85-budget} An expanding replacement exceeds the graph budget.
+Specify a publication sequence that leaves the last committed IR valid.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch85-reading}
+Ohlebusch supplies the rewrite-theoretic context for strategy and normal-form claims~\cite{ohlebusch-2002-rewriting}.
+The equality-saturation chapter and the \code{egg} paper describe an alternative-preserving engine with different update invariants~\cite{willsey-2021-egg}.

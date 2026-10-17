@@ -1,0 +1,1593 @@
+Combinators and Graph Reduction
+© February, 1996
+
+Rhys Price Jones
+Fritz Ruehr
+Richard Salter
+Alexei Barchenkov, Alan Bushnell, Dan Hutchings,
+Michael Klingbeil, Steve Postellon
+
+Contents
+l
+
+Introduction
+
+l
+
+Functional programming without lambdas
+
+l
+
+¡
+
+Function definition by partial application
+
+¡
+
+Currying and uncurrying
+
+¡
+
+Composition, diagonalization and other fun tricks
+
+¡
+
+An iteration combinator for lists
+
+Combinators and graph reduction
+The syntax of combinatory logic
+¡ Reduction and normal forms
+¡ The combinator reduction machine
+¡ An animated companion to the reduction machine
+¡
+
+l
+
+Implementing functional languages via combinators
+¡
+¡
+
+l
+
+The "bracket" abstraction algorithm
+Experimenting with abstraction
+
+Combinatory encodings
+Encoding booleans and conditionals
+¡ Encoding numbers and arithmetic
+¡ Encoding recursion
+¡
+
+Introduction
+This lab comprises an introduction to the theory and practice of combinators.
+Combinators are a special class of higher-order functions which were invented to study
+the elimination of bound variables from languages of logic, arithmetic and programming.
+By eliminating bound variables, we can study various formal properties of these
+languages independent of the usual problems associated with variable clashes and
+renamings. In particular, this leads to the possibility of an algebraic approach to
+programming and reasoning about programs, in which we can freely replace equals with
+equals in a direct, equational way. This contrasts with the usual approach to functional
+programming based on lambda calculus; recall from last semester how complicated it
+was to define correctly the operation of substitution on lambda terms so as to avoid
+variable clashes.
+For our purposes in studying programming languages, a combinatory approach offers the
+opportunity to explore a "lambda-less" style of higher-order functional programming. At
+first blush this may sound absurd: how can we define functions in Scheme, say, without
+using lambda? The answer lies in finding a small core or base set of functions in terms of
+which we can define all the other functions we're interested in, without resorting to
+explicit use of lambda. If taken to the extreme, this style of programming is not
+especially readable (as you might well imagine), but it leads to some interesting
+techniques and observations, and it helps motivate the study of combinators for their own
+sake.
+Once we have understood how combinatory programming works, we will look at a few
+issues in "pure" combinatory logic and also at how combinators can be used to
+implement (purely) functional languages using graph-reduction. As part of the lab, you
+will work with both a command-line version and an animated graphics version of a
+reduction machine based on these ideas (in order to make the animations simpler,
+however, our machine will use trees instead of graphs).
+Finally, we will also look at how traditional data structures such as booleans, numbers
+and lists can be treated from a combinatory viewpoint. One way to do this is to develop
+definitions which abstract or encapsulate the behavior of appropriate computational
+mechanisms (construction, selection and recursion) in a combinatory style. We'll explore
+this approach in the first chapter when we define and use a simple iteration combinator
+for lists. Another approach, of more theoretical than practical interest, is to encode the
+relevant data structures and computational mechanisms directly in terms of pure
+combinators. What is surprising is that we can encode all the desired computations over
+integers, lists, etc. using pure combinators alone, just as we can with pure lambda
+calculus. Although these encodings are not practical for everyday use, you should find
+them interesting in their own right and the ideas behind them may give you new insight
+into other styles of functional programming.
+
+The algebraic style developed in this lab is currently being studied and promoted by
+many people who believe that it leads to novel methods for handling correctness proofs,
+performance analysis and program transformations. For more information on these
+research efforts, see Fritz Ruehr in King 120-D.
+Notes on files:
+For the purposes of the lab you will need to load the following two files into a Chez
+Scheme run:
+l
+
+(load "/usr/users/classes/cs280/labcode/lab4/combdefs.ss")
+
+l
+
+(load "/usr/users/classes/cs280/labcode/lab4/comb.ss")
+
+NB: You may want to load the first of these files for use in Chapter 1 and the second one
+separately for use in the later Chapters, as there are a small number of conflicting names
+(for example, we define two different versions of multiplication, both called times).
+Additional files will be needed later on when we get to the sections which use animated
+graphics; the necessary files will be noted there.
+
+Functional programming without lambdas
+In this chapter we will try to motivate the ideas behind combinators by examining a
+"lambda-less" style of functional programming. We will work in Scheme, and thus have
+access to the usual primitive data types and functions available there. Nevertheless, we
+will try to follow a discipline in which we use lambda only to define certain basic
+functions, and then use these in turn to define all others. This discipline will foreshadow
+the fundamental idea of combinatory logic, which takes this approach to its ultimate
+extreme.
+Re files: At this point you should load the following file of sample code into a Chez
+Scheme run.
+l
+
+(load "/www/htdocs/classes/dragn/labs/combinators/combdefs.ss")
+
+Section(s)
+Function definition by partial application
+n Exercise 1
+¡ Currying and uncurrying
+n Exercise 2
+¡ Composition, diagonalization and other fun tricks
+n Exercise 3
+n Exercise 4
+n Exercise 5
+¡ An iteration combinator for lists
+n Exercise 6
+n Exercise 7: (optional)
+
+¡
+
+Function definition by partial application
+Let's begin by considering a number of simple definitions in both the usual Scheme style
+and then in a new style which avoids the overt use of lambda. In keeping with our typical
+Scheme style, we define functions according to an almost "canned" pattern involving the
+use of the keywords define, lambda and either cond or if:
+(define
+(lambda ( )
+(cond
+(( ... ) ... )
+(( ... ) ... )
+(else
+... ))))
+
+As an example, let's consider a definition for a function which takes a list of numbers as
+its argument and returns a list of "doubled" numbers (i.e., all the numbers of the original
+list are doubled in the result list). Calling this function dbl-all; we can easily define it
+as follows:
+(define dbl-all
+(lambda (x)
+(if (null? x)
+'()
+(cons (* 2 (car x)) (dbl-all (cdr x))))))
+
+This is the natural style of definition which we have learned to use for functions in
+Scheme: make a definition, use lambda to get a function, then analyze the argument
+structure using if or cond, and finally find a pattern of recursion appropriate to the
+structure of the argument(s) and the problem at hand.
+Unfortunately, although this standard approach makes it easy to generate the definition,
+the use of special forms and explicit recursion obscure the fairly simple nature of the
+function we are actually trying to define. Of course, the use of the define form is
+unavoidable if we wish to make the function available in a global way via the name dblall. But let's see if we can't do a better job with the explicit recursion and use of lambda.
+One way we have already learned to remove dependence on explicit recursion is through
+the use of primitive functions in Scheme which "package up" some common pattern of
+recursion for us. In fact, the Scheme primitive map allows us to apply a function over
+every element of a list, which is exactly the pattern we are following here. We can thus
+exploit map in the following new definition of dbl-all:
+(define dbl-all
+(lambda (x)
+(map (lambda (n) (* 2 n)) x)))
+
+This definition makes the relationship between the argument list and the doubling
+function ((lambda (n) (* 2 n))) clearer, but it is still a bit cluttered; in fact, we now
+have two uses of lambda instead of one.
+The use of the define form is still unavoidable, of course, but what is less obvious is that
+the use of lambda is not strictly necessary. It may seem necessary at first, but this is only
+because we tend to think of lambda as our only means of expressing functions in
+Scheme. This is not a bad intuition: in fact, we spent much of our early study of Scheme
+purposefully cultivating it!
+But in fact lambda is not the only way to express a function in Scheme ...
+
+Q. 1
+
+What other way can we express functions in Scheme (i.e., not using lambda)?
+
+Click here for the answer:
+
+How can we express dbl-all as the result of a function application? Let's take a first
+step by defining just the "core" function double which multiplies a numeric argument by
+two:
+(define double
+(lambda (n) (* 2 n)))
+
+We can think of this function as the "times 2" function, in the sense that it takes just a
+single argument n and multiplies it by 2. What we would like to be able to do is to "bake
+in" the 2 as the first argument to *, so that we could express double more directly as a
+function of just one argument. This sort of "baking in" of arguments is very common
+practice with combinators, so it is worth trying to do it in a general way. In particular,
+let's define a function (you may think of it as a "baker" function) which takes as its
+arguments a function and a first argument which is to be baked in; the result will be
+another function, but now just a function of one argument, namely the "unbaked" one.
+We'll call our function pa for partial application, the technical term used for this
+"baking" process in combinatory logic.
+In equational terms the function we want should behave as follows:
+((pa f x) y)
+
+=
+
+(f x y)
+
+This specification says that, given a function f and a first argument x, pa returns a
+function of one argument y whose value is the same as that of f when applied to x and y
+together.
+The wonderful thing about lambda in Scheme is that we can use it to derive a definition
+for pa directly from this equational specification:
+(define pa
+(lambda (f x)
+(lambda (y)
+(f x y))))
+
+Q. 2
+"Hey, I thought the whole point was to avoid the use of lambda, but here it is
+appearing twice in the definition of pa. What's going on?"
+
+Click here for the answer:
+
+Given the definition of pa from above, we can re-define double more directly, as the
+partial application of * to 2:
+(define double (pa * 2))
+
+And given this definition, we can define the function dbl-all in turn as follows:
+(define dbl-all
+(lambda (x) (map double x)))
+
+But now it is easy to see that dbl-all itself can be expressed using pa, namely as the
+partial application of map to double, since the formal parameter x of dbl-all appears as
+the second argument of map. Thus we can re-define dbl-all once more as follows:
+(define dbl-all
+(pa map double))
+
+Alternatively, we can substitute the definition for double directly into this definition in
+order to get the following, equivalent one:
+
+(define dbl-all
+(pa map (pa * 2)))
+
+Note that this direct process of substitution does not risk any problems with variable
+clashes, as might occur when using lambda, precisely because we have eliminated all the
+troubles associated with locally-bound variables. And, in order to see that this definition
+really is much simpler, let's compare it to the original definition of dbl-all from above.
+(define dbl-all
+(lambda (x)
+(if (null? x) nil
+(cons (* 2 (car x)) (dbl-all (cdr x))))))
+
+As you can see, the new version really is much shorter, although until you become used
+to the idea of partial application, it might seem quite obscure.
+Let's consider now how we might define the "opposite" of the double function, namely a
+function called half which will return its numeric argument divided by two.
+In standard Scheme, this is easy:
+(define half
+(lambda (n) (/ n 2)))
+
+When we try to turn this into a definition using partial application, however, it's easy to
+make the following mistake:
+(define half-not!
+(pa / 2))
+
+Q. 3
+Why is this definition wrong, i.e., why does this function not compute the half
+function we wanted?
+
+Click here for the answer:
+
+In order to get the desired behavior, we can use a new combinator whose job it is to swap
+the order of a functions arguments. The swap combinator is defined as follows.
+
+(define swap
+(lambda (f) (lambda (x y) (f y x))))
+
+Now we can use swap to define a properly working version of half:
+(define half (pa (swap /) 2))
+
+Note that we have to apply swap to the division operator first, before we hand it to pa.
+
+Q. 4
+What is the value of the expression (swap +)?
+
+Click here for the answer:
+
+Now that you've seen a few examples of the use of combinators, you should have no
+trouble with the following exercise.
+
+Exercise 1
+Define the following functions using the combinators pa and swap; you may also use
+other Scheme primitives in your definitions, but not the lambda keyword:
+1. succ: which returns a number one greater than its argument;
+2. triple: which returns a number which is three times its argument;
+3. zero?: which returns true (#t) when its numeric argument is equal to zero;
+4. list: which returns a singleton list containing just its argument;
+5. dupe: which takes a list of objects and returns a list of the same length, but with
+nested lists containing two copies of each of the elements of the original; by way of
+example, we should have:
+(dupe '(1 2 3 4))
+
+=>
+
+((1 1) (2 2) (3 3) (4 4))
+
+Of course, in the cases of succ, zero? and list, it would be possible just to define the
+desired functions as the corresponding Scheme pre-defined functions 1+, code zero? and
+list ... but the point is to come up with new definitions based on combinators.
+Hint:
+
+Currying and uncurrying
+The examples from the last section make it clear that it is sometimes helpful to define
+functions which take successive arguments rather than simultaneous ones: if we had a
+primitive version of * which took successive arguments, we would not have needed a
+separate device for partial application in order to use it to define double. In fact, in pure
+combinatory logic, as we will see later on, all functions are defined to take successive
+arguments rather than simultaneous ones. But we can continue the developments of the last
+section to automatically generate "alternative" versions of Scheme's primitive numeric
+functions in the combinatory style.
+Toward this end, we will now derive a definition for a function called curry which will
+convert a Scheme-style function of two arguments into its combinatory-style equivalent.
+The terminology of "currying" a function is standard in the functional world and is named in
+honor of Haskell Curry, the founder of combinatory logic.
+What do we want curry to do? Given a function of two arguments, we want to generate a
+new function which takes in one of those arguments, but then "waits" for the other one.
+Equationally speaking, we want:
+(((curry f) x) y)
+
+=
+
+(f x y)
+
+We can turn this equational specification into a Scheme definition using the power of
+lambda: essentially, we just use successive abstractions to "cancel out" actual arguments on
+the left-hand side with formal parameters on the right-hand side.
+(define curry
+(lambda (f)
+(lambda (x)
+(lambda (y)
+(f x y)))))
+
+In this definition, f is a formal parameter representing the function we are trying to modify,
+and x and y represent its (ultimate) arguments. One way to look at the definition is that it
+captures the notion of "waiting" for an argument by returning a lambda binding whose body
+cannot be evaluated until the second argument is supplied.
+Given this definition, we can easily make a "curried" version of the multiplication function
+as follows:
+(define times (curry *))
+
+Now we can define our old friend double using this new form of multiplication:
+(define double (times 2))
+
+Similar functions, including succ and triple from the exercises, are just as easy:
+(define succ (plus 1))
+(define triple (times 3))
+(define plus (curry +))
+(define div (curry /))
+
+We can see how these definitions work by reasoning about some simple examples, as
+follows:
+((times 2) 3)
+
+=
+
+(((curry *) 2) 3)
+; by the definition of times
+
+=
+
+(* 2 3)
+; by definition or equational specification
+; of curry
+
+=
+
+6
+; by definition of primitive arithmetic
+
+To be fair, we can also define a function which works in the opposite direction, i.e., taking
+in a combinatory-style function of successive arguments and returning a Scheme-style
+function of simultaneous arguments. This function is traditionally called uncurry (rather
+unsurprisingly), and it can be specified as follows:
+((uncurry f) x y)
+
+=
+
+((f x) y)
+
+Q. 5
+How can we define uncurry in Scheme?
+
+Click here for the answer:
+
+By way of example, here are a couple of uses of uncurry in action:
+> ((uncurry times) 2 3)
+6
+
+> ((uncurry plus) 7 9)
+16
+> ((uncurry (curry +)) 7 9)
+16
+
+As we can see from these examples, curry and uncurry are opposites, just as we would
+expect. That is, for all suitably related functions f and f', where f is defined in combinatory
+style and f' in Scheme style, we have:
+(curry f)
+
+=
+
+f'
+
+AND
+
+f = (uncurry f')
+
+Exercise 2
+One of the interesting aspects of functional programming in a language like Scheme is that
+we can apply functions to other functions in a fairly free manner and still get meaningful
+results in many cases. Consider for example that the function curry takes its arguments in
+succession, and that it is therefore itself a prime candidate for uncurrying, that is to say, for
+transformation into a function which takes its arguments simultaneously.
+Experiment with the following bizarre-looking definition and see if you can determine what
+the function mystery actually does:
+(define mystery (uncurry curry))
+
+Occasionally, we can even apply a function to itself in Scheme (though often not in a
+statically-typed language). For example, since the partial application function pa is a
+function which takes two arguments, the first of which must be a function, it is plausible (if
+a bit strange!) to consider applying pa to itself, twice over:
+(define mystery2 (pa pa pa))
+
+Of course, such a definition might be totally meaningless in practice, since we might never
+be able to give it appropriate arguments (i.e., ones for which the function would actually run
+without error). But in fact, mystery2 turns out to be not only meaningful, but also quite
+useful. See if you can discover what function is computed by mystery2.
+Hint:
+
+Composition, diagonalization and other fun tricks
+Unfortunately, we sometimes need more than just currying and uncurrying (or even
+partial application) to express useful and interesting functions in a combinatory style.
+Consider for example that we might wish to define a function which adds up all the
+numbers between 1 and a given limit value, n. Let's assume for the moment that we
+already have a function upto which, given a number n, returns the appropriate list of
+integers In fact, this function is defined in the script you loaded at the beginning of the
+lab).
+> (upto 5)
+(1 2 3 4 5)
+> (upto 10)
+(1 2 3 4 5 6 7 8 9 10)
+
+A natural next step is to define a function which will sum up all the elements of a list. We
+can do this by recalling the behavior of the Scheme primitives + and apply. In particular,
+remember that when given multiple simultaneous arguments, + will add them all up:
+> (+ 1 2 3 4)
+10
+
+Furthermore, the function apply will take a function which operates on multiple
+arguments (like +) and apply it to a list of arguments:
+> (apply + '(1 2 3 4))
+10
+
+Q. 6
+How can we define the sum function using apply, + and combinators?
+
+Click here for the answer:
+
+Unfortunately, glueing together these two functions (upto and sum) is not as easy as it
+might seem: each of them is a function of one argument, not two, so our friends pa and
+curry won't be of any help. What we want is something like this:
+
+(define sumto
+(lambda (n)
+(sum (upto n))))
+
+... but we don't (yet!) have any good way to express this in a purely combinatory form.
+Well, as you might have already guessed, the answer to our troubles is a new combinator
+called compose which represents function composition; it can be defined as follows:
+(define compose
+(lambda (f g) (lambda (x) (f (g x)))))
+
+Now we can define the sumsto function simply as follows:
+(define sumsto (compose sum upto))
+
+(efficiency buffs never fear; we'll do it the right way below!).
+Function composition is quite useful for a number of purposes, so it makes sense to take
+this into our (small, but growing) fold of basic combinators. As another example, let's
+look at how we can use function composition to define a simple polynomial (namely,
+3x2+1) in a purely combinatorial way. Our original, Scheme-style definition is:
+(define poly
+(lambda (x) (1+ (* 3 (* x x)))))
+
+But we can re-define it using combinators as follows:
+(define poly2
+(compose succ (compose triple square)))
+
+You may wish to compare the results of applying poly and poly2 to a number of test
+cases to see that they indeed compute the same results:
+> (map poly (upto 10))
+(4 13 28 49 76 109 148 193 244 301)
+> (map poly2 (upto 10))
+(4 13 28 49 76 109 148 193 244 301)
+
+Continuing on to yet another new combinator, consider how we might define a function
+which squares its argument, i.e., which multiplies its argument by itself. Such a function
+can't easily be written in terms of the combinators given so far, since we have no means
+by which to duplicate an argument (so far, all we can do is re-arrange pairs of arguments
+x and y). The simplest way to get the desired behavior is to define such a combinator
+directly; we will call it diag, since it "diagonalizes" its function argument by applying it
+to the same value two times over (think of the arguments to the function as being row and
+column indices of a matrix of results):
+
+(define diag
+(lambda (f) (lambda (x) (f x x))))
+
+Now we can easily define square and similar functions in terms of diag:
+(define square (diag *))
+(define double (diag +))
+
+Another useful variation along these lines is a version of composition which will
+compose a single function of two arguments with two functions of one argument, as
+follows.
+(define compose-2
+(lambda (f g h) (lambda (x) (f (g x) (h x)))))
+
+By way of example, we can use compose-2 to define the "square and a half" function,
+which returns the value of the sum of the square of its argument and half its argument:
+(define sq-and-half (compose-2 + square half))
+
+Exercise 3
+Based on the previous example, you should be able now to define a much more efficient
+version of the sums-to function than the one given above, based on the fact that the sum
+of the natural numbers up to and including n can be expressed as one half of the sum of n
+squared and n. Define the function smart-sums-to to take advantage of this formula.
+Hint:
+
+And now for one other short little exercise (this one is applicable to text-based data, too,
+not just to numbers).
+
+Exercise 4
+Use the compose-2 combinator to define the palindrize function which appends its
+
+argument to a reversed copy of the same. In other words:
+> (palindrize (upto 10))
+(1 2 3 4 5 6 7 8 9 10 10 9 8 7 6 5 4 3 2 1)
+
+Hint:
+
+This completes our tour of basic combinatory techniques as applied to Scheme
+programming; in the next section we will look at ways to incorporate recursive data
+structures such as lists more completely into the combinatory style. Before we go, let's
+take a crack at yet another exercise in self-application of functions.
+
+Exercise 5
+In the last exercise, we considered how we may sometimes apply a function in Scheme to
+itself; in the case of diag, we cannot do this directly, since diag wants its argument to be
+a function of two arguments, and we have defined diag itself in the curried style.
+There is nothing to prevent us, however, from using uncurry to change diag into a
+suitable argument for itself! That is, we can define a new function mystery3 as follows:
+(define mystery3 (diag (uncurry diag)))
+
+See if you can discover what the function mystery3 does and a useful application of it to
+combinatory problems.
+
+An iteration combinator for lists
+So far in our development of a combinatory style of programming, we have dealt mostly with
+combinators which effect various kinds of function applications. Whenever we have needed to work with
+data types like numbers and lists, we have fallen back on the primitives defined in Scheme (like * and
+map) which can be used to manipulate these non-function data. In this section and the next, we will look
+at an approach which will allow us to carry the benefits of a combinatory style more directly to the task
+of processing traditional data types and structures. The basic idea behind our approach is inspired by the
+underlying inductive structure of data types; because of this, it will go hand-in-hand with an inductive
+style of proof.
+Consider then lists as a first example; recall that the inductive structure of lists is comprised of a base
+case (the empty list nil) and an inductive case (the cons of a head and a tail, a.k.a. car and cdr). When
+we want to prove some property of lists using induction, we need to consider these two cases, and we use
+a "self-referential" inductive hypothesis to handle the fact that the cdr of a list is itself a list. On the other
+hand, when we want to define a function over lists, we use the same basic form, which usually looks
+something like this:
+(define foo
+(lambda (lyst)
+(if (null? lyst)
+( ... (car lyst) ... (foo (cdr lyst)) ... ) )))
+
+Here the ellipses indicate that we generally write some code in the second clause which depends on the
+values of both the car of the list and on the results of the recursive call.
+What we now seek is to define a combinator for lists that will allow us to "package up" recursions over
+lists of this basic form, but in a re-usable way. The motivation is similar to the one which drove our use
+of map in the dbl-all example in the first chapter, but we now want to find a generalized "packaging"
+function that will allow us to generate functions on lists just by passing it appropriate arguments.
+Working by analogy from the way we do induction, we can see that the combinator should handle the
+discrimination of cases and the recursion itself, whereas the actual arguments we supply in any given
+context should determine the specific behavior of the results. One of the formal parameters should
+correspond in some sense to the nil case and one to the cons case. For nil, we can just supply a value
+which we want to be returned in that case. But for cons, if we want to be able to generate any reasonable
+variety of functions, we should pass in something more than just a basic value; in fact, we should pass in
+a function which will capture the dependence of the second clause on the car part of the list and the
+recursive results.
+Therefore our list-recursion combinator should be a function of two arguments, one a function and one a
+more basic value, whose result is itself a recursive function of the form given above.
+(define list-iter
+(lambda (f n)
+(rec r
+(lambda (lyst)
+(if (null? lyst) n
+(f (car lyst) (r (cdr lyst))))))))
+
+; define list-iter to be
+; a function of f and n,
+; returning a recursive
+; function on lists,
+; with base case for nil
+; and recursion on the cdr
+
+To understand this definition, recall that the special form (rec <var> <expr>) denotes a value which is
+computed recursively by using the value of the expression as a whole for uses of <var> within the body
+<expr>. For a more extensive discussion of rec, see page 58 of Dybvig.
+
+Here is an equivalent definition of list-iter which may look a little more familiar.
+(define list-iter
+(lambda (f n)
+(lambda (x)
+(if (null? x) n
+(f (car x) ((list-iter f n) (cdr x)))))))
+
+As examples of the use of list-iter, we can define functions for computing sums and products of lists
+of numbers as follows:
+(define it-sum (list-iter + 0))
+(define it-prod (list-iter * 1))
+
+You should test out how these functions work for some (short!) examples on paper until you understand
+how list-iter works (a good test case is provided by (it-sum '(1 2 3)), which should return a
+result of 6).
+
+Q. 7
+Note that 0 is the identity for +, whereas 1 is the identity for *; why is it important that these values
+be the identities for the respective operations?
+
+Click here for the answer:
+
+Exercise 6
+Use list-iter to define a function join which joins together all the lists in a list of lists; you may want
+to use the Scheme pre-defined append function. The intended behavior is as follows:
+> (join '((1 2) (3 4 5) (6) (7 8 9 10)))
+(1 2 3 4 5 6 7 8 9 10)
+
+Hint:
+
+As another example of iteration over lists, let's try to derive an "iterative" definition of the usual length
+function on lists; to resolve ambiguity, we'll call this version it-len.
+How should our function work? Well, in the base case it should clearly return 0 for the empty list. In the
+
+recursive case we need a function which, when given the car of the list and the recursive result, will
+return the successor of the recursive result. This is a specific instance of a general situation in which we
+want to ignore one of the arguments passed to a function, and to deal with it we can use the const
+combinator, which is specified by this equation:
+((const x) y)
+
+=
+
+x
+
+and can thus be defined as follows:
+(define const
+(lambda (x) (lambda (y) x)))
+
+Now we can specify it-len as follows: we want
+it-len
+
+=
+
+(list-iter f 0)
+
+where f is some function which behaves like this:
+(f x y)
+
+=
+
+(succ y)
+
+Q. 8
+How can we find such a function f to complete the definition of it-len?
+
+Combinators and graph reduction
+In this chapter we will move on from looking at a combinatory style of programming
+within Scheme to a more direct discussion of combinators as they are usually understood
+in their own right. The model of computation supported by combinatory logic (as the
+study of combinators is known) is very similar to our first understandings of how Scheme
+and other functional languages are implemented. In particular, for pure versions of these
+languages, we think of computation as reduction or re-writing. That is to say, we think
+of an expression that we start with as representing some computation we'd like to
+perform, and then use certain rules to re-write the expression over and over again,
+simplifying or reducing it each time, until we finally have the answer.
+This model of computation should be familiar to you as the same one you employed in
+algebra classes in high school, working with polynomials for example. And, in fact, it is
+the algebraic simplicity of the combinatory rules which makes this model especially
+attractive in the current context.
+One note of caution: writing in terms of a minimal set of combinators does not generally
+lead to especially readable code, nor should you think of combinators as a language for
+humans to program in directly. Rather, as we will see in the next chapter, it is best to
+think of combinatory code as a kind of machine code, into which we can compile any
+(pure) functional language for more efficient execution.
+Re files: Now would be a good time to load the second Scheme definition file, which
+defines the functions implementing the combinator machine; the file is comb.ss.
+
+Section(s)
+The syntax of combinatory logic
+n Exercise 8
+¡ Reduction and normal forms
+¡ The combinator reduction machine
+¡ An animated companion to the reduction machine
+¡
+
+The syntax of combinatory logic
+In the last chapter we explored a combinatory style of programming within Scheme. As
+you may have noticed, we seemed to always be needing more combinators to get the
+effects we wanted; this was due in some part to the need to constantly switch back and
+forth between functions of one argument and Scheme's functions of several arguments.
+Now, as we begin to look at combinators in isolation, we will eschew functions of
+multiple arguments all together. This will help us to minimize the number of combinators
+we need; in fact, we will be able to get away with as few as two or three total! For now,
+this total does not include primitive arithmetic functions, which we will use in curried
+form in our examples; but in the last chapter we will see how even those can be
+eliminated by encoding arithmetic (and other data structures) in terms of just two basic
+combinators.
+Let's start with the three basic combinators which form the traditional core of
+combinatory logic; they are called S , K and I . These combinators were first invented by
+M. Schoenfinkel around 1924; they were re-discovered and widely popularized in the
+form of combinatory logic between the 1930's and the 1950's by Haskell Curry and his
+collaborators. Most recently, combinators have experienced a resurgence in interest since
+the work of David Turner in the mid-1970's concerning their use in the implementation
+of functional languages. Since that time, a large amount of research has been devoted to
+both their theory and practical applications. In fact, you can now download a World-wide
+Web server written in a functional language which uses combinator techniques as its
+basis; the server even supports scripting in a pure functional language.
+The basic framework of combinatory logic is an algebraic one; rather than defining the
+combinators relative to some underlying language like Scheme, we take them as
+primitive constants and simply characterize their behavior according to certain algebraic
+laws. For example, the following three laws completely characterize the behavior of our
+chosen combinator basis:
+I x = x
+(K x) y = x
+((S f) g) x = (f x) (g x)
+
+In order to understand the meaning of these laws, we have to know a little more about the
+syntax of combinatory terms. Essentially there are only two forms of terms, constants and
+applications. Constants will include the three combinators plus various primitive
+arithmetic ones. We will also feel free to make definitional abbreviations using "metavariables" which simply stand for the corresponding right-hand side terms, and to use
+meta-variables to state general laws, like those given above. Applications are always of a
+single function to a single argument and are written with the function to the left and the
+
+argument to the right. Parentheses are used to group together terms and avoid confusion
+about which function is being applied to which argument.
+By way of example, the second equation above has as its left-hand side the application of
+a function (K x) to an argument y. K is a constant combinator and x and y are just metavariables used to indicate that this law would hold no matter what terms were substituted
+for them. In the third equation above, we have on the left-hand side a succession of three
+function applications and on the right-hand side an application of one function
+application to another.
+As usual when working with formal languages, including all the parentheses explicitly
+usually leads to somewhat less readable terms (no offense to Scheme). We will use the
+convention that function application associates to the left and will feel free to omit
+parentheses accordingly, restoring them explicitly if necessary to stress the structure of
+the term. For example, using this convention we can re-write the above laws in their
+more traditional forms as follows.
+I x = x
+K x y = x
+S f g x = f x (g x)
+
+Note that the only non-left associated application occurs on the right-hand side of the rule
+for S .
+
+Q. 9
+Let's get some practice working with the parenthesization conventions; add explicit
+parentheses to the following two terms:
+l
+
+S K K I
+
+l
+
+K I (K I) K
+
+and remove all unnecessary explicit parentheses from these terms:
+l
+
+((S S) S (S S) ((I I) I))
+
+l
+
+(K (I) (S (I K) I) I).
+
+Click here for the answer:
+
+It sometimes helps to see the structure of a term to draw it out as a tree; when doing this,
+we will draw binary trees where internal nodes represent applications, with the function
+sub-tree on the left and the argument sub-tree on the right, and where labeled leaves
+represent constants (or meta-variables). For example, the first two of the four terms in the
+question above might be drawn as follows:
+
+Once you have assured yourself that you can translate back and forth between these
+various representations, go on to the next exercise.
+
+Exercise 8
+For each of the following drawings of combinatory terms as trees, write out both the
+minimally parenthesized and the fully parenthesized forms of the terms (you needn't
+include the very outermost parens in either case):
+
+Reduction and normal forms
+Of course, if all we did with combinatory terms was write them out in different forms and
+draw pictures of them, they would be pretty boring. In order to add some life to the
+subject we need to incorporate some notion of computation; for combinators, as for
+lambda calculus, this notion is one of reduction or term re-writing.
+The idea harkens back to days in grade school when you calculated with arithmetic and
+algebraic expressions by "simplifying" them, that is to say, re-writing them according to
+various rules until you reached an acceptable final answer. In the case of arithmetic, an
+acceptable answer was something in the form of a number, i.e., with no operations such
+as + or * left in the term. For algebraic expressions, such as polynomials, the situation
+was a little harder to pin down: which is a better answer, a succinct form such as (x+1)2
+or an expanded one such as x2+2x+1 ?
+For combinators the notion of a "finished answer" is fairly straight-forward and is called
+a normal form. Essentially, a term is in normal form just when no more rules may be
+applied to simplify it any further. There is nevertheless a complication which arises in
+combinatory logic which does not usually enter into high school algebra; namely, the fact
+that computations may proceed indefinitely, with no clear end in sight nor any indication
+of whether a normal form can ever be found. This complication may lead us to consider a
+number of different reduction strategies, corresponding to different orders of applying
+the rules.
+The process of reduction is driven by the rules as follows: we look in the term for
+occurrences of patterns which match the left-hand side of a rule; if we find one, we can
+replace the matching part of the term with the corresponding right-hand side of the rule,
+where each meta-variable on the left is replaced by the appropriate portion of the
+matching term. The matching portion of the term is called a redex, and the one-step
+process of replacement is called a (one-step) reduction.
+Let's look at an example of reduction; consider the a term of the form S (K I) a b c;
+the successive application of S to the three arguments (K I), a and b constitutes a redex,
+since it matches the left-hand side of the S rule; for easy reference, here are the three
+rules again:
+I x
+
+=
+
+x
+
+K x y
+
+=
+
+x
+
+S f g x
+
+=
+
+f x (g x)
+
+We can therefore reduce the term by replacing this sub-term with the corresponding
+right-hand side, namely (K I) b (a b), or just K I b (a b) using minimal parens.
+
+Replacing this sub-term yields the overall (one-step) result of K I b (a b) c, since the
+replaced term occurred in the context of application to c.
+Proceeding in this fashion, we get a computation which looks like this, where we use the
+arrow "-->" to indicate a one-step reduction:
+S (K I) a b c
+
+; starting term
+
+--> K I b (a b) c
+
+; by the S rule
+
+--> I (a b) c
+
+; by the K rule
+
+--> a b c
+
+; by the I rule
+
+a b c
+
+; result in normal form
+
+For us, the most important reduction strategy will be the so-called normal-order one, in
+which we always make the leftmost, outermost reduction first. In fact, these were the
+only choices available at any step in the above example.
+
+Q. 10
+Why couldn't we have chosen to reduce the uses of the K or I combinators at an
+earlier step in the example reduction process?
+
+Click here for the answer:
+
+According to the normal-order strategy, we always look to the extreme left or "head" of
+the expression first to find a redex. If the leftmost atom is a combinator or constant (i.e.,
+not a meta-variable), then we look to see if it has sufficient arguments to be reduced. If it
+does not, we may need to look further right into the term in order to find a potential
+redex. If no redex exists, then we have a term already in normal form.
+
+Q. 11
+How many redexes are there in the following terms? Count only the immediate
+redexes, i.e., don't count any in terms which result from reducing the given ones.
+
+l
+
+I (I a) (S a I b)
+
+l
+
+I (S I I) (S I I)
+
+l
+
+S (a K I) b
+
+The combinator reduction machine
+In order to make it easier for you to experiment with the manipulation and reduction of
+combinatory terms, we have implemented a number of functions which together
+constitute a combinatory reduction machine. The definitions you will need (at least for
+the text-based version of the machine) are available in the files mentioned in the
+introduction; you should make sure you have these definitions loaded into a Chez
+Scheme window before proceeding to work with this section.
+A necessary part of any implementation of combinators is a choice of input syntax and
+internal data structures used to represent combinatory terms. In our implementation we
+have taken advantage of a fortuitous coincidence in the similarity between the minimally
+parenthesized syntax for combinators and the syntax used for lists in Scheme. In
+particular, notice that combinatory terms look almost exactly like lists of symbols, except
+that we usually omit the outermost set of parentheses when writing combinatory terms
+down by hand. Our Scheme implementation is designed to take lists of symbols as its
+inputs, so we will need to remember to always put the "extra" parentheses on the outside
+when giving input terms to the machine. In addition, remember that lists of symbols
+should be quoted so that they don't get evaluated by Chez.
+A first tool which is useful in learning to understand the syntax of combinatory terms is
+the verify function: this function takes a candidate combinator term in as input and
+verifies that it is syntactically correct. Along the way, it will put the term into a standard
+form as far as parenthesization is concerned, using minimal parentheses (but including
+the extra outer ones, as mentioned above).
+For example, here is a short script showing how the verify function can be used to find
+the minimal parenthesization for some of the sample terms discussed a few sections back:
+> (verify '(((S (K S)) x) (S (K y))))
+(S (K S) x (S (K y)))
+> (verify '(((S K) x) (K y))))
+(S K x (K y))
+
+In addition to just writing terms in "long-hand" each time, we can store them in Scheme
+variables; this is especially useful when working through repeated experiments involving
+a single term. In order to make it easier to work with terms by name, we also have a
+couple of functions which allow you to get the function part of a term and the argument
+part of a term, and to put two terms together by applying one to the other. Here's how
+they work.
+> (define self '(S I I))
+> (fn self)
+S
+> (args self)
+
+(I I)
+> (define loop (app self self))
+> loop
+(S I I (S I I))
+
+Q. 12
+What happens if we try to reduce the term loop to normal form?
+Hint:
+
+Click here for the answer:
+
+Once we have some interesting terms to work with, we can explore how they behave
+under reduction by using the interactive function red. It takes a term argument and
+interactively prints out all of the steps in its normal-order reduction. At each step, the
+user may stop and read the next intermediate term before continuing: the machine waits
+at each step for a return character to be input. In addition to printing out the intermediate
+results, it also returns the final normal form (if there is one) as its result.
+> (red (app self 'x))
+(S I I x)
+--> (I x (I x))
+--> (x (I x))
+--> (x x)
+(x x)
+
+You should try out an example or two like this in order to get a feel for the interaction
+and for how the input must be entered.
+If you would like to get right to the normal form for a term without waiting for the
+interactive process, you can use the function norm to reduce a term according to normal
+order. Just be careful if you use it on a term like loop!
+
+You should feel free to look at our implementation of the reduction engine; the source is
+open for viewing and looking at it may take away some of the mystery behind the
+machine. In the next section, we'll introduce you to a more lively and colorful version of
+the reduction machine, one which works via animated graphics.
+
+An animated companion to the reduction machine
+To help you visualize what graph reduction and combinators are all about we came up
+with a simple graph reducer in Scheme. The aim behind it is to show the steps that a
+graph reducing algorithm goes through. We also made a graphical version of it. This
+shows the process of graph reduction using binary trees. The following chapter briefly
+acquaints you with this program.
+First of all a few words on notation. There can be various ways of writing down a
+combinator expression, but we chose one that fits Scheme syntax and is easy to read and
+take apart. A combinator expression is a list or an S-expression where the leftmost atom
+or S-expression is the last combinator down the left spine of the current combinator
+expression. For example an expression like (S (S K) (S I) K I) is a notation for the
+following graph:
+
+The @ sign in the graph indicates an application node, where the right child is applied as
+an argument to the left child. The S, K and I, of course, stand for the three different
+combinators. As you see, in the expression above S is the first atom in the list. So we go
+down the left spine of the graph: starting from the root, we go to the left child each time
+until we arrive at S. This is the combinator that the reduction engine is going to try to
+
+reduce first. It is going to perform reduction on the three application nodes above S. If we
+were to look at S as a Scheme function that takes in three arguments and performs the
+reduction according to the rules of an S combinator we would have (S (S K) (S I) K).
+Notice how close this expression is to our notation of the whole expression. The only
+difference is the last I in the notation. It's left out here because an S combinator only
+needs three arguments to perform a reduction; including the I would give us four. Also
+note that if we were dealing with an expression where an S combinator is only given 2 or
+1 argument the reduction of this particular combinator would not be performed.
+Now let's move on to reduction process. Copy the files graphics.ss, comb.ss and
+graph_combin.ss stored in the lab directory into your current directory. Initialize your
+display (in csh or tcsh, setenv DISPLAY your_machine.cs.oberlin.edu:0.0; in bash,
+export DISPLAY=your_machine.cs.oberlin.edu:0.0). Then start Scheme and load
+comb.ss. The function that launches the reduction engine is called red. It takes one
+argument: the list containing the combinator expression to be reduced. The function goes
+through the steps of graph reduction, each time displaying the intermediate expression
+still to be reduced. For example, try (red '(S (S K) (S I) K I)). First it shows the
+expression it is reducing. Hit Return and the result of reducing the first S combinator is
+shown. Remember how S works? The third argument is applied to the first and the
+second one. This is exactly what happens: we apply K to (S K) and get (S K K) and
+similarly K to (S I) to get (S I K). Hit Return again and the second S combinator gets
+reduced to (K (S I K) (K (S I K)) I). Keep hitting Return until we arrive to an
+expression that can not be reduced any further - (K I). We can't reduce it because K
+needs two arguments.
+Of course, it is difficult to picture the whole graph by just looking at an expression
+containing a bunch of parentheses and letters, so let's see how the graphics part of the
+engine works. You start the reduction in graphics mode using the function red-draw.
+Make sure that your display is set (as above) before running this function. Just like red, it
+needs one argument: the expression to reduce. If you try (red-draw '(S (S K) (S I)
+K I)) you will get the following graph.
+
+In your scheme window you will still find the notation of the expression we are reducing
+just like with red. Hit Enter/Return (make sure your cursor is inside the scheme window,
+not the graphics window) and the next expression to reduce (a redex) will get highlighted
+in yellow, as below.
+
+You can use the arrows at the bottom of the graphics screen to move around the canvas.
+If you move to the right you will see the result of reducing the current redex.
+
+Hit Enter again to reduce the redex. Keep hitting Enter until the whole expression is
+
+reduced. When reduction is complete red-draw will automatically close the graphics
+window. Note that the binary tree representation is solely for human comprehension. In
+actual implementations graph reducers deal with graphs that often don't have the simple
+binary tree properties. This is done for efficiency; instead of recreating the trees each
+time we reduce a redex, we use pointers to point into different parts of the graph. Thus,
+often children point back to their predecessors, and this breaks the property of a binary
+tree. Nevertheless, a binary tree is a good learning tool for understanding graph
+reduction.
+Now you can see how the reduction engine works on your own combinator expressions.
+Go ahead, try it, it's fun!
+
+Implementing functional languages via combinators
+You may wonder where the definitions for the three combinators S , K and I came from.
+The I combinator is just the identity function, which we called id in our combinatorystyle Scheme programming. K is the "constant function" maker, in that it produces a
+constant function based on whatever first argument it is given; it was called const in the
+Scheme code.
+But what are we to make of the S combinator? Its definition may seem a bit arbitrary and
+not especially evocative. In fact there is an excellent rationale for the choice of these
+three combinators, including S , based on their use in translating lambda calculus and
+other formal languages into combinatory terms. We will look at this translation process,
+which was actually the original motivation for combinators, in the next section. In the
+other sections in this chapter we will see how the idea of translation into combinatory
+form has become very influential in the modern world of functional language
+implementations, and how this has spurred further research on how to make
+implementations of the translation and of combinatory reduction more efficient.
+
+Section(s)
+¡
+¡
+
+The "bracket" abstraction algorithm
+Experimenting with abstraction
+n Exercise 9
+
+The "bracket" abstraction algorithm
+As mentioned above, combinators were invented by M. Schoenfinkel in the 1920's in
+order to explore the idea of eliminating variables from languages of logic and
+mathematics. Schoenfinkel's observation was based on techniques very much like the
+combinatory style of programming we looked at in the first chapter, but for the sake of
+theoretical interest, he wanted to see if the process could be brought to the point where
+all expressions could be written without any recourse to bound variables.
+In order to realize this goal, he and other researchers, including Haskell Curry (not to be
+confused with the Java Zone's chicken curry sandwich), developed algorithms which
+automatically translate expressions into combinatory form. The first step in this
+translation process is to eliminate functions of several variables by appropriate
+"currying"; this eliminates the extra cases and difficulties that would otherwise come up
+when treating, say, binary operators in arithmetic expressions.
+Another step in the process is to replace all variable-binding forms with uses of lambda
+abstraction and appropriate constants. For example, the use of integration forms in
+calculus involves the binding of variables, but we can easily eliminate these in favor of
+lambda abstractions, thus separating out binding issues from issues of meaning.
+Given these first few simplifications, what other forms of terms might we run across in
+our translation process? Essentially the only other forms will be function application,
+variables and constants. We will see in a moment below how lambda bindings can be
+handled, but in the meantime let us concentrate on eliminating the variables; constants
+can be handled easily enough using reduction rules like those for the combinators, but
+tailored to their particular semantics.
+The basic idea behind the algorithm, called the abstraction or bracket abstraction
+algorithm, is that it will take a single variable and a term as arguments, and eliminate that
+variable from the term by producing a function which, if applied to that variable, would
+re-construct the original term. That is, writing [x]M for the abstraction of the variable x
+from the term M, we should have:
+[x]M = f
+f x = M
+
+Note how abstraction and application are thus in some sense made to be opposites of
+each other.
+In order to eliminate several variables from a term, we need only apply the algorithm
+several times, once for each variable, in whatever order we wish; we need only supply
+the same variables (or other terms) in the corresponding order again when we re-apply
+the resulting function.
+
+[z][y][x]M = g
+g z y x = M
+
+In the second line above, we are of course taking advantage of the usual rules for
+associating function application to the left; i.e., what we really have is three separate
+function applications.
+Now we can see how lambda abstractions in a term can be handled by this approach.
+After all, lambda abstraction is a notation which denotes a function of some formal
+parameter, and is in some sense opposite to function application. "Bracket abstraction" is
+just an algorithm or process which, when given the variable and a body term, actively
+produces a (functional) term which has the same behavior under later application. Thus,
+if we wish to eliminate a lambda abstraction from a term, we can just replace the lambda
+abstraction by the results of a bracket abstraction of the body with respect to the same
+bound variable.
+(\x.M) = [x]M = f
+f x = M
+
+(Note that the backslash character is the standard ascii representation for a lambda, so the
+left-hand side of the first equation means the same thing as the more familiar (lambda
+(x) M).) The only detail left is the actual mechanics of the algorithm: we need to
+consider the possible forms of terms and produce for each one a new term as a result.
+There are two, or perhaps three, possibilities.
+l
+
+the term is atomic, and happens to be the variable we are abstracting;
+
+l
+
+the term is atomic, but is a constant or a different variable;
+
+l
+
+the term is a function application consisting of a function term on the left and an
+argument term on the right;
+
+Now we will specify the algorithm in detail, according to these three cases; what we will
+see is that the three cases correspond precisely to the three combinators S , K and I :
+[x] x
+
+=
+
+I
+
+[x] y
+
+=
+
+K y
+
+(for atomic y not equal to x)
+
+[x] (N P)
+
+=
+
+S ([x] N) ([x] P)
+
+In the last clause, where applications are converted into uses of the S combinator, we see
+the natural recursion of pushing the abstraction algorithm down into the two sub-terms
+which comprise the application.
+
+We can prove that the algorithm meets its specification by using induction. Our goal is to
+show that if we abstract a variable from a term, and then apply the abstraction to that
+variable, we get back the term again; i.e.,
+([x] M) x
+
+=
+
+M , for all terms M and variables x.
+
+The base case is when the term under consideration is atomic (in which case it is either
+equal to the abstracted variable or not) and the inductive case occurs when the term is an
+application.
+Base case:
+If the term M is atomic, then it is either a variable or a constant. Assume for the moment
+that is is not equal to x, the variable being abstracted, and call this atomic term a. Then
+we have
+[x] a = K a
+
+; by the definition of the algorithm
+
+(K a) x = a
+
+; by the rule for K
+
+so that the desired property holds.
+On the other hand, if the M is atomic and is also the variable x being abstracted, we have
+[x] x = I
+
+; by the definition of the algorithm
+
+I x
+
+; by the rule for I
+
+=
+
+x
+
+so again, the property holds.
+Inductive case:
+Assume that the term M has the form of a function application, where the function part is
+a term N and the argument part a term P. Furthermore, make the inductive assumptions
+that the desired property holds for these two sub-terms. Now we have
+[x] (N P) = S ([x] N) ([x] P)
+; by the definition of the algorithm
+S ([x] N) ([x] P) x
+
+=
+
+([x] N) x (([x] P) x)
+
+; by the rule for S
+=
+
+N P
+
+; by the inductive assumptions
+
+and again the desired property holds.
+The moral of the story is that the three combinators are indeed very well chosen, since
+they correspond precisely to the inductive structure of terms and to the possibilities of
+common or different atomic cases. The S combinator, if it seemed mysterious before,
+should now seem almost transparent: given two (abstracted) terms and a value, it applies
+each term to the value (in order to resolve their respective abstractions) and then applies
+the results one to the other, in order to restore the original application term. In this sense,
+S can be seen as simply "re-directing traffic"; that is, it sends the x down the term
+structure to each half of an application term and then puts that term back together again.
+
+Experimenting with abstraction
+Now that you have been introduced to the basic concepts behind abstraction, it's time to get
+some hands-on experience working with abstracted terms and their reductions. We have
+implemented the bracket abstraction algorithm as a Scheme function on symbols and terms
+called abstr. You can use it to test out the proof we gave above from a more experimental
+viewpoint. For example, in the script below we show that when x is abstracted from the term
+(+ x x) and the resulting term is applied back to the variable x and reduced, we end up with
+the same term we started with.
+> (abstr 'x '(+ x x))
+(S (S (K +) I) I)
+> (red (app '(S (S (K +) I) I) 'x))
+(S (S (K +) I) I x)
+--> (S (K +) I x (I x))
+--> (K + x (I x) (I x))
+--> (+ (I x) (I x))
+--> (+ x (I x))
+--> (+ x x)
+(+ x x)
+
+Q. 13
+What happens if we take a term like (+ x x) and abstract a variable like x out from it,
+but then apply the term to a different variable and reduce the result?
+Hint:
+
+Click here for the answer:
+
+We can also express multiple abstractions, i.e., over several variables, simply by abstracting
+them out in succession. For convenience we have defined a function multi-abstr which
+takes a list of variables and a term and performs these same successive abstractions.
+> (define xy (abstr 'x (abstr 'y '(+ x y))))
+> xy
+(S (S (K S) (S (S (K S) (S (K K) (K +))) (S (K K) I))) (K I))
+> (equal? xy (multi-abstr '(x y) '(+ x y)))
+#t
+> (red (app (app xy 'x) 'y))
+(S (S (K S) (S (S (K S) (S (K K) (K +))) (S (K K) I))) (K I) x y)
+--> ...
+--> (+ x y)
+
+Exercise 9
+Perform an interesting experiment involving abstraction and reduction. You may want to
+focus on properties of the algorithms, on measurements of term size or length of reductions,
+on patterns in the forms of terms, or anything else that interests you. Include files with any
+definitions you made and also scripts showing the results of your experiments, if possible.
+Be creative!
+
+Combinatory encodings
+In the last chapter we saw how anything that can be expressed in terms of lambda
+calculus can also be expressed in terms of combinatory expressions, as long as we have a
+rich enough set of combinators to start from. Up to this point in the lab, we have been
+using a few "proper" combinators (i.e., those which just re-arrange or re-combine their
+arguments) and then depending on other constants in order to express computations on
+data types such as numbers or lists.
+We know from last term, however, that we can express any computation over any data
+whatsoever by encoding the data and computations in terms of lambda calculus. And,
+since we know we can encode lambdas in terms of proper combinators, we know that the
+proper combinators by themselves should be sufficient to encode any computable
+function.
+In this chapter we will look at techniques for encoding various standard data types and
+operations, as well as a couple of different ways of encoding recursion. As we proceed,
+we will need to ask ourselves "What is the essence of the data type at hand? From what
+minimal basis could we define all the relevant operations?". For more information on
+encodings, recursion and computability issues, take the Theory of Computer Science
+course here at Oberlin.
+
+Section(s)
+Encoding booleans and conditionals
+n Exercise 10
+n Exercise 11
+¡ Encoding numbers and arithmetic
+¡ Encoding recursion
+¡
+
+Encoding booleans and conditionals
+We normally think of booleans as fundamental to computer operations; after all,
+everything inside a computer is represented in terms of bits, which are essentially just an
+implementation of booleans. But what is the essence of computation over booleans? In
+most languages, including C, Pascal and Scheme, booleans are used to drive computation
+through some mechanism for conditional evaluation or re-direction of control. Thus, if
+we can find an encoding of booleans which allows us to represent conditional evaluation,
+we will have captured the essence of booleans.
+
+Q. 14
+Conditionals are all well and fine, but what about other standard operations on
+booleans, such as logical "and" and "or"?
+Show how you can define the (functional) versions of these two boolean operators
+in Scheme using if (by a functional version we mean one that you shouldn't worry
+about whether or not the call to the boolean operator causes evaluation of its
+arguments). For now, just define versions which take exactly two arguments; call
+your functions and2 and or2 to avoid having Chez Scheme grouse about your misuse of the built-in keywords.
+Hint:
+
+Click here for the answer:
+
+Exercise 10
+Define versions of "and" and "or" that behave more like the primitive ones in Scheme. In
+particular, define Scheme functions and* and or* which will take an arbitrary number of
+arguments (rather than just two) and which will "short-circuit" when possible (i.e., not
+look further than necessary when traversing the list of boolean arguments). As before,
+
+you shouldn't worry about whether or not the operator's arguments are actually evaluated
+at the call point (i.e., you needn't define your functions as special forms).
+Hint:
+
+In combinatory terms, we can encode booleans according to the abstract specification
+that they should be able to drive conditional computation. More specifically, if we can
+find three terms true, false and if-then-else which behave as follows, we will have
+terms that behave for all intents and purposes as booleans:
+(if-then-else true
+
+x y)
+
+-->
+
+x
+
+(if-then-else false x y)
+
+-->
+
+y
+
+But finding these terms is easy; notice that in each of the two "equations" above, the role
+of the if-then-else combinator can be minimized, since all the control can actually lie
+in the boolean itself. That is, if we define functions true and false such that the
+following hold, we can just define if-then-else to be the identity function:
+(true
+
+x y)
+
+-->
+
+x
+
+(false x y)
+
+-->
+
+y
+
+Exercise 11
+Define two boolean combinators true and false which behave as specified above. Show
+that your combinators work by demonstrating that they reduce as desired on arbitrary
+arguments like x and y above.
+Hint:
+
+Encoding numbers and arithmetic
+One way of treating arithmetic in theories like lambda calculus and combinatory logic is to
+allow some primitive constants which have the desired behavior and to thus abstract away
+their internal workings. We could extend our combinatory reduction machine, for example,
+to include reduction rules for various standard arithmetic operations and then include
+numeric constants into the semantics more fully (currently numerals and operators have no
+significance in the machine; they are just symbols like any other).
+Another approach to numbers was exemplified in an earlier chapter, where we considered
+natural numbers as a recursive data type built up from zero and successor constructors and
+"destructed" through the use of an iteration combinator which discriminated between the
+cases and also packaged up recursion on the predecessor. This approach had the advantage
+that we didn't need to depend on outside implementations to understand what numbers
+were and how they worked.
+A third approach to including numbers into a formal theory is to find a modeling of the
+numbers within the primitive concepts of that theory which respects the desired behavior.
+Historically, this was first done for the lambda calculus by Alonzo Church; his so-called
+"Church numerals" are a set of terms whose behavior mimics that of the usual numeric
+constants and operators by modeling a number n as an n-fold functional composition. That
+is, the nth Church numeral is a function which, when given successive arguments f and x,
+returns the n-fold application of f to x. What is surprising is that the usual operations of
+addition, multiplication, etc. can be defined in this setting in a straightforward way.
+Regarding combinatory logic, we have two choices: we can either take the traditional
+Church numerals and convert them into combinators using the abstraction algorithm, or we
+can try to define a numeric encoding more directly. As it turns out, the translation of
+Church numerals to combinators ends leads to rather large terms. We can demonstrate this
+by making a few useful auxiliary definitions and the performing some translations directly.
+First off, it will be convenient to have a "power" function, not in the traditional sense of an
+exponential, but in the function-theoretic sense of taking a function to a power. In this
+sense, the function f to the nth power is simply the n-fold composition of f with itself.
+(define app-n
+(lambda (f n x)
+(if (zero? n) x (app f (app-n f (1- n) x)))))
+
+Using this definition, we can define the Church numerals via a function which returns for
+any natural number n the abstracted version of Church's numeral for n.
+(define church
+(lambda (n)
+(multi-abstr '(f x) (app-n 'f n 'x))))
+
+We can test these definitions out with respect to the size of the generated terms and the
+desired behavior as follows.
+> (church 2)
+(S (S (K S) (S (K K) I)) (S (S (K S) (S (K K) I)) (K I)))
+> (red (app (church 2) 'f 'x))
+(S (S (K S) (S (K K) I)) (S (S (K S) (S (K K) I)) (K I)) f x)
+--> (S (K S) (S (K K) I) f (S (S (K S) (S (K K) I)) (K I) f) x)
+--> ...
+--> (f (f x))
+
+Q. 15
+First we defined booleans as combinator terms, now we have defined numbers as
+combinator terms; what happens if we mix up these two data types in one
+computation inadvertently?
+
+Click here for the answer:
+
+Given the definition for Church numerals, we can now define various arithmetic operations
+on them; here are a smattering for you to try out:
+(define plus
+(multi-abstr '(x y p q) '(x p (y p q))))
+(define times
+(multi-abstr '(x y z) '(x (y z))))
+(define power
+(multi-abstr '(x y) '(y x)))
+(define add '(S (K S) (S (K B))))
+
+The last definition, for add, is an alternative definition written directly in combinatory
+terms. The other definitions are just abstracted versions of standard lambda calculus terms
+for these functions; you might be surprised at how much these short little definitions
+explode in size when they are abstracted (check out the definition of plus for example).
+
+Here's a short sample of how you could test these functions:
+> (norm (app add (church 1) (church 2) 'f 'x))
+(f (f (f x)))
+
+We can also write the numerals themselves a bit more efficiently by hand-coding the
+combinator terms. Here is a definition which is based on the Church numeral ideas, but
+which uses a more direct combinatory encoding. This definition uses the auxiliary
+combinator B; see if you can figure out how it is defined by running a few quick
+experiments.
+(define n-bar
+(lambda (n)
+(app-n '(S B) n '(K I))))
+
+Encoding recursion
+In earlier chapters we saw how we could derive "data-driven" recursion combinators based on the
+natural recursive structure of data types. And in the the last section we saw how we could encode
+numeric data types in terms of pure combinators. But in order to allow ourselves full expressive
+power in a language, we need to be able to express arbitrary recursions, not just the "primitive
+recursions" which follow the pattern of a finite recursive data structure. It is also necessary to have
+access to general means of modeling recursion if we are going to implement functional languages
+using combinators.
+There are essentially two approaches to the treatment of general recursion available to us in a
+combinatory framework: we can either define a new combinator specifically for this job, or we can
+seek out a suitably powerful term from another linguistic formalism, such as the lambda calculus, and
+then translate this term into combinatory form using the usual abstraction algorithm.
+In the first approach, the usual definition is of a new combinator called Y whose specification or rule
+is given as follows.
+Y f
+
+=
+
+f (Y f)
+
+At first glance this rule may look odd, for the left-hand side appears again on the right: clearly any
+reduction we make using this rule will give us immediately the opportunity to make another reduction
+with the same rule, and so on, ad infinitum. But on second thought, this property of the rule makes
+sense, for it is exactly this kind of endless elaboration which we seek to model with recursion.
+
+Q. 16
+How can we ever stop a computation involving the Y combinator?
+
+Click here for the answer:
+
+In actual practice the Y combinator is often not implemented as shown above, but rather is effected
+through a loop in the graph representing a term in which it occurs. For example, this graph fragment
+represents an application of the form (Y f) which is equivalent by the specification of Y to f (Y f):
+
+Another way in which we can implement general recursion is by taking one of the several definitions
+for recursion-generating terms in the lambda calculus and abstracting it into a combinatory term.
+Below are definitions which implement two such translations, one based on Church's function (also
+called Y , but renamed to Why here in order to avoid confusion) and Turing's function called Theta. In
+each case, these functions obey the specification given above for the direct, combinatory version of
+Y . There is a slight technical distinction in that Church's version does not strictly speaking reduce to
+the given right-hand side, but is rather convertible with it (two terms are convertible when "two-way"
+reductions between them can be made to arrive at the same result).
+Of course, we can write out Church's and Turing's functions in full in Scheme terminology, since we
+have unrestricted lambda abstraction available there.
+(define ChurchY
+(lambda (f) (lambda (x) (f (x x))) (lambda (x) (f (x x)))))
+(define TuringT
+((lambda (x) (lambda (y) (y (x x y))))
+(lambda (x) (lambda (y) (y (x x y))))))
+
+In order to use these definitions to generate recursive code, you need to apply them to a function
+which abstracts out the recursion variable in its own body. In other words, if you have a function you
+would normally define with a use of recursion in its body, you need to code up a variation which
+instead uses a lambda abstraction to take that name as a parameter.
+(define foo
+(recurse
+(lambda (f) ( <...body of foo, but with f instead of foo...> ))))
+
+where recurse is either ChurchY or TuringT from above.
+Returning to the context of combinators, we can use abstraction to define the combinatory versions of
+the two recursion generators as follows:
+(define Why
+(let ([fxx (abstr 'x '(f (x x)))])
+(abstr 'f (app fxx fxx))))
+(define Theta
+(let ([xy (multi-abstr '(x y) '(y (x x y)))])
+(app xy xy)))
+
+Unfortunately, these direct translations suffer from the usual blow-up in the size of the terms
+generated. We can do a little better writing them by hand, as follows:
+(define theta '(W I (B (S I) (W I))))
+(define theta2 '(D (B (S I) D)))
+
+These definitions make use of some auxiliary combinators, W and D whose specifications are given by
+the rules:
+D x
+
+=
+
+W f x
+
+x x
+=
+
+f x x
+
+(you may recognize the first of these as our friend diag from Chapter 1).
+We can use the test expression below to verify that head-reduction of (app theta 'f) is in fact
+equal to just (app 'f (app theta 'f)), thereby verifying that theta2 has the desired recursiongenerating property enjoyed by the primitive combinator Y .
+(equal? (repeat red-hd (app theta 'f)) (app 'f (app theta 'f)))
+
+

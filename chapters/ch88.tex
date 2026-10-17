@@ -1,0 +1,224 @@
+\chapter{Verified Rewrite-Based Optimization and Instruction Selection}
+\label{ch:rewrite-optimization}
+
+An algebraic identity and a profitable instruction pattern are different claims.
+The identity says two computations have the same permitted behavior.
+The pattern says a target sequence implements one computation at a chosen cost.
+A rewrite-based compiler needs both claims, plus a selection algorithm whose optimality domain is stated honestly.
+
+\section{Bind rules to an arithmetic and effect model}
+\label{sec:ch88-semantics}
+In total mathematical integer arithmetic, add(x,zero)$\to$x and mul(x,one)$\to$x preserve the value and still evaluate x once.
+Multiplying x by zero and replacing the whole expression by zero can remove evaluation of x.
+If x diverges or performs an observable action, that change is invalid even when arithmetic is exact.
+The functional optimizer therefore deliberately omits that rule in its strict language.
+
+Floating-point rules need a different analysis.
+Reassociation changes rounding, signed zeros can distinguish some algebraic forms, and NaNs affect comparison identities.
+Checked integer arithmetic introduces overflow behavior that modular arithmetic does not have.
+Table~\ref{tab:ch88-rules} lists the rule's semantic premises rather than pretending a textual pattern implies them.
+
+\begin{table}[htbp]
+\caption{A rewrite is valid only under the computation contract it preserves.}
+\label{tab:ch88-rules}
+\centering
+\begin{tabular}{ll}
+\toprule
+Candidate & Required contract \\
+\midrule
+add(x,zero) to x & compatible arithmetic; x still evaluated as required \\
+mul(x,one) to x & compatible arithmetic; x still evaluated as required \\
+mul(x,zero) to zero & discarded computation has no required behavior \\
+reassociate additions & arithmetic permits changed grouping \\
+fuse multiply-add & target rounding/overflow semantics match source \\
+reuse load & storage and intervening effects justify reuse \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A target fused multiply-add instruction is not automatically equivalent to separate floating multiply and add because it can round only once.
+The lab's selector is a structural cost model for an explicitly suitable pure arithmetic interpretation, not a floating-point fusion authorization.
+Instruction availability, operand constraints, and exception behavior belong to the target rule specification.
+
+\section{Validate finite rules independently of search}
+\label{sec:ch88-validation}
+Algorithm~\ref{alg:ch88-check} checks a proposed rule over an exhaustive finite input domain.
+For $V$ variables each ranging over $D$ values, it evaluates $D^V$ assignments and compares defined results and observable traces.
+This is a complete finite-domain check when the evaluator and enumeration correctly implement that domain, but not a proof for unbounded integers or arbitrary heap states.
+The earlier byte-arithmetic e-graph lab provides such exhaustive finite checks for its identities.
+
+\begin{algorithm}[htbp]
+\caption{Validate a rewrite over a stated finite semantic domain.}
+\label{alg:ch88-check}
+\begin{pseudocode}
+\Require rule, finite variable domains, independent semantics including failures/effects
+\Ensure counterexample or exhaustive agreement for that domain only
+\ForAll{assignments to rule variables}
+\State evaluate both sides under the same input state and applicable premises
+\State compare values, final observable state, errors, and termination classification
+\If{outcomes differ} \State return the assignment as counterexample \EndIf
+\EndFor
+\State record domain and evaluator version with the verified rule
+\end{pseudocode}
+\end{algorithm}
+
+For unrestricted programs, evaluating both sides need not terminate, so the finite algorithm also needs a bounded semantics or a decidable total fragment.
+Treating evaluator timeout on both sides as semantic equivalence is unsound.
+Solver-based validation can cover larger domains, but its undefined-behavior, poison, arithmetic, and memory encodings must match the IR.
+The proof boundary remains separate from profitability search.
+
+Figure~\ref{fig:ch88-pipeline} places validation before target ranking and after final lowering where appropriate.
+A rewrite certificate can establish that the engine applied a known rule correctly while leaving the rule's semantic proof in a reusable trusted database.
+That reduces the checker burden without making an incorrect trusted rule harmless.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=12mm]
+\node[basic block] (sem) {semantic rule and premises};
+\node[basic block,below=of sem] (proof) {proof or finite-domain validation};
+\node[basic block,below=of proof] (search) {matching and cost-based selection};
+\node[basic block,below=of search] (emit) {constraint repair and emitted-code checks};
+\draw[cfg edge] (sem)--(proof);\draw[cfg edge] (proof)--(search);\draw[cfg edge] (search)--(emit);
+\end{tikzpicture}
+\caption{A favorable target cost cannot substitute for a semantic justification.}
+\label{fig:ch88-pipeline}
+\end{figure}
+
+\section{Select an additive tree cover}
+\label{sec:ch88-select}
+The lab target assigns cost zero to available leaves, two to add, three to multiply, and three to a fused multiply-add pattern matching add(mul(a,b),c).
+For that expression, separate selection costs five while the fused cover costs three.
+The pattern consumes the add and multiply together; its frontier children are a, b, and c.
+Table~\ref{tab:ch88-costs} works both covers.
+
+\begin{table}[htbp]
+\caption{A combined target rule can cover several source nodes at lower additive cost.}
+\label{tab:ch88-costs}
+\centering
+\begin{tabular}{lrrr}
+\toprule
+Cover & Root rule & Frontier cost & Total \\
+\midrule
+separate multiply and add & add: 2 & multiply: 3 & 5 \\
+combined multiply-add & madd: 3 & leaves: 0 & 3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Algorithm~\ref{alg:ch88-dp} minimizes the additive tree-cover cost.
+With a fixed finite pattern set, memoized or bottom-up dynamic programming stores one best cost per node and result category and evaluates each matching cover once.
+For $N$ nodes and $P$ fixed-size patterns, a direct implementation takes $O(NP)$ matching/cost work plus reconstruction output, assuming bounded categories and constant-time pattern tests.
+The tiny executed selector recursively enumerates its few alternatives without a general memoization table, so it is a correctness fixture for these examples rather than an implementation of that production complexity bound.
+
+\begin{algorithm}[htbp]
+\caption{Compute a minimum additive target cover for a finite expression tree.}
+\label{alg:ch88-dp}
+\begin{pseudocode}
+\Require tree, finite legal target patterns, additive nonnegative costs, result categories
+\Ensure minimum-cost cover within this tree grammar
+\ForAll{nodes in postorder}
+\ForAll{target patterns matching this node}
+\State obtain required categories and best costs at the pattern frontier
+\State add frontier costs to this target rule's cost
+\State retain the cheapest feasible cover for each produced category
+\EndFor
+\EndFor
+\State reconstruct the selected root cover through recorded backpointers
+\end{pseudocode}
+\end{algorithm}
+
+Figure~\ref{fig:ch88-cover} identifies the combined region.
+If register classes, immediate ranges, or two-address constraints matter, categories and side conditions must express them or a later repair phase can invalidate the advertised cost.
+Cost numbers in the lab are declared abstract units, not measured processor cycles.
+No benchmark speedup is inferred from reducing five units to three.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=13mm and 14mm]
+\node[basic block] (add) {add};\node[basic block,below left=of add] (mul) {mul};
+\node[basic block,below right=of add] (c) {c};\node[basic block,below left=of mul] (a) {a};
+\node[basic block,below right=of mul] (b) {b};
+\draw[cfg edge] (add)--(mul);\draw[cfg edge] (add)--(c);\draw[cfg edge] (mul)--(a);\draw[cfg edge] (mul)--(b);
+\node[draw,dashed,fit=(add)(mul),inner sep=7pt,label=above:{madd cover}] {};
+\end{tikzpicture}
+\caption{One target rule covers the add/multiply region and leaves three inputs on its frontier.}
+\label{fig:ch88-cover}
+\end{figure}
+
+\section{Do not transfer tree optimality to shared DAGs}
+\label{sec:ch88-dags}
+Suppose a multiply result feeds two additions.
+Covering it separately in two fused instructions may duplicate work; computing it once may preserve sharing but require a register and extra live range.
+An additive tree model sees duplicated subtrees and can prefer a different result from a DAG-aware model.
+Register allocation, scheduling, and placement make cost context-dependent even after structural covering.
+
+A graph selector can use integer programming, bounded search, or heuristics over sharing and instruction constraints.
+Any optimality claim is relative to its encoded legal alternatives and cost model, and search limits can leave the best found solution unproven optimal.
+The reference lab does not implement a general DAG selector.
+The existing instruction-selection and register-allocation chapters supply the larger backend setting for this distinction.
+
+\section{Connect destructive rewriting to equality saturation}
+\label{sec:ch88-egraphs}
+A destructive rewrite drops an alternative unless the engine retains history.
+An e-graph retains known equivalent forms and lets extraction choose later, but equality discovery and target extraction remain different phases.
+Extraction from positive additive costs can find a minimum tree representative in a fixed e-graph; it cannot discover missing equalities or account automatically for shared-register cost.
+Conditional e-class facts must remain valid under class merges.
+
+The executed rewrite lab checks matching, occurs checks, certificates, overlap construction, shared updates, dangling references, and the small target cover.
+The functional lab independently executes source, optimized source, and compiled stack code on many closed programs.
+Together these tests target different failure modes rather than treating one successful output as evidence for every rewrite mechanism.
+The expansion record states which mechanisms are implemented and which remain design discussions.
+
+\section{Prove the dynamic program's limited optimality claim}
+\label{sec:ch88-optimality}
+The tree-cover recurrence is correct by induction on subtree height under its stated grammar and additive cost model.
+Every legal root cover chooses one matching target rule.
+That rule leaves a finite frontier of smaller subtrees with required result categories.
+By induction, the stored best cover for each frontier subtree is no more expensive than any other legal cover producing that category.
+Adding those costs to the root rule cost and minimizing across all root choices therefore finds the minimum admitted cover.
+
+The proof identifies its limitations.
+If the pattern index omits a legal root rule, the recurrence optimizes an incomplete grammar.
+If two frontier subtrees share a computation whose cost should be paid only once, adding their independent costs overcounts it.
+If a register constraint couples their selections, independently cheapest category choices may not compose into a legal machine program.
+If a rule's cost depends on later scheduling, a fixed scalar cost is only an estimate.
+None of these failures is repaired merely by calling the search dynamic programming.
+
+Categories can encode some additional constraints, such as integer versus floating register classes, available immediate forms, or alternative result locations.
+Increasing category precision also increases the state space.
+A target description should state which constraints are encoded exactly and which are repaired heuristically after selection.
+The final cost claim should refer to the selected grammar, not to all possible machine programs on the processor.
+
+\section{Retain proof assumptions through target lowering}
+\label{sec:ch88-assumptions}
+A high-level equality can stop being useful when lowered operations acquire narrower semantics.
+An exact integer addition may become a checked machine operation with a failure edge or a wrapping operation whose result is observed at a fixed width.
+A proof established before that choice must either quantify over the intended later interpretation or be transported through a verified lowering relation.
+Simply copying the same opcode spelling into a lower IR does not preserve the proof.
+
+Memory and floating-point relaxations should be equally explicit.
+A transformation admitted under an optional relaxed arithmetic flag must not leak into a strict compilation unit through an unkeyed rewrite cache.
+A load-reuse rule justified by a no-alias fact must be invalidated when pointer provenance or the call graph changes.
+Proof metadata should identify semantic mode, relevant facts, and source/target operation versions so a validator can reconstruct why a particular step was legal.
+
+At the final machine boundary, differential execution is valuable but necessarily selective.
+The spellchecker uses an independent distance formulation, the rewrite engine replays local certificates, and the functional compiler compares source and VM evaluation.
+A native selector additionally needs target instruction semantics, register/clobber contracts, and tests at encoding boundaries.
+These checks complement rather than replace one another.
+The book's earlier machine-code and validation case studies provide the next layers after the abstract target-cover fixture used here.
+
+\section{Exercises}
+\label{sec:ch88-exercises}
+\begin{enumerate}
+\item\label{ex:ch88-cover} Compute both covers of add(mul(a,b),c) using the stated costs.
+\item\label{ex:ch88-diverge} Give a strict pure program where replacing mul(e,zero) by zero changes termination.
+\item\label{ex:ch88-dag} A multiply feeds two adds.
+Explain why two locally cheapest fused covers need not be globally cheapest once sharing and registers matter.
+\item\label{ex:ch88-proof} A rule passes all 256 byte inputs.
+What additional reasoning is needed before applying it to checked 64-bit arithmetic or floating point?
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch88-reading}
+Ohlebusch develops the rewrite foundations~\cite{ohlebusch-2002-rewriting}; the \code{egg} paper explains alternative-preserving search~\cite{willsey-2021-egg}.
+Appel and Morgan connect tree/graph representations to target selection and optimization~\cite{appel-1998-modern,morgan-1998-optimizing}.

@@ -1,0 +1,1682 @@
+Learning Heuristics for Basic Block
+Instruction Scheduling
+Abid M. Malik, Tyrel Russell, Michael Chase, and Peter van Beek
+School of Computer Science
+University of Waterloo, Waterloo, Canada
+Abstract
+Instruction scheduling is an important step for improving the performance of object code
+produced by a compiler. A fundamental problem that arises in instruction scheduling is to ﬁnd
+a minimum length schedule for a basic block—a straight-line sequence of code with a single
+entry point and a single exit point—subject to precedence, latency, and resource constraints.
+Solving the problem exactly is known to be difﬁcult, and most compilers use a greedy list
+scheduling algorithm coupled with a heuristic. The heuristic is usually hand-crafted, a potentially time-consuming process. In contrast, we present a study on automatically learning good
+heuristics using techniques from machine learning. In our study, a recently proposed optimal
+basic block scheduler was used to generate the machine learning training data. A decision
+tree learning algorithm was then used to induce a simple heuristic from the training data. The
+automatically constructed decision tree heuristic was compared against a popular critical-path
+heuristic on the SPEC 2000 benchmarks. On this benchmark suite, the decision tree heuristic
+reduced the number of basic blocks that were not optimally scheduled by up to 55% compared to the critical-path heuristic, and gave improved performance guarantees in terms of the
+worst-case factor from optimality.
+
+1 Introduction
+Modern computer architectures are pipelined and can issue multiple instructions per time cycle. On
+such processors, the order that the instructions are scheduled can signiﬁcantly impact performance.
+The basic block instruction scheduling problem is to ﬁnd a minimum length schedule for a basic
+block—a straight-line sequence of code with a single entry point and a single exit point—subject
+to precedence, latency, and resource constraints1. Basic block scheduling is important in its own
+right and also as a building block for scheduling larger groups of instructions such as superblocks
+[2, 18].
+Solving the basic block instruction scheduling problem exactly is known to be difﬁcult, and
+most compilers use a greedy list scheduling algorithm together with a heuristic for choosing which
+1
+
+See Section 2 for the necessary background on computer architectures and basic block instruction scheduling.
+
+1
+
+instruction to schedule next [4, 13]. Such a heuristic usually consists of a set of features and
+a priority or order in which to test the features. Many possible features and orderings have been
+proposed (see, for example, [1, 19]). The heuristic in a production compiler is usually hand-crafted
+by choosing and testing many different subsets of features and different possible orderings—a
+potentially time-consuming process. For example, the heuristic developed for the IBM XL family
+of compilers “evolved from many years of extensive empirical testing at IBM” [7, p. 112, emphasis
+added].
+In this paper, we present a study on automatically learning a good heuristic using supervised
+machine learning techniques. In supervised learning, one learns from training examples which
+are labeled with the correct answers. More precisely, each training example consists of a vector
+of feature values and the correct classiﬁcation or correct answer for that example. The success
+of a supervised learning approach depends heavily on the quality of the training data; i.e., if the
+examples are representative of what will be seen in practice and if the features recorded in each
+example are adequate to distinguish all of the different cases. Moss et al. [12] were the ﬁrst
+to propose the use of supervised learning techniques in this context. Their idea was to design
+an optimal schedule and use their optimal scheduler to correctly label the data. However, their
+approach was hampered by the quality of their training data; their optimal scheduler could only
+optimally solve basic blocks with ten or fewer instructions and they recorded only ﬁve features in
+each training example2 .
+McGovern et al. [11] used the same set of features as Moss et al., but proposed the use of
+rollouts and reinforcement learning to overcome the difﬁculty of obtaining training data on larger
+basic blocks. Rollouts and reinforcement learning are machine learning techniques which are
+non-supervised; i.e., they do not require the data to be correctly labeled. However, the efﬁciency
+of the instruction scheduler is critical in compilers, and McGovern et al.’s scheduler based on
+rollouts would be much too expensive to be used in a production compiler. Further, in McGovern
+et al.’s work using reinforcement learning, a known heuristic was used to guide the reinforcement
+learning. However, the resulting learned instruction scheduler was not better than the original
+heuristic used to guide the learning. Li and Olafsson [9], in recent work on learning heuristics for
+single machine job shop scheduling using supervised learning, use existing heuristics to label the
+training examples. In other words, in their approach some of the training examples will be labeled
+incorrectly. As a result, the heuristics that they learn are never better than the original heuristics
+used to label the data. In contrast to McGovern et al. and to Li and Olafsson, in our work we are
+able to learn heuristics that outperform existing heuristics.
+In our work, we improved the quality of the training data in three ways. First, we overcame
+the limitation on basic block size by designing and using an optimal basic block scheduler based
+on constraint programming [10, 21] to generate the correctly labeled training data. Currently, this
+optimal scheduler is too time consuming to be used on a routine basis 3 . However, it can solve
+2
+The heuristic that would be learned from their training data would be similar to the critical-path based heuristic,
+which we compare against below and in Section 4.
+3
+Large software projects can contain tens of thousands of basic blocks and users demand fast compile times during
+the development phase of a project. Thus, the instruction scheduling component of the compiler must execute quickly
+during this phase. However, slower compile times may be acceptable during a production build and the constraint
+programming approach may be viable during this phase of a project.
+
+2
+
+all but a very few basic blocks and routinely solves blocks with 2500 or more instructions in a
+few minutes. (The speed of the optimal scheduler is not an issue when gathering training data, as
+this is an ofﬂine process.) Second, we improved the quality of the training data by performing an
+extensive and systematic study and ranking of previously proposed features (as surveyed in [19]).
+Third, we improved the quality of the training data by synthesizing and ranking novel features.
+One of these novel features is the best feature among all of the features that we studied, and is one
+of the major reasons behind the success of our approach.
+Once the training data was gathered, a decision tree learning algorithm [16] was used to induce
+a heuristic from the training data. In a decision tree the internal nodes of the tree are labeled with
+features, the edges to the children of a node are labeled with the possible values of the feature, and
+the leaves of the tree are labeled with a classiﬁcation. To classify a new example, one starts at the
+root and repeatedly tests the feature at a node and follows the appropriate branch until a leaf is
+reached. The label of the leaf is the predicted classiﬁcation of the new example.
+The usual criterion one wants to maximize when devising a heuristic is accuracy. In this study,
+we also had an additional criterion: that the learned heuristic be efﬁcient. When compiling large
+software projects, the heuristic used by the list scheduler can be called hundreds of thousands or
+even millions of times and can represent a signiﬁcant percentage of the overall compilation time.
+Since each additional feature used in a heuristic adds to the overall computation time, we want to
+learn a heuristic that is both simple and accurate. Fortunately, these are not necessarily conﬂicting
+goals since it is known that more complex decision trees often “overﬁt” the training data, and that
+simpler decision trees often generalize better and so perform better in practice [23]. In contrast
+to Cooper and Torczon [2], who note that no set of features and no order in which to test the
+features dominates the others, we found that a small set of features and orderings did dominate
+and that many features were irrelevant in that they did not improve the accuracy of a heuristic in a
+statistically signiﬁcant way.
+Once learned, the resulting decision tree heuristic was incorporated into both a forward list
+scheduler and a backward list scheduler and experimentally compared against a popular criticalpath heuristic on the SPEC 2000 benchmarks, using four different architectural models. On this
+benchmark suite, the decision tree heuristic reduced the number of basic blocks that were not
+optimally scheduled by up to 55% compared to the critical-path heuristic. As well, for every basic
+block where the critical-path heuristic found a better schedule than the decision tree heuristic,
+there were up to eight basic blocks where the decision tree heuristic found a better schedule than
+the critical-path heuristic. Finally, the decision tree heuristic improved performance guarantees in
+terms of the worst-case factor from optimality, a measure of the robustness of a heuristic.
+
+2 Background
+In this section, we deﬁne the instruction scheduling problem studied in this paper followed by a
+brief review of the list scheduling algorithm and the heuristics used in the algorithm (for more
+background on these topics see, for example, [4, 6, 13]).
+We consider multiple-issue, pipelined processors. Multiple-issue and pipelining are two techniques for performing instructions in parallel and processors which use these techniques are now
+3
+
+standard in desktop and laptop machines. In such processors, there are multiple functional units
+and multiple instructions can be issued (begin execution) in each clock cycle. Examples of functional units include arithmetic-logic units (ALUs), ﬂoating-point units, memory or load/store units
+which perform address computations and accesses to the memory hierarchy, and branch units
+which execute branch and call instructions. The number of instructions that can be issued in each
+clock cycle is called the issue width of the processor. As well, in such processors functional units
+are pipelined. Pipelining is a standard implementation technique for overlapping the execution of
+instructions on a single functional unit. A helpful analogy is to a vehicle assembly line [6] where
+there are many steps to constructing the vehicle and each step operates in parallel with the other
+steps. An instruction is issued (begins execution) on a functional unit and associated with each instruction is a delay or latency between when the instruction is issued and when the instruction has
+completed and the result is available for other instructions which use the result. In this paper, we
+assume that all functional units are fully pipelined and that instructions are typed and execute on a
+functional unit of that type. Examples of types of instructions are integer, ﬂoating point, load/store,
+and branch instructions.
+A
+
+B
+
+3
+
+3
+
+A
+B
+
+r1 ← a
+r2 ← b
+NOP
+
+A
+B
+D
+
+NOP
+C
+
+D
+
+1
+
+3
+
+C
+D
+
+r1 ← r1 + r2
+r3 ← c
+
+r1 ← a
+r2 ← b
+r3 ← c
+NOP
+
+C
+E
+
+r1 ← r1 + r2
+r1 ← r1 + r3
+
+NOP
+E
+
+NOP
+
+E
+(a)
+
+r1 ← r1 + r3
+(b)
+
+(c)
+
+Figure 1: (a) Dependency DAG associated with the instructions to evaluate (a+b)+c on a processor
+where loads from memory have a latency of 3 cycles and integer operations have a latency of 1
+cycle; (b) a schedule; (c) a better schedule.
+We use the standard labeled directed acyclic graph (DAG) representation of a basic block (see
+Figure 1(a)). Each node corresponds to an instruction and there is an edge from i to j labeled with
+a positive integer l(i, j) if j must not be issued until i has executed for l(i, j) cycles. The goal
+is to schedule the basic block on a target processor. The target processor will have a particular
+set of resources: the number and type of functional units available in the processor for executing
+instructions.
+Given a labeled dependency DAG for a basic block and a target processor, a schedule for
+the processor speciﬁes an issue or start time for each instruction or node such that the latency
+constraints are satisﬁed and the resource constraints are satisﬁed. The resource constraints ensure
+that the limits of the processor’s resources are never exceeded; i.e., the resource constraints are
+satisﬁed if, at every time cycle, the number of instructions of each type issued at that cycle does
+4
+
+not exceed the number of functional units that can execute instructions of that type. The length of
+a schedule is the number of cycles needed for the schedule to complete; i.e., each instruction has
+been issued at its start time and, for each instruction with no successors, enough cycles have elapsed
+that the result for the instruction is available. The basic block instruction scheduling problem is to
+construct a schedule with minimum length.
+Example 1 Figure 1 shows a simple dependency DAG and two possible schedules for the DAG,
+assuming a single-issue processor that can execute all types of instructions. The ﬁrst schedule
+(b) requires four NOP instructions (null operations) because the values loaded are used by the
+following instructions. The better schedule (c), the optimal or minimum length schedule, requires
+only one NOP and completes in three fewer cycles.
+Basic block instruction scheduling under the assumption that all functional units are fully
+pipelined is the special case of resource-constrained project scheduling (see, e.g., [3, 14]) where all
+of the activities have unit execution times and we seek a schedule which minimizes the makespan.
+Instruction scheduling for basic blocks is known to be NP-complete for realistic architectures.
+The most popular method for scheduling basic blocks continues to be list scheduling [13]. A list
+scheduler takes a set of instructions as represented by a dependency DAG and builds a schedule
+using a best-ﬁrst greedy heuristic. A list scheduler generates the schedule by determining all
+instructions that can be scheduled at that time step, called the ready list, and uses the heuristic
+to determine the best instruction on the list. The selected instruction is then added to the partial
+schedule and the scheduler determines if any new instructions can be added to the ready list.
+List schedulers work in one of two directions: forward from the roots to the leaves or backward
+from the leaves to the roots (see [2] for a discussion of forward versus backward list scheduling).
+Conceptually, a backward list scheduler can be obtained by running a forward list scheduler on a
+dependency DAG that has had the direction of each edge reversed. Both forward and backward list
+scheduling are used in production compilers. As examples, IBM’s Tobey compiler uses forward
+list scheduling [1] and the GCC compiler uses backward list scheduling [20].
+The heuristic in a list scheduler generally consists of a set of features and an order for testing
+the features. Some standard features are as follows. The path length from a node i to a node j in
+a DAG is the maximum number of edges along any path from i to j. The critical-path distance
+from a node i to a node j in a DAG is the maximum sum of the latencies along any path from i
+to j. Note that both the path length and the critical-path distance from a node i to itself is zero. A
+node j is a descendant of a node i if there is a directed path from i to j; if the path consists of a
+single edge, j is also called an immediate successor of i. The earliest start time of a node i is a
+lower bound on the earliest cycle in which the instruction i can be scheduled. The heuristic in a
+list scheduler is also known as a dispatching rule in the scheduling literature (see, e.g., [15]).
+
+3 Learning a Heuristic
+In this section, we describe the methodology we followed to automatically construct a list scheduling heuristic for scheduling basic blocks by applying techniques from supervised machine learning.
+5
+
+We explain the construction of the initial set of features (Section 3.1), the collection of the data
+(Section 3.2), the use of the data to ﬁlter and rank the features to ﬁnd the most important features (Section 3.3), and the use of the data and the important features to learn a simple heuristic
+(Section 3.4).
+
+3.1 Feature construction
+To use supervised learning techniques to construct a list scheduling heuristic, the problem ﬁrst has
+to be phrased as a classiﬁcation problem. Moss et al. [12] note that to choose the best instruction on
+a ready list to schedule next, it is sufﬁcient to be able to compare two instructions i and j and return
+true if i should be scheduled before j; and false otherwise. We thus have a binary classiﬁcation
+problem.
+The choice of distinguishing features is critical to successfully learning a classiﬁer. In contrast
+to Moss et al. [12], who recorded only ﬁve features in each training example, we began with almost
+100 features that we felt would be promising. The features can be categorized as either static or
+dynamic. The value of a static feature is determined before the execution of the list scheduler;
+the value of a dynamic feature is determined during the execution of the list scheduler. The 100
+features included all of the classic features surveyed by Smotherman et al. [19], except for the
+features having to do with register pressure4 and a few features that were irrelevant or whose
+roles were better performed by other features. These classic features all measure properties of an
+instruction on the ready list (see Table 2 for a summary of most of these features).
+Also included were features that measured properties of the DAG to be scheduled, properties
+of the target architecture, and properties of a ready list itself. The DAG features were both static
+and dynamic. The static features included the source language and the number of instructions of
+each type. The dynamic features included the number of instructions of each type that still needed
+to be scheduled; the number of edges between instructions of the same type and of different types
+in the unscheduled part of the DAG; and the maximum, average, and standard deviation of the
+critical-path distances and the latencies on the edges in the unscheduled part of the DAG. The
+target architecture features were all static features. Examples of these features include the number
+of functional units of each type. The ready list features were all dynamic features. Examples of
+these features include the number of instructions of each type on the ready list and the maximum
+number of instructions of each type that could still be scheduled during the current time cycle.
+Also included were features that measured properties of an instruction relative to all of the other
+instructions on a ready list. For these features, given an instruction i, a property of an instruction
+such as critical-path distance, and a ready list, we determine the property’s maximum and minimum
+value over all of the instructions on the ready list. The value v of the property for instruction i is
+then compared against these maximum and minimum values and the value of the feature is gt if v
+is closer to the maximum, eq if it is midway between the maximum and the minimum, and lt if it
+is closer to the minimum.
+4
+
+These features were omitted as our optimal basic block scheduler [10, 21], which was used to correctly label the
+data, does not currently handle register pressure. We are currently working on removing this limitation and once it is
+removed, it will be straightforward to incorporate these features as well.
+
+6
+
+A more accurate classiﬁer can sometimes be achieved by synthesizing new features from existing basic features. We also included many such synthesized features. In our case, the feature
+synthesis was performed by hand. However, this phase only has to be performed once and then
+these new features can be used in the future for constructing heuristics for compilers targeted to
+new computer architectures. We constructed some of the novel features by applying simple functions to basic features. Examples include comparison of two features, maximum of two features,
+and the average of several features.
+Table 1: Notation for the resource-based distance to leaf node feature.
+kt
+desc(i, t)
+
+cp(i, j)
+r1 (i, t)
+
+r2 (i, t)
+
+r3 (i, t)
+
+The number of functional units that can execute instructions of type t.
+The set of all descendants of instruction i that are of type t in a DAG.
+These are all of the instructions of type t that must be issued with or
+after i and must all be issued before the leaf node can be issued.
+The critical-path distance from i to j.
+The minimum number of cycles that must elapse before the ﬁrst
+instruction in desc(i, t) can be issued; i.e., min{cp(i, k) | k ∈
+desc(i, t)}, the minimum critical-path distance from i to any node
+in desc(i, t).
+The minimum number of cycles to issue all of the instructions in
+desc(i, t); i.e., | desc(i, t) | / kt , the size of the set of instructions
+divided by the number of functional units that can execute instructions of type t.
+The minimum number of cycles that must elapse between when the
+last instruction in desc(i, t) is issued and the leaf node l can be issued; i.e., min{cp(k, l) | k ∈ desc(i, t)}, the minimum critical-path
+distance from any node in desc(i, t) to the leaf node.
+
+One of the novel features that we constructed, resource-based distance to the leaf node, turned
+out to be the best feature among all of the features that we studied. Consider the notation shown
+in Table 1. For convenience of presentation, we are assuming that a DAG has a single leaf node;
+i.e., we are assuming a ﬁctitious node is added to the DAG and zero-latency arcs are added from
+the leaf nodes to this ﬁctitious node. The resource-based distance from a node i to the leaf node is
+given by,
+rb(i) = max{r1 (i, t) + r2 (i, t) + r3 (i, t)},
+t
+
+where we are ﬁnding the maximum over all instruction types t. The distance was sometimes
+improved by “removing” a small number of nodes (between one and three nodes) from desc(i, t).
+This was done whenever removing these nodes led to an increase in the value of rb(i); i.e., the
+decrease in r2 (i, t) was more than offset by the increase in r1 (i, t) + r3 (i, t).
+
+7
+
+3.2 Collecting the training, validation, and testing data
+In addition to the choice of distinguishing features (see Section 3.1 above), a second critical
+factor in the success of a supervised learning approach is whether the data is representative of
+what will be seen in practice. To adequately train and test our heuristic classiﬁer, we collected
+all of the basic blocks in the jpeg and mpeg benchmarks from the MediaBench [8] benchmark
+suite and all of the basic blocks from the SPEC 2000 integer and ﬂoating point benchmarks
+[http://www.specbench.org]. The SPEC benchmarks are standard benchmarks used to evaluate
+new CPUs and compiler optimizations. The benchmarks were compiled using IBM’s Tobey compiler [1] targeted towards the PowerPC processor [7], and the basic blocks were captured as they
+were passed to Tobey’s instruction scheduler. The basic blocks contain four types of instructions:
+branch, load/store, integer, and ﬂoating point. The range of the latencies is: all 1 for branch instructions, 1–12 for load/store instructions (the largest value is for a store-multiple instruction,
+which stores to memory the values in a sequence of registers), 1–37 for integer instructions (the
+largest value is for division), and 1–38 for ﬂoating point instructions (the largest value is for square
+root). The Tobey compiler performs instruction scheduling before global register allocation and
+once again afterwards, and our test suite contains both kinds of basic blocks. The compilations
+were done using Tobey’s highest level of optimization, which includes aggressive optimization
+techniques such as software pipelining and loop unrolling.
+Following Moss et al. [12], a forward list scheduling algorithm was modiﬁed to generate the
+data. Recall that each instance in the data is a vector of feature values and the correct classiﬁcation
+for that instance. Let better(i, j, class) be a vector that is deﬁned as follows,
+better(i, j, class) = f1 (i, j), . . . , fn (i, j), class,
+where i and j are instructions, fk (i, j) is the k th feature that measures some property of i and j, and
+class is the correct classiﬁcation. Given a partial schedule and a ready list during the execution of
+the list scheduler on a basic block, each instruction on the ready list was scheduled by an optimal
+scheduler [10, 21] to determine the length of an optimal schedule if that instruction were to be
+selected next. The optimal scheduler was targeted to a 4-issue processor, with one functional unit
+for each type of instruction. Then, for each pair of instructions i and j on the ready list, where i
+led to an optimal schedule and j did not, the instances better(i, j, true) and better(j, i, false) were
+added to the data set (see the equation above). Note that the goal of the heuristic that is learned
+from the data is to distinguish those instructions on a ready list that lead to optimal schedules from
+those instructions that lead to non-optimal schedules. Thus, pairs of instructions i and j in which
+both i and j led to an optimal schedule are ignored; i.e., they do not add any instances to the data
+set. Similarly, pairs of instructions in which both i and j led to a non-optimal schedule are also
+ignored. Once the data collection process was completed for a particular ready list, the partial
+schedule was then extended by randomly choosing an instruction from among the instructions on
+the ready list that led to an optimal schedule, the ready list was updated based on that choice of
+instruction, and the data collection process was repeated.
+Example 2 Consider once again the DAG and its schedules introduced in Example 1. Suppose
+that each instance in our learning data contains two features: f 1 (i, j) returns the size of the DAG
+8
+
+and f2 (i, j) returns lt, eq, or gt depending on whether the critical-path distance of i to the leaf
+node is less than, equal to, or greater than the critical-path distance of j to the leaf node. When
+the list scheduling algorithm is applied to the DAG, instructions A, B, and D are on the ready list
+at time cycle 1. Scheduling A ﬁrst or B ﬁrst both lead to an optimal schedule, whereas scheduling
+D ﬁrst does not. Thus, the pair A, D would add the vectors 5, gt, true and 5, lt, false to the
+data, since the critical-path distance for A is 4 and for D is 3. Similarly, the pair B, D would add
+the vectors 5, gt, true and 5, lt, false. At this point, one of A and B is randomly selected and
+scheduled at time cycle 1. The list scheduler then advances to time cycle 2, updates the ready list,
+and repeats the above process.
+When lots of data is available, as in our study, a standard approach is to split the data into
+training, validation, and test sets [23, pp. 120-122]. The training set is used to come up with the
+classiﬁer, the validation set is used to optimize the parameters of the learning algorithm and to
+select a particular classiﬁer, and the test set is used to report the classiﬁcation accuracy. Separating
+the training and the testing data in this way is important for getting a reliable estimate of how
+accurately the heuristic will perform in practice. We set aside all of the basic blocks from the SPEC
+2000 benchmark for testing, and used the data generated from the jpeg basic blocks for training and
+the data generated from the mpeg basic blocks for validation. There were approximately 200,000
+instances in the training set and 100,000 instances in the validation set. Many of these instances
+were from large basic blocks of up to 2600 instructions.
+
+3.3 Feature ﬁltering
+An important next step, prior to learning the heuristic, is to ﬁlter the features. The goal of ﬁltering is
+to select the most important features for constructing a good heuristic. Only the selected features
+are then passed to the learning algorithm and the features identiﬁed as irrelevant or redundant
+are deleted. There are two signiﬁcant motivations for performing this preprocessing step: the
+efﬁciency of the learning process can be improved and the quality of the heuristic that is learned can
+be improved (many learning methods, decision tree learning included, do poorly in the presence of
+redundant or irrelevant features [23, pp. 231-232]).
+Several feature ﬁltering techniques have been developed (see, for example, [5] and the references therein). In our work, a feature was deleted if both: (i) the accuracy of a single feature
+decision tree classiﬁer constructed from this feature was no better than random guessing on the
+validation set; and (ii) the accuracy of all two-featured decision tree classiﬁers constructed from
+this feature and each of the other features was no better than or a negligible improvement over
+random guessing on the validation set. The motivation behind case (ii) is that a feature may not
+improve classiﬁcation accuracy by itself, but may be useful together with another feature. In both
+cases, the heuristic classiﬁer was learned from the jpeg training data and evaluated on the mpeg
+validation set. Finally, a feature was also deleted if it was perfectly correlated with another feature.
+Table 2 shows the 17 features that remained after ﬁltering. For succinctness, each feature is
+stated as being a property of one instruction. When used in a heuristic to compare two instructions
+i and j, we actually compare the value of the feature for i with the value of the feature for j
+(see the use of the critical-path feature in Example 2). The features are shown ranked according
+9
+
+Table 2: Features remaining after ﬁltering, ordered from highest ranking to lowest ranking.
+12. Path length from root node.
+13. Sum of latencies to all immediate successors of the instruction.
+14. Updated earliest start time.
+15. Number of instructions of type load/
+store that would be added to the ready
+list for the next time cycle if the instruction was scheduled.
+16. Number of instructions of type integer that would be added to the ready
+list for the current time cycle if the instruction was scheduled.
+17. Number of instructions of type load/
+store that would be added to the ready
+list for the current time cycle if the instruction was scheduled.
+
+1.
+2.
+
+Maximum of feature 2 and feature 5.
+Resource-based distance to leaf node
+(see Section 3.1).
+3. Path length to leaf node.
+4. Number of descendants of the instruction.
+5. Critical-path distance to leaf node.
+6. Slack—difference between the earliest and latest start times.
+7. Order of the instruction in the original
+instruction stream.
+8. Number of immediate successors of
+the instruction.
+9. Earliest start time of the instruction.
+10. Critical-path distance from root.
+11. Latency of the instruction.
+
+to their overall value in classifying the data. The overall rank of a feature was determined by
+averaging the rankings given by three feature ranking methods: the single feature decision tree
+classiﬁer, information gain, and information gain ratio (see [23] for background and details on
+the calculations). The feature ranking methods all agreed on the top seven features. The ranking
+can be used as a guide for hand-crafted heuristics and also for our automated machine learning
+approach, as we expect to see at least one of the top-ranked features in any heuristic. A surprise is
+that critical-path distance to the leaf node, commonly used as the primary feature [4, 13]), is ranked
+only in 5th place. Also somewhat surprising is that the lowest ranked features, features 14–17, are
+dynamic features. All of the rest of the features are static features.
+
+3.4 Classiﬁer selection
+Given the features shown in Table 2, the next step is to learn the best heuristic from the training
+data; i.e., the best decision tree classiﬁer.
+In our context, the best decision tree classiﬁer is one that is both accurate and efﬁcient. Since
+each additional feature brings additional computational cost, we want the smallest subset of features such that a classiﬁer learned using this subset still has acceptable accuracy. Several methods
+have been proposed for searching through the possible subsets of features. We chose forward selection with beam search, as it works well to minimize the number of features in the classiﬁer
+[23, 5]. Forward selection with beam search begins at level 1 by examining all possible ways of
+constructing a decision tree from one feature. The search then progresses to level 2 by choosing
+the best of the classiﬁers from level 1 and extending them in all possible ways by adding one additional feature. In general, the search progresses to level k + 1 by extending the best classiﬁers at
+10
+
+level k by one additional feature. The search continues until some stopping criteria is met.
+In our work, the search expanded up to a maximum of 30 of the best classiﬁers at each level.
+The value of 30 was chosen as it was found that around this point the quality of the classiﬁers
+had already deteriorated. Thus the value of 30 was chosen as a conservative value that avoided a
+brute-force test of all possible classiﬁers but with a low risk that we would cutoff and therefore
+miss a good classiﬁer. For each subset of features at each level, a decision tree heuristic was
+learned from the jpeg training data and an estimate of the classiﬁcation accuracy of the heuristic
+was determined by evaluating the heuristic on the mpeg validation set. The classiﬁcation accuracy
+was used to decide which subsets to expand to the next level. We chose decision tree classiﬁers
+over other possible machine learning techniques because of their excellent ﬁt with our goals of
+accuracy and efﬁciency. To learn a classiﬁer, we used Quinlan’s C4.5 decision tree software [16].
+The software was run with the default parameter settings, as this consistently gave the best results
+on the validation set.
+The following table shows for each level l (where l corresponds to the number of features in
+the decision tree), the accuracy of the best decision tree learned with l features and the size of
+the decision tree. The accuracy is stated as the percentage of instances in the validation set that
+were incorrectly classiﬁed. When there were ties for best accuracy at a level, the average size was
+recorded. The size of the decision tree is the number of nodes in the tree.
+level
+accuracy
+size
+
+1
+2
+3
+4
+5
+6
+7
+4.05 3.82 3.76 3.72 3.71 3.71 3.70
+4
+7
+14
+17
+30
+48
+43
+
+We chose four features as the best trade-off between simplicity and accuracy. The decision
+tree with four features attains an accuracy of 3.72 while containing only 17 nodes. Increasing the
+number of features gives only a slight improvement in accuracy, but a relatively large increase in
+the size of the tree (1.8 – 2.8 times). Since there were ties for the best choice of four features,
+decision trees for the subsets of four features tied for best were learned over again, this time using
+all of the data (the validation set was added into the training set, a standard procedure once the best
+subset of features has been chosen). The smallest tree was then chosen as the ﬁnal tree. In contrast
+to Moss et al. [12], who did not perform feature ﬁltering and used all of the features in the training
+data at once to learn a classiﬁer, our use of forward selection with beam search led to a smaller yet
+more accurate heuristic. The ﬁnal decision tree heuristic constructed is shown in Algorithm 1.
+It is interesting to note that all of the features in the ﬁnal decision tree heuristic are comparative
+features with three discrete values; that is, the feature compares some property of two instructions
+i and j and the value of the feature is lt, eq, or gt depending on whether the value of the property
+for i is less than, equal to, or greater than the value of the property for j. Besides using three
+discrete values lt, eq, and gt, we also tried ﬁve discrete values: 2gt, gt, eq, lt, and 2lt. The idea
+was to more accurately capture how much smaller or bigger one value was than another. For
+example, if the value of the property for i is much greater than the value of the property for j,
+the value of the feature would be 2gt and if it was only slightly greater, the value of the feature
+would be just gt. Using ﬁve discrete levels, we were able to improve the accuracy to 3.50% with
+seven features. Unfortunately, it also increased the size of the tree to 250 nodes. As we already
+11
+
+Algorithm 1: Automatically constructed decision tree heuristic for list scheduler.
+input : Instructions i and j
+output : Return true if i should be scheduled before j; false otherwise
+i.max distance ← max(i.resource based dist to leaf, i.critical path dist to leaf );
+j.max distance ← max(j.resource based dist to leaf, j.critical path dist to leaf );
+if i.max distance > j.max distance then
+return true;
+else if i.max distance < j.max distance then
+return false;
+else
+if i.descendants > j.descendants then
+if i.latency ≥ j.latency then return true;
+else return false;
+else if i.descendants < j.descendants then
+if i.latency > j.latency then return true;
+else return false;
+else
+if i.sum of latencies > j.sum of latencies then return true;
+else return false;
+
+mentioned, besides good accuracy we are also interested in a simple heuristic which is easily
+understandable and efﬁcient. A decision tree with 250 nodes gives a complex heuristic, which is
+against our aim.
+
+4 Experimental Evaluation
+In this section, we describe the experimental evaluation of the decision tree heuristic that was
+learned following the methodology given above (see Algorithm 1).
+The decision tree heuristic was incorporated into a list scheduler and experimentally evaluated
+on all of the basic blocks from the SPEC 2000 benchmarks, using four different architectural
+
+12
+
+models:
+1-issue processor executes all types of instructions.
+2-issue processor with one ﬂoating point functional unit and one functional unit that can
+execute integer, load/store, and branch instructions.
+4-issue processor with one functional unit for each type of instruction.
+6-issue processor with the following functional units: two integer, one ﬂoating point, two
+load/store, and one branch.
+To begin, the decision tree heuristic (hdt ) was compared against previously proposed list scheduling heuristics (hest , hcp , and hs+p ) and against the schedules found by the optimal scheduler.
+The hest heuristic used updated earliest start time as the primary feature, critical-path distance
+as a tie-breaker if the updated earliest start times were equal, and order within the instruction
+stream as a tie-breaker if both the earliest start times and the critical-path distances were equal.
+The heuristic is similar to a heuristic proposed by Warren [22]. The minor differences are due to
+differences in architectural models and register pressure features. We refer to this heuristic as the
+earliest start time heuristic.
+The hcp heuristic used critical-path distance as the primary feature, updated earliest start time
+as a tie-breaker, and order within the instruction stream as the next tie-breaker. The h cp heuristic
+is perhaps of the most interest in this comparison. This is true for several reasons: critical-path
+distance is one of the most popular features in the heuristics surveyed by Smotherman et al. [19];
+the primary and secondary features are as recommended in a classic text by Muchnick [13]; h cp is
+similar to the heuristic in the widely used GCC compiler [20]; and ﬁnally and most importantly,
+hcp is the heuristic that would have been learned in the work of Moss et al. [12] when targeted
+towards our architectural models. We refer to this heuristic as the critical-path heuristic.
+The hs+p heuristic used critical-path distance as the primary feature, latency of the instruction as a tie-breaker, number of successors as the next tie-breaker, and order within the instruction
+stream as the ﬁnal tie-breaker. The heuristic is similar to a heuristic proposed by Shieh and Papachristou [17]. The minor differences are due to further tie-breaking features in the original
+proposal. However, we found that these additional features slightly degraded performance. We
+refer to this heuristic as Shieh and Papachristou’s heuristic.
+One of the aims of the experiments is to measure the robustness of the decision tree heuristic
+across architectures and scheduling methods. Recall that the decision tree heuristic was discovered
+from training data that arose from applying forward list scheduling on a single target architecture
+(a 4-issue architecture). To measure robustness, the experiments evaluate the heuristics on multiple
+architectures and using both forward and backward list scheduling.
+Table 3 shows the number of basic blocks in the SPEC 2000 benchmark suite that were not
+scheduled optimally by a forward list scheduling algorithm when using the various heuristics.
+Table 4 shows the results for a backward list scheduling algorithm. The automatically learned decision tree heuristic is better than all three of the previously proposed heuristics. To systematically
+study the scaling behavior of the heuristics, we report the results broken down by increasing size
+ranges of the basic blocks. For reference, the number of basic blocks in each size range is given in
+Table 5. For all of the heuristics, as the basic block size increases the accuracy of the list scheduler
+13
+
+decreases. For the largest basic blocks, up to 31% of the schedules are not optimal (see the 2-issue
+architecture). However, it can be seen that the decision tree heuristic is very effective for small
+and medium size basic blocks. Tables 3 & 4 show that the decision tree heuristic gave overall
+reductions in the number of basic blocks not optimally scheduled of between 28% and 55% when
+compared to the critical-path heuristic. The decision tree heuristic gave similar overall reductions
+when compared to the hs+p heuristic and signiﬁcantly greater reductions when compared to the
+hest heuristic.
+Table 3: Forward list scheduler. Number of basic blocks in the SPEC 2000 benchmark suite not
+scheduled optimally by the earliest start time heuristic (h est ), Shieh and Papachristou’s heuristic
+(hs+p ), the critical-path heuristic (hcp ), and the decision tree heuristic (hdt ) for ranges of basic
+block sizes and various issue widths. Also shown is the percentage improvement given by the
+decision tree heuristic over the critical-path heuristic (% = 100 × (h cp − hdt )/hcp ).
+1-issue
+range
+1–5
+6–10
+11–20
+21–30
+31–50
+51–100
+101–250
+251–2600
+Total
+
+hest hs+p
+hcp
+hdt
+2,613
+105
+338
+0
+15,269
+531
+804
+134
+16,949 1,077 1,118
+598
+6,574
+569
+619
+290
+4,815
+640
+628
+337
+3,053
+540
+536
+315
+1,600
+260
+270
+218
+264
+64
+72
+68
+51,137 3,786 4,385 1,960
+
+2-issue
+%
+hest hs+p
+hcp
+hdt
+%
+100.0 2,602
+113
+350
+0 100.0
+83.3 15,216
+637
+907
+165 81.8
+46.5 16,186 1,185 1,226
+586 52.2
+53.2 5,808
+761
+781
+347 55.6
+46.3 4,419
+817
+853
+512 40.0
+41.2 2,805
+818
+790
+464 41.3
+19.3 1,571
+485
+505
+408 19.2
+5.6
+273
+103
+111
+111
+0.0
+55.3 48,880 4,919 5,523 2,593 53.1
+
+4-issue
+range
+1–5
+6–10
+11–20
+21–30
+31–50
+51–100
+101–250
+251–2600
+Total
+
+6-issue
+
+hest hs+p
+hcp
+hdt
+1,045
+112
+182
+12
+7,934
+565
+736
+121
+9,864 1,515 1,623
+681
+4,637
+926
+962
+479
+3,723
+951 1,013
+548
+2,578
+867
+915
+455
+1,533
+484
+501
+358
+260
+108
+117
+101
+31,574 5,528 6,049 2,755
+
+%
+hest hs+p
+hcp
+hdt
+93.4
+0
+0
+0
+0
+83.6
+576
+90
+69
+56
+58.0 3,093
+546
+534
+344
+50.2 2,396
+627
+584
+469
+45.9 2,437
+597
+615
+437
+50.3 2,017
+542
+538
+318
+28.5 1,347
+346
+337
+251
+13.7
+230
+93
+96
+91
+54.5 12,096 2,841 2,773 1,966
+
+14
+
+%
+—
+18.8
+35.6
+19.7
+28.9
+40.9
+25.5
+5.2
+29.1
+
+Table 4: Backward list scheduler. Number of basic blocks in the SPEC 2000 benchmark suite not
+scheduled optimally by the earliest start time heuristic (h est ), Shieh and Papachristou’s heuristic
+(hs+p ), the critical-path heuristic (hcp ), and the decision tree heuristic (hdt ) for ranges of basic
+block sizes and various issue widths. Also shown is the percentage improvement given by the
+decision tree heuristic over the critical-path heuristic (% = 100 × (h cp − hdt )/hcp ).
+1-issue
+range
+1–5
+6–10
+11–20
+21–30
+31–50
+51–100
+101–250
+251–2600
+Total
+
+hest hs+p
+hcp
+hdt
+495
+27
+43
+0
+21,240
+184
+324
+43
+19,810
+673
+784
+346
+7,181
+386
+387
+224
+5,311
+438
+406
+289
+3,258
+359
+386
+259
+1,824
+220
+231
+196
+303
+54
+54
+53
+59,422 2,341 2,615 1,410
+
+2-issue
+%
+hest hs+p
+hcp
+hdt
+%
+100.0
+488
+26
+43
+0 100.0
+86.7 21,011
+195
+323
+52 83.9
+55.9 18,732
+733
+846
+343 59.5
+42.1 6,381
+421
+393
+207 47.3
+28.8 4,785
+606
+552
+376 31.9
+32.9 2,999
+565
+580
+374 35.5
+15.2 1,790
+353
+386
+293 24.1
+1.9
+303
+79
+77
+71
+7.8
+46.1 56,489 2,978 3,200 1,716 46.4
+
+4-issue
+range
+1–5
+6–10
+11–20
+21–30
+31–50
+51–100
+101–250
+251–2600
+Total
+
+6-issue
+
+hest hs+p
+hcp
+hdt
+56
+28
+46
+1
+5,258
+280
+277
+76
+9,269
+807
+822
+338
+4,283
+665
+616
+384
+3,629
+824
+787
+514
+2,583
+757
+805
+527
+1,609
+473
+493
+398
+268
+106
+104
+106
+26,955 3,940 3,950 2,344
+
+%
+hest hs+p
+hcp
+hdt
+%
+97.8
+6
+3
+4
+0 100.0
+72.6
+201
+60
+65
+39 40.0
+58.9 2,457
+343
+355
+176 50.4
+37.7 1,978
+275
+250
+190 24.0
+34.7 2,282
+532
+491
+376 23.4
+34.5 1,992
+543
+565
+369 34.7
+19.3 1,400
+372
+378
+335 11.4
+-1.9
+247
+92
+97
+94
+3.1
+40.7 10,563 2,220 2,205 1,579 28.4
+
+15
+
+Table 5: Number of basic blocks in the SPEC 2000 benchmark suite in each size range.
+range
+1–5
+6–10
+11–20
+21–30
+31–50
+51–100
+101–250
+251–2600
+Total
+
+# blocks
+324,352
+94,066
+46,502
+13,911
+9,760
+5,669
+2,789
+358
+497,407
+
+In the remainder of the experimental evaluation, we give a detailed comparison between the
+decision tree heuristic hdt and the critical-path heuristic hcp and omit the Shieh and Papachristou
+heuristic hs+p and the earliest start time heuristic hest from further consideration. We focus on
+comparing against the critical-path heuristic for three reasons. First, as previously mentioned,
+the critical-path heuristic is the heuristic that would have been learned in the work of Moss et
+al. [12]. Second, the performance of the Shieh and Papachristou heuristic hs+p is quantitatively
+and qualitatively similar to that of the critical-path heuristic; hence the relative performance of
+hs+p can be inferred from the relative performance of hcp . Third, the performance of the earliest
+start time heuristic hest is completely dominated by the performance of the other heuristics; hence
+a detailed comparison against hest is of lesser interest.
+Table 6 shows a comparison of the number of basic blocks where one heuristic gave a better
+schedule than the other heuristic when coupled with a forward list scheduler. Table 7 shows the
+results for a backward list scheduling algorithm. On this performance measure, the decision tree
+heuristic is signiﬁcantly better than the critical-path heuristic for small and medium size basic
+blocks. However, as the basic block size increases, the advantage of the decision tree heuristic
+decreases. Overall, for every basic block where the critical-path heuristic found a better schedule
+than the decision tree heuristic, there were between 2.9 and 7.8 basic blocks where the decision
+tree heuristic found a better schedule than the critical-path heuristic.
+
+16
+
+Table 6: Forward list scheduler. Number of basic blocks in the SPEC 2000 benchmark suite where
+the critical-path heuristic gave a better schedule (hcp ) and where the decision tree heuristic gave a
+better schedule (hdt ), for ranges of basic block sizes and various issue widths. Also shown is the
+ratio of the number of improvements (r = h dt /hcp ).
+1-issue
+range
+1–5
+6–10
+11–20
+21–30
+31–50
+51–100
+101–250
+251–2600
+Total
+
+2-issue
+
+4-issue
+
+6-issue
+
+hcp
+hdt
+r hcp
+hdt
+r hcp
+hdt
+r hcp
+hdt
+0
+338
+—
+0
+350
+—
+0
+170
+—
+0
+0
+33
+708 21.5 32
+791 24.7
+7
+625 89.3
+5
+18
+145
+677 4.7 127
+785 6.2 63 1006 16.0 70
+260
+90
+423 4.7 83
+544 6.6 89
+603 6.8 128
+233
+115
+422 3.7 144
+553 3.8 128
+669 5.2 80
+288
+113
+355 3.1 104
+545 5.2 115
+644 5.6 86
+341
+103
+155 1.5 116
+272 2.3 83
+301 3.6 78
+184
+46
+39 0.8 47
+51 1.1 36
+60 1.7 29
+36
+645 3,117 4.8 653 3,891 6.0 521 4,078 7.8 476 1,360
+
+r
+—
+3.6
+3.7
+1.8
+3.6
+4.0
+2.4
+1.2
+2.9
+
+Table 7: Backward list scheduler. Number of basic blocks in the SPEC 2000 benchmark suite
+where the critical-path heuristic gave a better schedule (hcp ) and where the decision tree heuristic
+gave a better schedule (hdt ), for ranges of basic block sizes and various issue widths. Also shown
+is the ratio of the number of improvements (r = h dt /hcp ).
+1-issue
+
+2-issue
+
+4-issue
+
+6-issue
+
+hcp
+hdt
+r hcp
+hdt
+r hcp
+hdt
+r hcp
+hdt
+r
+range
+1–5
+0
+43
+—
+0
+43
+—
+0
+45
+—
+0
+4
+—
+6–10
+19
+300 15.8 23
+294 12.8 13
+214 16.5
+0
+26
+—
+11–20
+120
+561 4.7 109
+610 5.6 54
+544 10.1
+7
+188 26.9
+21–30
+64
+247 3.9 51
+251 4.9 65
+318 4.9 28
+88 3.1
+31–50
+106
+228 2.2 122
+297 2.4 126
+406 3.2 79
+211 2.7
+51–100
+83
+271 3.3 92
+360 3.9 96
+460 4.8 69
+303 4.4
+101–250
+71
+119 1.7 88
+216 2.5 80
+243 3.0 62
+158 2.5
+251–2600 21
+20 1.0 12
+45 3.8 26
+47
+1.8 25
+32 1.3
+Total
+484 1,789 3.7 497 2,116 4.3 460 2,277 5.0 270 1,010 3.7
+
+17
+
+We conclude the detailed comparison between the decision tree heuristic h dt and the criticalpath heuristic hcp by examining how far from optimal are the non-optimal schedules found by the
+heuristics.
+Table 8 shows performance guarantees in terms of the worst-case factor from optimality, a
+measure of the robustness of a heuristic, when the heuristics are coupled with a forward list scheduler. Table 9 shows the results for a backward list scheduling algorithm. For each basic block,
+we calculated the ratio of the length of the schedule found by the heuristic over the length of the
+optimal schedule. Each entry in the table is then the maximum over all ratios for basic blocks in
+that size range. Another way to read the entries in this table is that saying, for example, that the
+decision tree heuristic is within a factor of 1.25 of optimal is that the decision tree heuristic was
+always within 25% of the optimal value in that size range. For most size ranges and architectural
+models the decision tree heuristic gave much better worst-case guarantees than the critical-path
+heuristic. It is interesting to note that (i) the heuristics, especially the critical-path heuristic, can
+be quite far from optimal for relative large basic blocks (see, for example, the size range 51–100
+and the 4-issue and 6-issue architectures), and (ii) the backward list scheduler, while optimal more
+often than the forward list scheduler, can make more costly mistakes when it returns a schedule
+that is non-optimal.
+Finally, Figure 2 shows the percentage of all basic blocks in the size range 6–2600 where the
+list scheduler was within a given percentage of optimal. In constructing the graphs, we omitted
+the blocks in the size range 1–5. This was done to avoid inﬂating the percentages by including
+hundreds of thousands of basic blocks that are relatively easy for most any heuristic. The results
+for both the critical-path heuristic and the decision tree heuristic are shown. For example, the
+backward list scheduler using the decision tree heuristic is within 5% of optimal for 99.7% of
+all basic blocks on the 4-issue architecture. As another example, the forward list scheduler using
+the decision tree heuristic ﬁnds an optimal schedule (i.e., is with 0% of optimal) for 98.6% of all
+basic blocks on the 4-issue architecture. As is clear from the graphs, the decision tree heuristic
+dominates the critical path heuristic at all points for all architectures.
+
+18
+
+Table 8: Forward list scheduler. Performance guarantees in terms of worst-case factors from optimality for the critical-path heuristic (hcp ) and the decision tree heuristic (hdt ), for ranges of basic
+block sizes and various issue widths.
+1-issue
+range
+1–5
+6–10
+11–20
+21–30
+31–50
+51–100
+101–250
+251–2600
+Maximum
+
+hcp
+1.20
+1.20
+1.21
+1.14
+1.16
+1.10
+1.10
+1.01
+1.21
+
+hdt
+1.00
+1.13
+1.17
+1.10
+1.07
+1.09
+1.09
+1.02
+1.17
+
+2-issue
+hcp
+1.33
+1.30
+1.27
+1.19
+1.25
+1.20
+1.27
+1.24
+1.33
+
+hdt
+1.00
+1.14
+1.17
+1.10
+1.25
+1.13
+1.24
+1.26
+1.26
+
+4-issue
+hcp
+1.25
+1.33
+1.38
+1.29
+1.32
+1.39
+1.28
+1.16
+1.39
+
+hdt
+1.25
+1.25
+1.17
+1.25
+1.15
+1.12
+1.16
+1.13
+1.25
+
+6-issue
+hcp
+1.00
+1.33
+1.25
+1.18
+1.21
+1.29
+1.32
+1.05
+1.33
+
+hdt
+1.00
+1.33
+1.20
+1.20
+1.21
+1.24
+1.16
+1.06
+1.33
+
+Table 9: Backward list scheduler. Performance guarantees in terms of worst-case factors from
+optimality for the critical-path heuristic (h cp ) and the decision tree heuristic (hdt ), for ranges of
+basic block sizes and various issue widths.
+1-issue
+range
+1–5
+6–10
+11–20
+21–30
+31–50
+51–100
+101–250
+251–2600
+Maximum
+
+hcp
+1.20
+1.18
+1.17
+1.13
+1.08
+1.10
+1.06
+1.01
+1.20
+
+hdt
+1.00
+1.13
+1.13
+1.11
+1.08
+1.08
+1.07
+1.02
+1.13
+
+2-issue
+hcp
+1.20
+1.18
+1.23
+1.39
+1.19
+1.15
+1.24
+1.32
+1.39
+
+hdt
+1.00
+1.13
+1.13
+1.11
+1.17
+1.15
+1.24
+1.28
+1.28
+
+19
+
+4-issue
+hcp
+1.33
+1.33
+1.25
+1.41
+1.19
+1.65
+1.27
+1.23
+1.65
+
+hdt
+1.13
+1.33
+1.17
+1.23
+1.18
+1.16
+1.17
+1.24
+1.33
+
+6-issue
+hcp
+1.11
+1.20
+1.20
+1.14
+1.16
+1.47
+1.25
+1.22
+1.47
+
+hdt
+1.00
+1.20
+1.17
+1.18
+1.15
+1.23
+1.10
+1.22
+1.23
+
+100
+
+99.5
+
+99.5
+
+Percentage of basic blocks
+
+Percentage of basic blocks
+
+100
+
+99
+
+98.5
+
+98
+
+backward list scheduling, decision tree heuristic
+backward list scheduling, critical path heuristic
+forward list scheduling, decision tree heuristic
+forward list scheduling, critical path heuristic
+
+97.5
+0
+
+5
+
+10
+
+15
+
+20
+
+99
+
+98.5
+
+98
+backward list scheduling, decision tree heuristic
+backward list scheduling, critical path heuristic
+forward list scheduling, decision tree heuristic
+forward list scheduling, critical path heuristic
+
+97.5
+
+97
+25
+
+0
+
+Upper bound on percentage from optimal
+
+100
+
+100
+
+99.5
+
+99.8
+
+99
+98.5
+98
+97.5
+backward list scheduling, decision tree heuristic
+backward list scheduling, critical path heuristic
+forward list scheduling, decision tree heuristic
+forward list scheduling, critical path heuristic
+
+96.5
+0
+
+5
+10
+15
+20
+Upper bound on percentage from optimal
+
+10
+
+15
+
+20
+
+25
+
+(b)
+
+Percentage of basic blocks
+
+Percentage of basic blocks
+
+(a)
+
+97
+
+5
+
+Upper bound on percentage from optimal
+
+99.6
+99.4
+99.2
+99
+98.8
+
+backward list scheduling, decision tree heuristic
+backward list scheduling, critical path heuristic
+forward list scheduling, decision tree heuristic
+forward list scheduling, critical path heuristic
+
+98.6
+25
+
+(c)
+
+0
+
+5
+10
+15
+20
+Upper bound on percentage from optimal
+
+25
+
+(d)
+
+Figure 2: Performance guarantees in terms of worst-case factors from optimal for the critical-path
+heuristic and the decision tree heuristic, for all basic blocks in the size range 6–2600; (a) 1-issue
+architecture; (b) 2-issue architecture; (c) 4-issue architecture; (d) 6-issue architecture.
+
+20
+
+5 Discussion
+The machine learning approach for constructing a good heuristic for basic block scheduling has
+several advantages over hand-crafted heuristics. The primary advantage is that of efﬁciency—
+hand-crafting a heuristic is potentially a time-consuming process. In contrast, in the machine
+learning approach feature construction needs to be done just once (as we have done in this paper) and all of the subsequent stages can be fully automated. This means that new heuristics can
+be easily generated for new architectures and for new programming languages and programming
+styles. A secondary advantage is that hand-crafted heuristics are prone to the well-known pitfall of
+over-ﬁtting; that is, they work well on the training data to which they are tuned but not as well on
+data that has not been seen before. In contrast, we used techniques from machine learning which
+are designed to avoid over-ﬁtting. In particular, we used feature ﬁltering, feature selection, the use
+of a validation set, and most importantly, the complete separation of the data used to discover the
+heuristic from the data used to evaluate the heuristic. Further secondary advantages of the machine
+learning approach include: (i) it is possible to test many more possible combinations of features
+and orderings of features than in a hand-crafted approach, (ii) richer forms of the heuristics can
+be tested (the form of the decision tree heuristic is more complex than the form that is usually
+constructed by hand, which is a series of tie-breaking schemes), and (iii) the improved overall
+performance of the resulting heuristic.
+
+6 Conclusion
+We presented a study on automatically learning a good heuristic for basic block scheduling using supervised machine learning techniques. The novelty of our approach is in the quality of the
+training data—we obtained training instances from very large basic blocks and we performed an
+extensive and systematic analysis to identify the best features and to synthesize new features—and
+in our emphasis on learning a simple yet accurate heuristic. We performed an extensive evaluation of the heuristic that was automatically learned by comparing it against three previously
+proposed heuristics and against an optimal scheduler, using all of the basic blocks in the SPEC
+2000 benchmarks. On this benchmark suite, the decision tree heuristic was better than all three of
+the previously proposed heuristics. In particular, the decision tree heuristic reduced the number of
+basic blocks that were not optimally scheduled by up to 55% compared to the popular critical-path
+heuristic, and gave improved performance guarantees in terms of the worst-case factor from optimality. Beyond heuristics for compiler optimization, our results also provide further evidence for
+the interest of machine learning techniques for discovering heuristics.
+
+Acknowledgements
+This research was supported by an IBM Center for Advanced Studies (CAS) Fellowship, an
+NSERC Postgraduate Scholarship, and an NSERC CRD Grant.
+
+21
+
+References
+[1] R. J. Blainey. Instruction scheduling in the TOBEY compiler. IBM J. Res. Develop.,
+38(5):577–593, 1994.
+[2] K. D. Cooper and L. Torczon. Engineering a Compiler. Morgan Kaufmann, 2004.
+[3] U. Dorndorf. Project Scheduling with Time Windows. Physica-Verlag, 2002.
+[4] R. Govindarajan. Instruction scheduling. In Y. N. Srikant and P. Shankar, editors, The Compiler Design Handbook, pages 631–687. CRC Press, 2003.
+[5] I. Guyon and A. Elisseeff. An introduction to variable and feature selection. J. of Machine
+Learning Research, 3:1157–1182, 2003.
+[6] J. Hennessy and D. Patterson. Computer Architecture: A Quantitative Approach. Morgan
+Kaufmann, third edition, 2003.
+[7] S. Hoxey, F. Karim, B. Hay, and H. Warren. The PowerPC Compiler Writer’s Guide. Warthman Associates, 1996.
+[8] C. Lee, M. Potkonjak, and W. Manginoe-Smith. MediaBench: A tool for evaluating and synthesizing multimedia and communications. In Proceedings of the 30th Annual IEEE/ACM
+International Symposium on Microarchitecture (Micro-30), pages 330–335, Research Triangle Park, North Carolina, 1997.
+[9] X. Li and S. Olafsson. Discovering dispatching rules using data mining. Journal of Scheduling, 8:515–527, 2005.
+[10] A. M. Malik, J. McInnes, and P. van Beek. Optimal basic block instruction scheduling
+for multiple-issue processors using constraint programming. Technical Report CS-2005-19,
+School of Computer Science, University of Waterloo, 2005.
+[11] A. McGovern, J. E. B. Moss, and A. G. Barto. Building a basic block instruction scheduler
+using reinforcement learning and rollouts. Machine Learning, 49(2/3):141–160, 2002.
+[12] J. E. B. Moss, P. E. Utgoff, J. Cavazos, , D. Precup, D. Stefanovic, C. Brodley, and D. Scheef.
+Learning to schedule straight-line code. In Proceedings of the 10th Conference on Advances
+in Neural Information Processing Systems (NIPS), pages 929–935, Denver, Colorado, 1997.
+[13] S. Muchnick. Advanced Compiler Design and Implementation. Morgan Kaufmann, 1997.
+[14] K. Neumann, C. Schwindt, and J. Zimmermann. Project Scheduling with Time Windows and
+Scarce Resources. Springer, second edition, 2003.
+[15] M. Pinedo. Scheduling: Theory, Algorithms, and Systems. Prentice-Hall, 1995.
+
+22
+
+[16] J. R. Quinlan. C4.5: Programs for Machine Learning. Morgan Kaufmann, 1993. The C4.5
+software is available at: http://www.cse.unsw.edu.au/˜quinlan/.
+[17] J.-J. Shieh and C. Papachristou. On reordering instruction streams for pipelined computers.
+SIGMICRO Newsl., 20(3):199–206, 1989.
+[18] G. Shobaki and K. Wilken. Optimal superblock scheduling using enumeration. In Proceedings of the 37th Annual IEEE/ACM International Symposium on Microarchitecture (Micro37), pages 283–293, Portland, Oregon, 2004.
+[19] M. Smotherman, S. Krishnamurthy, P. S. Aravind, and D. Hunnicutt. Efﬁcient DAG construction and heuristic calculation for instruction scheduling. In Proceedings of the 24th Annual
+IEEE/ACM International Symposium on Microarchitecture (Micro-24), pages 93–102, Albuquerque, New Mexico, 1991.
+[20] M. D. Tiemann. The GNU instruction scheduler, 1989.
+[21] P. van Beek and K. Wilken. Fast optimal instruction scheduling for single-issue processors
+with arbitrary latencies. In Proceedings of the Seventh International Conference on Principles
+and Practice of Constraint Programming, pages 625–639, Paphos, Cyprus, 2001.
+[22] H. S. Warren Jr. Instruction scheduling for the IBM RISC System/6000 processor. IBM J.
+Res. Develop., 34(1):85–92, 1990.
+[23] I. H. Witten and E. Frank. Data Mining. Morgan Kaufmann, 2000.
+
+23
+
+

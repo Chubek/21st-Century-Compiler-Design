@@ -1,0 +1,201 @@
+\chapter{Functional Core Languages and Evaluation Semantics}
+\label{ch:functional-core-semantics}
+
+A function value contains more than the text of its body.
+It must remember which bindings its free variables denote, and its caller must agree on when arguments are evaluated.
+Getting either choice wrong changes program meaning before optimization begins.
+The functional implementation starts from a small core whose lexical scope and evaluation order are executable contracts.
+
+\section{Choose a core that exposes the hard decisions}
+\label{sec:ch89-syntax}
+The lab language contains integers, booleans, variables, lambda abstraction, application, let, restricted recursive let, conditionals, integer primitives, and lists with a two-arm case.
+It uses S-expressions to keep parsing separate from functional compilation.
+For example, \code{(lam x (add x 1))} is a unary function, and \code{(app f 4)} calls a computed function value.
+Application is explicit rather than inferred from every parenthesized list.
+
+Table~\ref{tab:ch89-syntax} defines the essential forms.
+The implementation validates arities and binder shapes after parsing.
+Recursive bindings require a lambda right side, avoiding uninitialized recursive values in the strict machine.
+Lists are homogeneous under the type system, but their representation differs between strict and lazy machines.
+
+\begin{table}[htbp]
+\caption{The functional core makes binding and evaluation constructs explicit.}
+\label{tab:ch89-syntax}
+\centering
+\begin{tabular}{ll}
+\toprule
+Form & Meaning \\
+\midrule
+\code{(lam x body)} & capture lexical environment; bind x on call \\
+\code{(app f a)} & apply a computed function \\
+\code{(let x value body)} & nonrecursive lexical binding \\
+\code{(letrec f lambda body)} & recursive function binding \\
+\code{(if test yes no)} & evaluate only the selected arm \\
+\code{(cons head tail)} & construct a list cell \\
+\code{(case xs empty (h t body))} & branch on list shape; bind fields \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The syntax is deliberately smaller than ML, Haskell, or Scheme.
+There are no modules, mutation, user-defined effects, general user-declared algebraic types, type classes, or exception handlers.
+Those features require additional static and runtime machinery rather than mere parser extensions.
+The chapters discuss their design implications while the case study states exactly what runs.
+
+\section{Represent lexical scope with environments}
+\label{sec:ch89-environment}
+An environment $\rho$ maps resolved variable identities to runtime bindings.
+A closure is a triple consisting of parameter, body or code pointer, and captured environment.
+The evaluation judgment $\rho\vdash e\Downarrow v$ states that expression e evaluates to value v in that environment.
+The strict machine evaluates function and argument before entering the closure body with its captured environment extended by the parameter binding.
+
+Consider binding x to 11, binding f to a function adding x to its argument, then shadowing x with 99 before calling f on 4.
+Lexical scoping yields 15.
+Looking up x in the caller's environment would instead produce 103, an accidental dynamic-scope implementation.
+Figure~\ref{fig:ch89-closure} shows the retained binding.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=14mm and 16mm]
+\node[basic block] (f) {closure f: add captured x to y};
+\node[basic block,below left=of f] (old) {captured x = 11};
+\node[basic block,below right=of f] (new) {caller shadows x = 99};
+\draw[cfg edge] (f)--node[left,font=\small]{uses}(old);
+\draw[dashed] (f)--node[right,font=\small]{not captured}(new);
+\end{tikzpicture}
+\caption{A closure refers to its definition-site binding, not a same-spelled caller binding.}
+\label{fig:ch89-closure}
+\end{figure}
+
+The Python reference uses validated names and copied environment dictionaries of binding cells.
+This correctly models lexical shadowing for the supported syntax but is not a compact production closure layout.
+A compiler normally resolves names to declaration identities or lexical addresses once, then stores only needed free variables rather than copying unrelated bindings at every closure construction.
+Those representation changes are developed in Chapter~\ref{ch:closures-lifting-combinators}.
+
+\section{State argument evaluation order}
+\label{sec:ch89-strictness}
+\term{Call-by-value} evaluates the argument before function entry.
+Call-by-name delays argument evaluation and can repeat it at each use.
+\term{Call-by-need} also delays it but updates shared suspended computation after its first evaluation.
+These strategies can agree on terminating pure examples and disagree on termination or resource use.
+
+Let loop be a recursive function that immediately calls itself.
+Applying the constant function returning seven to loop(0) diverges under call-by-value and returns seven under call-by-need, because the parameter is unused.
+Table~\ref{tab:ch89-strategies} separates the relevant behaviors.
+The lab tests this difference explicitly rather than claiming strict and lazy machines implement identical termination semantics.
+
+\begin{table}[htbp]
+\caption{Argument strategy changes when work is performed and whether it is repeated.}
+\label{tab:ch89-strategies}
+\centering
+\begin{tabular}{lll}
+\toprule
+Strategy & Unused divergent argument & Repeated parameter use \\
+\midrule
+call-by-value & evaluated before entry & reuse argument value \\
+call-by-name & not demanded & may recompute expression \\
+call-by-need & not demanded & memoize one demanded computation \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The strict interpreter and stack VM implement left-to-right call-by-value.
+The lazy interpreter is an alternate call-by-need semantics over the same surface forms.
+Integer primitives demand both operands, a conditional demands only its test and chosen branch, and a list case demands only the outer list shape before selecting an arm.
+All machines use mathematical integers through Python's arbitrary-precision arithmetic, not machine-width overflow.
+
+\section{Evaluate a higher-order program step by step}
+\label{sec:ch89-evaluate}
+Algorithm~\ref{alg:ch89-app} gives strict application.
+The closure environment is copied or extended without changing the caller's lexical bindings.
+The environment's binding cells allow recursive closures to see a slot installed before the closure is created and filled immediately afterward.
+Because recursive right sides are lambdas, closure construction does not read an uninitialized recursive value.
+
+\begin{algorithm}[htbp]
+\caption{Evaluate strict application under lexical scope.}
+\label{alg:ch89-app}
+\begin{pseudocode}
+\Require typed application app(f,a), lexical environment $\rho$
+\Ensure result under left-to-right call-by-value, or evaluation failure/budget status
+\State evaluate $f$ in $\rho$ to closure $(x,body,\rho_c)$
+\State evaluate $a$ in $\rho$ to argument value $v$
+\State extend $\rho_c$ with a new binding $x\mapsto v$
+\State evaluate body in that extended environment
+\end{pseudocode}
+\end{algorithm}
+
+For the captured-x example, closure creation retains x=11; the later let allocates a different cell for x=99.
+Calling f evaluates argument four, binds y=4 in the closure environment, and adds eleven and four.
+Dictionary copying costs the environment size in the reference interpreter, so an application is not universally constant-time even before evaluating its body.
+Lexical-address arrays or linked frames make different space/time tradeoffs and require their own lookup bounds.
+
+Figure~\ref{fig:ch89-recursion} shows the recursive knot for factorial.
+The slot exists before closure construction, and the closure's captured dictionary contains that slot.
+Filling the slot afterward establishes the back-edge.
+This is a heap graph cycle with a valid closure value, not an attempt to unfold a finite syntax tree cyclically.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=25mm]
+\node[basic block] (slot) {binding cell fact};
+\node[basic block,right=of slot] (closure) {factorial closure};
+\draw[cfg edge] (slot.north east) to[bend left=20] (closure.north west);
+\draw[cfg edge] (closure.south west) to[bend left=20] node[below,font=\small]{captures cell}(slot.south east);
+\end{tikzpicture}
+\caption{A recursive function environment ties a cell to the closure that captures it.}
+\label{fig:ch89-recursion}
+\end{figure}
+
+\section{Separate semantic outcomes from host resource limits}
+\label{sec:ch89-budget}
+The reference machines charge a finite execution budget and can also encounter Python's recursion or memory limits.
+Exhausting fuel is an inconclusive execution outcome, not a mathematical proof that the source diverges.
+Algorithm~\ref{alg:ch89-run} keeps parsing, typing, optimization, and execution failures separate from a successful scalar result.
+The CLI prints only integer or Boolean results; internal lists and closures are not silently serialized as if they were portable source values.
+
+\begin{algorithm}[htbp]
+\caption{Run a functional program through explicit validation and execution boundaries.}
+\label{alg:ch89-run}
+\begin{pseudocode}
+\Require source text, chosen strict or lazy semantics, finite execution budget
+\Ensure typed scalar result or explicit failure without a false successful value
+\State parse one complete expression and validate shape/binder restrictions
+\State infer its type; reject unresolved typing errors
+\State apply only optimizations sound for the chosen contract
+\State execute with the selected machine and budget
+\State publish a scalar only after successful completion
+\end{pseudocode}
+\end{algorithm}
+
+Parsing the finite token stream costs linear scanning plus tree construction, subject to token and nesting limits.
+Type inference and execution have separate costs; general recursive source evaluation is not bounded by source size.
+Optimization cannot erase a potentially divergent strict argument merely because it returns no useful numeric contribution.
+These distinctions are central to testing transformations on functional code.
+
+\section{Relate environment execution to substitution semantics}
+\label{sec:ch89-substitution}
+An alternative account of pure lambda evaluation substitutes an argument into the function body.
+That substitution must avoid capturing free variables under nested binders.
+The environment machine represents the same binding relationships indirectly: the body retains its lexical references and the environment supplies values for them.
+Correctness of closure execution can be argued by relating an environment to a capture-avoiding substitution for its bound declarations.
+
+At function creation, the captured environment records the substitutions justified at the definition site.
+At application, extending that captured environment by the parameter value corresponds to substituting the argument for that particular binder.
+Shadowing creates a fresh declaration relationship rather than overwriting the meaning of an outer captured reference.
+The captured-x example tests exactly that distinction.
+An implementation that executes the body in the caller environment breaks the relation and exhibits the dynamic-scope result 103 instead of fifteen.
+
+\section{Exercises}
+\label{sec:ch89-exercises}
+\begin{enumerate}
+\item\label{ex:ch89-scope} Evaluate the captured-x example and contrast the erroneous dynamic-scope result.
+\item\label{ex:ch89-strict} Compare strict and lazy evaluation of a constant function applied to loop(0).
+\item\label{ex:ch89-recursion} Explain why allocating the recursive binding cell before constructing a closure is safe for a lambda right side but not arbitrary eager self-reference.
+\item\label{ex:ch89-budget} A recursive program consumes all fuel.
+What does this establish, and why must the CLI not print an arbitrary partial scalar?
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch89-reading}
+Appel covers lexical environments and closures~\cite{appel-1998-modern}.
+The STG paper develops compiled non-strict execution~\cite{peytonjones-1992-stg}.

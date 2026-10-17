@@ -1,0 +1,205 @@
+\chapter{Case Study: Building an FST-Based Spellchecker}
+\label{ch:fst-spellchecker}
+
+A useful spellchecker must distinguish an absent correction from an incomplete search.
+It must also avoid returning the same word several times merely because several edit scripts produce it.
+The case study builds a bounded, executable FST search with deterministic ranking and an independent distance oracle.
+The implementation is \code{strings.py} in \path{example-code/string-labs/}.
+It requires only Python's standard library.
+
+\section{Specify what a correction means}
+\label{sec:ch80-contract}
+The dictionary consists of nonempty strings with positive integer frequencies.
+Both dictionary words and queries use the NFC--casefold--NFC key policy from Chapter~\ref{ch:strings-representation}.
+Distance counts insertion, deletion, and substitution of normalized Unicode code points, not bytes or grapheme clusters.
+Adjacent swaps cost two when they can be expressed by two ordinary edits.
+The search radius ranges from zero through three, and query and dictionary word lengths are checked against 128 code points before and after normalization.
+
+These choices make the algorithm reproducible but do not make it a complete natural-language spelling system.
+There is no context model, language identification, tokenization of documents, morphology generator, keyboard adjacency model, or locale-specific casing.
+The tiny checked-in dictionary is an original demonstration, not a benchmark corpus.
+The public result contains canonical word, minimum edit cost, and accumulated dictionary frequency.
+
+Table~\ref{tab:ch80-ranking} works query \code{ct} for four dictionary words.
+At radius one the complete candidates are cat, cot, and cut, ordered by decreasing frequency because their distances tie.
+Coat is excluded at radius one despite its frequency exceeding cot's.
+Edit distance is the primary key, frequency the secondary key, and canonical lexical spelling the final deterministic tie breaker.
+
+\begin{table}[htbp]
+\caption{Frequency ranks equal-distance candidates but cannot admit an out-of-radius word.}
+\label{tab:ch80-ranking}
+\centering
+\begin{tabular}{lrrl}
+\toprule
+Word & Distance from ct & Frequency & Radius-one outcome \\
+\midrule
+cat & 1 & 30 & first \\
+coat & 2 & 20 & excluded \\
+cot & 1 & 10 & second \\
+cut & 1 & 5 & third \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Compile the dictionary identity transducer}
+\label{sec:ch80-build}
+Each trie edge labeled by character $c$ is interpreted as the identity-transducer arc $c:c$.
+Final states record word frequency.
+Thus the implementation genuinely composes an edit relation with a finite-state dictionary relation; it does not generate a set of misspellings and repeatedly perform independent dictionary lookups.
+The composition is specialized and implicit rather than delegated to a general-purpose FST package.
+
+Algorithm~\ref{alg:ch80-build} first merges equal canonical keys, then inserts them into the trie.
+Frequency merging is addition: entries \code{Straße} with frequency three and \code{STRASSE} with frequency four create one final key \code{strasse} with frequency seven.
+Original display variants are not retained by this lab.
+A production UI could add a separate preferred-spelling field without changing distance computation.
+
+\begin{algorithm}[htbp]
+\caption{Compile bounded normalized dictionary entries into an identity transducer.}
+\label{alg:ch80-build}
+\begin{pseudocode}
+\Require finite word/frequency entries; positive frequencies; length policy
+\Ensure trie with one final entry per canonical spelling
+\ForAll{entries}
+\State validate type, frequency, and original extent; construct canonical key
+\State validate canonical extent; add frequency to that key's total
+\EndFor
+\State allocate root state
+\ForAll{canonical words in lexical order}
+\State follow or create one identity arc per symbol
+\State mark final state and store merged frequency
+\EndFor
+\end{pseudocode}
+\end{algorithm}
+
+Ignoring normalization and sorting, transition insertion costs expected $O(L)$ for $L$ total canonical symbols with hash-map children.
+Sorting $W$ keys costs comparisons whose cost includes their common prefixes.
+The implementation also stores each state's full prefix string for simple output reconstruction.
+That extra storage can be $O(LM)$ with maximum word length $M$, rather than the $O(L)$ edge storage of a parent-pointer trie.
+Here $M\le128$ is a fixed contract bound; a general dictionary library should use parent links or compressed output storage instead of hiding that factor.
+
+Figure~\ref{fig:ch80-components} separates dictionary construction from query-time composition.
+No transducer metadata is inferred from a spelling query.
+The same immutable trie serves multiple searches, each with its own queue and distances.
+The example does not mutate the dictionary concurrently with a search.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=12mm]
+\node[basic block] (data) {UTF-8 TSV dictionary};
+\node[basic block,below=of data] (trie) {normalize, merge, build trie FST};
+\node[basic block,below=of trie] (search) {query-specific implicit edit composition};
+\node[basic block,below=of search] (rank) {minimum costs, then frequency ranking};
+\draw[cfg edge] (data)--(trie);\draw[cfg edge] (trie)--(search);\draw[cfg edge] (search)--(rank);
+\end{tikzpicture}
+\caption{A persistent dictionary transducer is combined with fresh per-query search state.}
+\label{fig:ch80-components}
+\end{figure}
+
+\section{Keep best states without losing output words}
+\label{sec:ch80-best}
+The priority queue stores triples consisting of cost, input position, and trie state ID.
+A best-distance map rejects a new path unless it improves the cost at that exact product state.
+When a stale queue entry is popped, it is ignored.
+Because each trie state has one root path, all paths to $(i,q)$ have emitted the same candidate prefix.
+Their remaining legal continuations are identical, so a more expensive path cannot produce a better final candidate.
+
+Insertion advances trie depth, deletion advances input position, and copy/substitution advances both.
+Consequently the specialized product has no cycle even though the abstract edit transducer can loop.
+Nonnegative weights also justify Dijkstra's settlement order.
+At a final state with all input consumed, the popped cost is the minimum distance for that dictionary word.
+The independent dynamic-programming oracle checks precisely this semantic result.
+
+It is tempting to stop after the first $K$ final states have been popped.
+That is unsafe for the chosen ranking: a later state can have the same distance but a higher frequency.
+The implementation explores the complete within-radius reachable product, sorts accepted words by the full ranking key, and then truncates to the requested result count.
+An optimized early-stop variant would need a lower bound on the full remaining ranking order, not merely edit distance.
+
+\section{Make resource exhaustion observable}
+\label{sec:ch80-budget}
+Each nonstale product-state expansion charges the configured budget.
+If the next expansion would exceed it, search raises \code{BudgetExceeded} rather than returning a partial list labeled as complete.
+The CLI writes no success JSON in that case and exits with status two.
+Algorithm~\ref{alg:ch80-query} describes this publication boundary.
+
+\begin{algorithm}[htbp]
+\caption{Publish spellchecking results only after complete bounded search.}
+\label{alg:ch80-query}
+\begin{pseudocode}
+\Require dictionary FST, query, radius, positive result limit and expansion budget
+\Ensure ranked complete top results, or explicit failure without success output
+\State validate and canonicalize query
+\State run implicit product search, retaining all within-radius accepted words
+\If{state expansion budget is exhausted}
+\State report incomplete search; do not publish candidate JSON
+\EndIf
+\State sort by cost, negative frequency, and canonical spelling
+\State publish the requested prefix of the sorted candidate list
+\end{pseudocode}
+\end{algorithm}
+
+The expansion budget is not a wall-clock or total-allocation bound.
+A state with many outgoing dictionary edges can generate many transitions, and dictionary construction itself has separate cost.
+The word-length bound controls path depth but not vocabulary size.
+An exposed network service would additionally need dictionary-size limits, request-size limits before decoding, time accounting, and cancellation that does not corrupt shared dictionary state.
+
+Table~\ref{tab:ch80-failures} distinguishes valid empty results from failures.
+A query containing no nearby word returns an empty JSON array after complete search.
+An invalid radius, malformed UTF-8 dictionary, or invalid frequency is a rejected request or dictionary, not evidence that no correction exists.
+
+\begin{table}[htbp]
+\caption{Absence of a candidate and absence of a complete search are different outcomes.}
+\label{tab:ch80-failures}
+\centering
+\begin{tabular}{ll}
+\toprule
+Condition & Public outcome \\
+\midrule
+complete search; no word in radius & empty successful result \\
+complete search; several edit paths & one minimum-cost result per word \\
+expansion budget exceeded & explicit incomplete-search error \\
+invalid radius or frequency & validation error \\
+normalized key collision & merged frequency, one canonical entry \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Verify against an independent formulation}
+\label{sec:ch80-tests}
+The lab builds every nonempty binary word of length at most four as a dictionary: 30 words.
+It queries every ternary word of length at most four, including empty: 121 queries.
+For radii zero through three, it compares the entire ranked result against row-based Levenshtein distance computed independently for each dictionary word.
+There are 484 complete candidate-set comparisons and 14,520 query/radius/dictionary-word obligations.
+This tests the epsilon insertion and deletion directions, duplicate-path merging, radius pruning, and final acceptance condition together.
+
+Additional tests cover canonical equivalence, case-fold expansion, frequency merging, the worked ranking, invalid bounds, and CLI success/failure statuses.
+The exact matcher is checked separately against direct search rather than reused as its own oracle.
+Figure~\ref{fig:ch80-oracle} shows the independent paths.
+Neither finite testing nor agreement with row DP establishes linguistic usefulness; that would require a separately curated evaluation set and an explicitly chosen quality metric.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=13mm and 12mm]
+\node[basic block] (input) {query and finite dictionary};
+\node[basic block,below left=of input] (fst) {FST product search};
+\node[basic block,below right=of input] (dp) {per-word row DP};
+\node[basic block,below=of input,yshift=-18mm] (cmp) {compare complete ranked sets};
+\draw[cfg edge] (input)--(fst);\draw[cfg edge] (input)--(dp);
+\draw[cfg edge] (fst)--(cmp);\draw[cfg edge] (dp)--(cmp);
+\end{tikzpicture}
+\caption{The oracle computes distances without using the product-state search implementation.}
+\label{fig:ch80-oracle}
+\end{figure}
+
+\section{Exercises}
+\label{sec:ch80-exercises}
+\begin{enumerate}
+\item\label{ex:ch80-ranking} Rank the four words in Table~\ref{tab:ch80-ranking} at radius two and limit three.
+\item\label{ex:ch80-collision} Merge dictionary entries \code{Straße}:3 and \code{STRASSE}:4; give the radius-zero result for query \code{strasse}.
+\item\label{ex:ch80-stop} Give a reason that stopping at the first final state can violate frequency tie-breaking even though the state's distance is minimal.
+\item\label{ex:ch80-incomplete} Explain why returning an empty list after exhausting a budget of one expansion would violate the documented contract for query \code{cat} in a dictionary containing cat.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch80-reading}
+Mohri's weighted-automata treatment supplies the general framework behind the specialized composition~\cite{mohri-2009-weighted}.
+The lab README records executable commands, limits, and the independent tests; its solutions file answers the exercises from all four string chapters.

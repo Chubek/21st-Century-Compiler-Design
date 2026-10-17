@@ -1,0 +1,224 @@
+\chapter{Continuous and Runtime-Managed Compilation}
+\label{ch:continuous-compilation}
+
+A runtime can finish compiling a function just after the source or an assumed class layout changes.
+Publishing that finished artifact because the worker succeeded would install stale code.
+Rejecting the stale artifact solves only half the problem: an older version may still be executing and cannot yet be reclaimed.
+Continuous compilation therefore needs a lifecycle for artifacts, not just a queue of optimization jobs.
+
+We use \term{continuous compilation} for an architecture in which compilation, execution, observation, invalidation, and replacement overlap throughout a process lifetime.
+This is a design description rather than an attribution to an unidentified framework.
+Established components include incremental queries, tiered execution, lazy materialization, deoptimization, and versioned publication.
+The chapter combines them into a small explicit ownership model.
+
+\section{Model several representations without inventing a lattice}
+\label{sec:ch67-representations}
+
+A function can have source syntax, a typed graph, bytecode, baseline code, specialized code, and target-specific variants.
+These representations do not automatically form a mathematical lattice.
+To call them a lattice requires a partial order and a least upper bound and greatest lower bound for every pair.
+Optimization level alone provides none of these guarantees: one version may use less memory while another runs faster on a different device.
+
+An \term{artifact graph} is the more direct model.
+Nodes carry representation kind, source revision, target, assumptions, entry contract, and ownership information.
+Edges describe derivation, dependencies, dispatch, or valid state transfers, with edge kinds kept distinct.
+A derivation edge does not imply that a running frame can jump between the two nodes.
+Figure~\ref{fig:ch67-artifacts} shows a branching representation graph.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=16mm and 18mm]
+\node[basic block] (ir) {semantic IR, revision r};
+\node[basic block,below left=of ir] (byte) {portable bytecode};
+\node[basic block,below right=of ir] (native) {CPU specialization};
+\node[basic block,below=of byte] (interp) {interpreter entry};
+\node[basic block,below=of native] (gpu) {device variant};
+\draw[cfg edge] (ir)--(byte); \draw[cfg edge] (ir)--(native);
+\draw[cfg edge] (byte)--(interp);
+\draw[cfg edge] (ir.east) -| ([xshift=12mm]native.east) |- (gpu.east);
+\end{tikzpicture}
+\caption{Representation choices branch by target and contract; they need not have a single monotone optimization order.}
+\label{fig:ch67-artifacts}
+\end{figure}
+
+An execution graph can overlay observations such as invocation counts, transitions, and version use.
+Those observations guide policy but do not replace semantic dependencies.
+A hot edge is evidence about frequency; a call edge or invalidation dependency is a correctness-relevant relation.
+Conflating them would make an unobserved path disappear from the compiler's meaning of the program.
+
+\section{Publish only against a matching epoch}
+\label{sec:ch67-publication}
+
+The companion runtime has one serialized owner and an integer epoch.
+A worker conceptually receives an immutable request labeled with the current epoch.
+An edit advances the epoch and installs a generic version for new entries.
+When a worker returns, publication compares its request epoch with the owner's current epoch.
+Algorithm~\ref{alg:ch67-publish} rejects a mismatch.
+
+\begin{algorithm}[htbp]
+\caption{Publish a completed version through one serialized owner.}
+\label{alg:ch67-publish}
+\begin{pseudocode}
+\Require validated artifact $A$ with request epoch $e$, current epoch $r$
+\Ensure stale results never replace the current entry
+\State enter the owner operation
+\If{$e\ne r$}
+  \State discard the unpublished artifact; \Return stale
+\EndIf
+\State fully initialize entry metadata and recovery dependencies for $A$
+\State mark the previous entry retired
+\State install $A$ as the current entry
+\State \Return published
+\end{pseudocode}
+\end{algorithm}
+
+Epoch comparison is constant-time in the model.
+Artifact validation and initialization have their own costs and happen before publication becomes visible.
+A production request key may include separate source, target, layout, and configuration versions rather than one global epoch.
+The global epoch is simple but invalidates more work than necessary.
+
+Table~\ref{tab:ch67-epoch} works a stale completion.
+An old active invocation continues under its old-version contract in this model; new entries select the new generic version.
+This is a defined edit policy, not a claim that arbitrary language-level assumptions remain valid for active optimized frames.
+If an assumption affects an existing frame's safety, the runtime must arrange a safepoint, patch, guard failure, or other supported deoptimization protocol before the assumption becomes false.
+
+\begin{table}[htbp]
+\caption{A worker's successful computation can still be stale at publication time.}
+\label{tab:ch67-epoch}
+\centering
+\begin{tabular}{lll}
+\toprule
+Event & Owner epoch & Publication consequence \\
+\midrule
+worker starts & $0$ & request carries $0$ \\
+input edit & $1$ & generic version becomes current \\
+old worker returns & $1$ & reject request epoch $0$ \\
+new worker returns & $1$ & epoch $1$ may publish \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Separate retirement from reclamation}
+\label{sec:ch67-reclamation}
+
+\term{Retirement} prevents new entries from selecting an artifact.
+\term{Artifact reclamation} releases its code and metadata once no permitted use remains.
+An active frame, a return address, an inline cache, a pending compilation, or another version's recovery map may keep an artifact reachable.
+Freeing code because it is no longer the preferred entry is therefore incorrect.
+
+The teaching runtime grants a lease when an invocation acquires the current version.
+Acquisition and retirement run through the same serialized owner, eliminating the race between reading an entry and incrementing its use count.
+A retired version is collected only after all leases have been released.
+Algorithm~\ref{alg:ch67-collect} states the modeled rule.
+
+\begin{algorithm}[htbp]
+\caption{Reclaim retired artifacts in a lease-complete serialized model.}
+\label{alg:ch67-collect}
+\begin{pseudocode}
+\Require every possible use owns a lease, version list, serialized owner
+\Ensure no artifact with a possible outstanding use is reclaimed
+\ForAll{versions $v$}
+  \If{$v$ is retired and its lease count is zero}
+    \State remove $v$ from the owned version list
+    \State release its code and metadata resources
+  \EndIf
+\EndFor
+\end{pseudocode}
+\end{algorithm}
+
+Collection scans $V$ versions in $O(V)$ time, excluding resource destruction.
+The Python implementation models active invocation leases only; it contains symbolic code bodies rather than executable allocations.
+The stronger pseudocode precondition identifies what must be added when code pointers can escape.
+Reference cycles among artifacts also require a cycle-aware ownership strategy or tracing; active-frame counters alone do not discover them.
+
+Figure~\ref{fig:ch67-lifetime} distinguishes the lifetime states.
+An epoch-based reclamation scheme, hazard pointers, or stop-the-world scanning can implement a different mechanism, but each must close the same acquisition/reclamation race.
+Calling a memory-management technique by name does not prove that all code references are covered.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=14mm]
+\node[basic block] (new) {validated, unpublished};
+\node[basic block,below=of new] (current) {current entry};
+\node[basic block,below=of current] (retired) {retired, possibly leased};
+\node[basic block,below=of retired] (free) {reclaimed};
+\draw[cfg edge] (new)--(current); \draw[cfg edge] (current)--(retired);
+\draw[cfg edge] (retired)--node[right,font=\small] {no remaining use}(free);
+\end{tikzpicture}
+\caption{Replacing an entry retires its old artifact before reclamation becomes possible.}
+\label{fig:ch67-lifetime}
+\end{figure}
+
+\section{Migrate data behind a stable handle}
+\label{sec:ch67-migration}
+
+Representation evolution also applies to data.
+A mostly zero array might move from dense storage to a sparse map while preserving its logical length and element values.
+If clients hold a stable handle and access through it, the runtime can build a replacement privately and switch the handle after completion.
+The companion retains array identity while alternating between a list and a map that omits zero entries.
+
+For logical values $[0,4,0,1,0]$, the sparse payload is $\{1\mapsto4,3\mapsto1\}$ and the length remains five.
+An alias of the handle still reads four at index one and zero at index four.
+Index five must still fail; absence from the sparse map does not mean every integer is a valid array index.
+Table~\ref{tab:ch67-layout} records the distinction between identity and payload.
+
+\begin{table}[htbp]
+\caption{Migration changes physical storage while preserving the logical array contract.}
+\label{tab:ch67-layout}
+\centering
+\begin{tabular}{lll}
+\toprule
+Property & Dense form & Sparse form \\
+\midrule
+Logical length & $5$ & $5$ \\
+Stored payload values & $0,4,0,1,0$ & indices $1,3$ hold $4,1$ \\
+Read at index $4$ & $0$ & $0$ \\
+Read at index $5$ & error & error \\
+Handle identity & preserved & preserved \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The model is sequential and the switch consists of ordinary host assignments.
+A concurrent implementation needs atomic publication of a coherent descriptor, exclusion or reconciliation of concurrent writes, and a lifetime rule for readers of the old payload.
+Native code that bypasses the handle also needs a layout guard or invalidation dependency.
+Thus data migration and code invalidation are coupled even when the logical value is unchanged.
+
+\section{Coordinate actors and compilation services}
+\label{sec:ch67-actors}
+
+An actor-style architecture can give one owner responsibility for each mutable compilation unit.
+Workers receive immutable snapshots and return proposals; the owner validates and publishes them.
+This avoids shared mutable IR inside workers, but messages can arrive out of order and duplicate work can finish twice.
+Request IDs, epochs, idempotent completion handling, and cancellation semantics remain necessary.
+
+A persistent compilation service may reuse parsed modules, summaries, profiles, and generated artifacts across requests.
+Its cache key must describe the semantic and target configuration completely.
+Resource budgets need to cover retained IR, code versions, pending jobs, and metadata, not just emitted machine-code bytes.
+Backpressure can delay low-value jobs; cancellation should discard unpublished work without abandoning resources already reachable by execution.
+
+The runtime owns optimization policy when it chooses what to compile, where to execute it, and when to retire it using live observations.
+The compiler still owns legality checks, and the publication owner still owns consistency.
+A profitability estimate can decide to keep generic code indefinitely.
+It cannot justify installing an artifact with an invalid assumption or reclaiming an active frame's continuation.
+
+\section{Exercises}
+\label{sec:ch67-exercises}
+
+\begin{enumerate}
+\item\label{ex:ch67-stale} Acquire epoch-zero code, start a compilation, edit to epoch one, and complete the old request.
+State the publication result and when the acquired version can be reclaimed.
+\item\label{ex:ch67-race} Show the race if a thread reads a code pointer before incrementing its lease while another thread retires and collects it.
+Explain how serialized acquisition closes the race.
+\item\label{ex:ch67-sparse} Migrate $[0,4,0,1,0]$ to sparse storage and back.
+Give the payload, valid index range, and two alias observations that must remain unchanged.
+\item\label{ex:ch67-lattice} Two versions trade runtime speed against code size.
+Explain why this does not define a representation lattice and name a relation the artifact graph can record without that assumption.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch67-reading}
+
+ORC documents modular JIT materialization and resource-management interfaces~\cite{llvm-2026-orc}.
+The incremental-query and deoptimization references supply the dependency and state-transfer components of this architecture~\cite{rust-2026-incremental,fluckiger-2018-deoptimization}.
+The companion's lease and migration models test these small contracts without claiming to implement a concurrent native JIT service.

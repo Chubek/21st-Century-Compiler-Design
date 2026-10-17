@@ -1,0 +1,442 @@
+\chapter{Automated Reasoning and Its Limits}
+\label{ch:automated-reasoning-limits}
+
+An optimizer proposes replacing an expression by a cheaper one.
+Testing can find an input on which the proposal fails, but passing a thousand tests does not establish a claim about every input.
+A solver can instead search the space described by a logical formula.
+For a local rewrite, the useful query usually asks whether there exists an input satisfying the rewrite's premises on which the two expressions differ.
+An unsatisfiable answer rules out such an input, provided the formula faithfully represents the intended semantics.
+
+The engineering work lies on both sides of that answer.
+Before the query, choose the domain, encode the instructions, and state the assumptions.
+After the query, interpret the result, reconstruct a counterexample when one exists, and preserve a conservative fallback when the solver cannot decide within its limits.
+Automated reasoning is most useful when these steps form an explicit contract.
+
+\section{From a theorem to a counterexample query}
+\label{sec:ch41-query}
+
+Let $P(x)$ be the precondition of a pure, total rewrite from $s(x)$ to $t(x)$.
+The desired theorem is
+\[
+  \forall x.\ P(x)\rightarrow s(x)=t(x).
+\]
+Its negation is an existential counterexample claim:
+\[
+  \exists x.\ P(x)\land s(x)\neq t(x).
+\]
+A satisfiability solver conventionally searches for values of the free variables in the matrix $P(x)\land s(x)\neq t(x)$; it need not receive an explicit existential quantifier.
+The quantifier has not been forgotten: model search supplies its meaning.
+
+For a concrete example, use four-bit unsigned values, with addition reduced modulo $16$.
+Consider replacing
+\[
+ s(x)=\left\lfloor\frac{(x+x)\bmod16}{2}\right\rfloor
+ \quad\text{by}\quad t(x)=x.
+\]
+Without a precondition, $x=8$ refutes the rewrite: the addition wraps to $0$, so $s(8)=0$ while $t(8)=8$.
+With $0\leq x<8$, the sum does not wrap, and dividing $2x$ by $2$ gives $x$.
+The guarded counterexample query is unsatisfiable.
+This is a finite theorem about a particular width, not automatically a theorem about every machine width or source-language integer type.
+
+\term{Boolean satisfiability}, usually abbreviated SAT, asks whether a propositional formula has a satisfying valuation.
+\term{Satisfiability modulo theories}, abbreviated SMT, adds interpreted domains and operations such as integer arithmetic, fixed-width bit-vector arithmetic, and array reads and writes.
+The distinction matters even for a tiny query.
+Treating $x<4$ and $x>9$ as unrelated Boolean atoms permits both to be true; integer arithmetic does not.
+
+An SMT formula also has a \term{sort} for each term, such as Boolean, integer, or a bit vector of a particular width.
+Sort checking catches malformed combinations, but it cannot detect that the encoder chose integers when the instruction actually wraps.
+A well-sorted formula can still prove the wrong proposition.
+
+\section{Boolean search and its representation}
+\label{sec:ch41-sat}
+
+A \term{literal} is an atom or its negation.
+A \term{clause} is a disjunction of literals, and \term{conjunctive normal form}, or CNF, is a conjunction of clauses.
+The empty clause is false; an empty collection of clauses is true.
+The formula
+\[
+ (a\lor b)\land(\neg a\lor b)\land(\neg b\lor c)\land\neg c
+\]
+is unsatisfiable.
+The unit clause $\neg c$ forces $c$ false.
+Then $\neg b\lor c$ forces $b$ false, after which the first two clauses demand both $a$ and $\neg a$.
+This sequence illustrates \term{unit propagation}: if every literal but one in a clause is false, the remaining literal must be true.
+An empty residual clause exposes a conflict.
+
+When propagation does not settle the formula, a complete search can choose an unassigned atom, try one truth value, and backtrack to the other when necessary.
+For $k$ atoms there are $2^k$ complete valuations.
+Evaluating a formula with $m$ literal occurrences under every valuation takes $O(2^k m)$ time with a straightforward representation.
+That bound describes a baseline procedure, not the behavior of a modern SAT solver on every input.
+Clause learning, better branching choices, and efficient propagation can avoid large parts of this search.
+They do not turn arbitrary SAT instances into a known polynomial-time decision problem; general SAT is NP-complete~\cite{huth-2004-logic}.
+
+The representation delivered to the solver affects both correctness and size.
+Converting formulas to CNF solely by distributing disjunction over conjunction can cause exponential expansion.
+For example, distributing a disjunction of $k$ separate two-literal conjunctions produces $2^k$ clauses in the direct expansion.
+A compiler expression already has a graph of intermediate operations.
+Naming those operations in the formula avoids repeatedly expanding their definitions.
+
+\subsection{Tseitin encoding preserves satisfiability}
+\label{sec:ch41-tseitin}
+
+A \term{Tseitin encoding} introduces an auxiliary Boolean variable for each internal formula node and constrains it to equal that node's operation.
+For a conjunction node $z\leftrightarrow(a\land b)$, use
+\[
+ (\neg z\lor a)\land(\neg z\lor b)\land
+ (z\lor\neg a\lor\neg b).
+\]
+The first two clauses say that a true $z$ requires both inputs true.
+The third says that two true inputs require $z$ true.
+Both directions are necessary for this full definitional encoding.
+Table~\ref{tab:ch41-gate-clauses} gives the corresponding fixed-size encodings for the operators used below.
+
+\begin{table}
+\caption{Each gate is constrained by clauses equivalent to its local definition.}
+\label{tab:ch41-gate-clauses}
+\centering
+\begin{tabular}{p{0.25\linewidth}p{0.64\linewidth}}
+\toprule
+Definition & Clauses, all conjoined \\
+\midrule
+$z\leftrightarrow\neg a$ & $(\neg z\lor\neg a)$; $(z\lor a)$ \\
+$z\leftrightarrow(a\land b)$ & $(\neg z\lor a)$; $(\neg z\lor b)$; $(z\lor\neg a\lor\neg b)$ \\
+$z\leftrightarrow(a\lor b)$ & $(z\lor\neg a)$; $(z\lor\neg b)$; $(\neg z\lor a\lor b)$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Finally, assert the root's variable with a unit clause.
+Without that assertion, the definitions merely describe evaluation: every assignment to the original atoms extends to a consistent assignment of gate values, whether the original formula is true or false.
+Algorithm~\ref{alg:ch41-encode} constructs the full encoding for a finite formula DAG.
+Inputs that are already literals need no auxiliary node, so the gate clauses may refer directly to a negated atom.
+
+\begin{algorithm}
+\caption{Encode a Boolean formula DAG as a satisfiability-equivalent CNF.}
+\label{alg:ch41-encode}
+\begin{pseudocode}
+\Require Root $r$ of an acyclic DAG with literal leaves and unary NOT or binary AND/OR nodes
+\Ensure Clauses satisfiable exactly when the formula rooted at $r$ is satisfiable
+\State $K\gets$ empty clause list
+\ForAll{nodes $v$ in a children-before-parent topological order}
+  \If{$v$ is a literal}
+    \State $L[v]\gets$ that literal
+  \Else
+    \State $z\gets$ a fresh atom; $L[v]\gets z$
+    \If{$v$ is NOT with child $a$}
+      \State Append $(\neg z\lor\neg L[a])$ and $(z\lor L[a])$ to $K$
+    \ElsIf{$v$ is AND with children $a,b$}
+      \State Append $(\neg z\lor L[a])$ and $(\neg z\lor L[b])$ to $K$
+      \State Append $(z\lor\neg L[a]\lor\neg L[b])$ to $K$
+    \Else \Comment{OR with children $a,b$}
+      \State Append $(z\lor\neg L[a])$ and $(z\lor\neg L[b])$ to $K$
+      \State Append $(\neg z\lor L[a]\lor L[b])$ to $K$
+    \EndIf
+  \EndIf
+\EndFor
+\State Append unit clause $(L[r])$ to $K$
+\State \Return $K$
+\end{pseudocode}
+\end{algorithm}
+
+Let $N$ be the number of distinct DAG nodes and $E$ its edge count.
+Topological traversal takes $O(N+E)$ time and space; bounded fan-in gives $E=O(N)$.
+Each internal node adds one atom and at most three clauses, each of length at most three.
+With constant-time allocation of identifiers and literals, encoding therefore takes $O(N)$ time and space.
+This bound concerns construction only, not solving.
+Shared nodes must be visited once; expanding the DAG into a tree first can destroy the bound relative to the original representation.
+
+To see the semantic guarantee, let $D(\mathbf p,\mathbf z)$ be all gate-definition clauses, $\mathbf p$ the original atoms, and $z_r$ the root atom.
+For every fixed valuation of $\mathbf p$, structural evaluation determines exactly one valuation of $\mathbf z$ satisfying $D$.
+In that extension, $z_r$ equals the original formula $F(\mathbf p)$.
+Consequently,
+\[
+ F(\mathbf p)\quad\Longleftrightarrow\quad
+ \exists\mathbf z.\,D(\mathbf p,\mathbf z)\land z_r.
+\]
+The formulas are \term{equisatisfiable}: either both have a model or neither does.
+They are not interchangeable as unquantified formulas over the enlarged vocabulary, because an arbitrary assignment to the auxiliary atoms need not satisfy the definitions.
+The stronger projection property displayed above is what lets the checker recover a counterexample in the original inputs.
+
+\subsection{A complete small encoding}
+\label{sec:ch41-encoding-example}
+
+Take $F=(p\land q)\lor(\neg p\land r)$.
+Introduce $a\leftrightarrow(p\land q)$, $b\leftrightarrow(\neg p\land r)$, and $c\leftrightarrow(a\lor b)$, as in Figure~\ref{fig:ch41-gates}.
+There are three gate definitions, nine definition clauses, and the unit clause $(c)$: ten clauses in total over six atoms.
+Negated $p$ is a literal, so it needs no separate NOT gate in this example.
+
+\begin{figure}
+\centering
+\input{figures/logic-tseitin-gates.tex}
+\caption{Auxiliary atoms name intermediate Boolean values, and the root is separately asserted.}
+\label{fig:ch41-gates}
+\end{figure}
+
+Table~\ref{tab:ch41-gate-values} evaluates every input valuation.
+Exactly four of the eight input rows satisfy $F$.
+Each of those rows has exactly one extension satisfying the full ten-clause encoding, so exactly four of the $64$ assignments to all six atoms satisfy it.
+For $p=0,q=1,r=1$, the extension is $a=0,b=1,c=1$.
+The satisfying model projected onto $p,q,r$ is the original witness.
+
+\begin{table}
+\caption{Evaluating every gate fixes a unique extension of each input valuation.}
+\label{tab:ch41-gate-values}
+\centering
+\begin{tabular}{cccccc}
+\toprule
+$p$ & $q$ & $r$ & $a=p\land q$ & $b=\neg p\land r$ & $c=a\lor b$ \\
+\midrule
+0 & 0 & 0 & 0 & 0 & 0 \\
+0 & 0 & 1 & 0 & 1 & 1 \\
+0 & 1 & 0 & 0 & 0 & 0 \\
+0 & 1 & 1 & 0 & 1 & 1 \\
+1 & 0 & 0 & 0 & 0 & 0 \\
+1 & 0 & 1 & 0 & 0 & 0 \\
+1 & 1 & 0 & 1 & 0 & 1 \\
+1 & 1 & 1 & 1 & 0 & 1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+If the root clause is omitted, all eight input valuations have a consistent extension, including those where $F$ is false.
+If only $z\rightarrow(a\land b)$ is encoded for a conjunction, false gate values can hide true operands.
+Such one-directional constraints can be appropriate in specialized polarity-aware encodings, but they need their own correctness argument.
+They are not a drop-in replacement for the full definitions in Algorithm~\ref{alg:ch41-encode}.
+
+\section{The theory is part of the specification}
+\label{sec:ch41-theories}
+
+Over mathematical integers, $x+3>x$ holds for every $x$.
+For four-bit unsigned values, the addition wraps, and the same-looking comparison fails near the upper bound.
+Table~\ref{tab:ch41-wrap} gives the boundary cases.
+The rewrite to true is valid under $x\leq12$ and invalid without that premise.
+
+\begin{table}
+\caption{Four-bit addition followed by unsigned comparison disagrees with integer arithmetic after wraparound.}
+\label{tab:ch41-wrap}
+\centering
+\begin{tabular}{rrc}
+\toprule
+$x$ & $(x+3)\bmod16$ & $((x+3)\bmod16)>x$ \\
+\midrule
+0 & 3 & true \\
+12 & 15 & true \\
+13 & 0 & false \\
+14 & 1 & false \\
+15 & 2 & false \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A width-$w$ \term{bit vector} has $2^w$ possible bit patterns.
+Modular addition is defined on those patterns, but the ordering operation must still be chosen.
+The pattern $1111$ represents $15$ under unsigned interpretation and $-1$ under four-bit two's-complement signed interpretation.
+Thus the comparison of that pattern with $0000$ depends on whether the comparison is unsigned or signed.
+The addition bits alone do not determine that choice.
+
+Signed source arithmetic may impose a different definedness rule from raw bit-vector addition.
+For example, a four-bit signed model with an overflow fault cannot execute $7+1$ normally, whereas modular bit-vector addition produces the pattern for $-8$.
+Encoding only the modular result would omit the fault condition.
+For C, unsigned arithmetic and signed overflow have different rules, and narrow integer operands can be promoted before arithmetic~\cite{wg14-2011-c11}.
+An eight-bit storage type therefore does not by itself imply an eight-bit addition in a source expression.
+The checker must encode the actual operation and conversions.
+
+Integer theories can be useful when analysis proves that a machine operation stays within range.
+One can then prove an integer identity together with obligations that every relevant intermediate result avoids overflow.
+Dropping the range obligations changes the theorem.
+The same care applies to division: mathematical integer division, truncation toward zero, and unsigned division must not be conflated for negative operands.
+Fixed-width division can also have exceptional source or IR cases even when the solver's corresponding operator is total.
+
+To express such cases, associate a definedness predicate $D_e(x)$ with an expression and a value expression $V_e(x)$ for its normal result.
+For a deterministic replacement that must preserve normal behavior whenever the source is defined, search for
+\[
+ P(x)\land D_s(x)\land
+ \bigl(\neg D_t(x)\lor V_s(x)\neq V_t(x)\bigr).
+\]
+This formula assumes that normal values are the only observations being compared and that the value encodings are defined as logical terms even outside their meaningful program domains.
+If traps are observable and must be preserved, compare the relevant outcomes explicitly instead; source trapping inputs cannot simply be excluded.
+Memory, nondeterminism, and concurrency need richer behavior relations than this scalar formula.
+
+SMT is a family of problems, not a promise that every combination of operations is easy or decidable.
+Quantifier-free fixed-width bit-vector formulas have finite domains and are decidable, often by translating operations into Boolean circuits and then SAT.
+Linear integer arithmetic also has decision procedures, despite its infinite domain.
+By contrast, unrestricted integer multiplication brings in much harder questions, and arbitrary quantifiers or theory combinations require their own analysis.
+Choosing a solver's logic mode should follow the actual encoded operations, not the broad label \enquote{arithmetic}.
+
+\section{Verification conditions connect execution to formulas}
+\label{sec:ch41-vcs}
+
+A \term{verification condition} is a logical obligation whose validity suffices for a stated program property.
+The weakest-precondition construction of Chapter~\ref{ch:logic-compiler-reasoning} produces one such obligation: $P\rightarrow\operatorname{wp}(C,Q)$.
+Checking its validity can be reduced to checking unsatisfiability of $P\land\neg\operatorname{wp}(C,Q)$.
+For larger expressions, forward symbolic execution with fresh logical names can avoid duplicating substituted terms.
+Each name denotes a particular value at a particular point, even when the source variable is assigned repeatedly.
+
+Revisit the integer conditional that negates negative $x$, adds $2$ otherwise, and finally sets $y$ to three times the resulting $x$.
+Use $x_0$ for the initial value and $x_1,y_1$ for the resulting values.
+The transition relation is
+\[
+\begin{split}
+ T(x_0,x_1,y_1)={}&
+ \bigl((x_0<0\land x_1=-x_0)\lor
+       (x_0\geq0\land x_1=x_0+2)\bigr)\\
+ &{}\land y_1=3x_1.
+\end{split}
+\]
+The names are logical bookkeeping; no assignment can retroactively change $x_0$.
+For precondition $x_0\neq-1$ and goal $y_1\geq6$, the counterexample query is
+\[
+  x_0\neq-1\land T(x_0,x_1,y_1)\land y_1<6.
+\]
+It is unsatisfiable over integers.
+On the negative arm, $x_0\neq-1$ forces $x_0\leq-2$, so $x_1\geq2$.
+On the other arm, $x_0\geq0$ also gives $x_1\geq2$.
+Removing the precondition yields the model $x_0=-1,x_1=1,y_1=3$.
+Thus both the backward and forward encodings expose the same missing premise.
+
+An encoder must represent every behavior relevant to the claim.
+An underapproximation that leaves out the negative branch can make this incorrect unconditional claim appear proved.
+An overapproximation that includes extra behaviors is safer for proving absence of counterexamples, but it can produce spurious models that do not correspond to executions.
+Replaying a model distinguishes a real transformation bug from an abstraction artifact or an encoding error.
+
+For a loop invariant $I$, generate separate obligations for initialization, preservation, and exit.
+Using a transition relation $T_C(\rho,\rho')$ for one body execution, the preservation counterexample query has the form
+\[
+  I(\rho)\land b(\rho)\land T_C(\rho,\rho')\land\neg I(\rho').
+\]
+An unsatisfiable result proves closure of the proposed invariant under the body; it does not invent an invariant that proves the desired exit property.
+Nor does it prove termination.
+A termination proof adds a well-founded variant and obligations that each taken iteration decreases it and that the body terminates.
+
+\term{Bounded model checking} instead unrolls a transition relation a finite number of times.
+With bound $k$, an unsatisfiable query can rule out the encoded bad executions within that bound.
+It does not rule out a failure at iteration $k+1$ unless a completeness bound or an inductive argument closes the gap.
+For example, a counter initialized to zero that increments until $10$ and then violates an assertion has no failure within its first nine increments.
+The bound is part of the theorem and belongs in the report.
+
+\section{Solver results and the trusted boundary}
+\label{sec:ch41-results}
+
+Figure~\ref{fig:ch41-checker-pipeline} shows a practical local-checking path.
+The semantic description and precondition feed the encoder; the solver receives only the resulting formula.
+Table~\ref{tab:ch41-outcomes} states what each solver outcome supports.
+
+\begin{figure}
+\centering
+\input{figures/logic-checker-pipeline.tex}
+\caption{A solver result becomes evidence about a rewrite only through a faithful encoding and result interpretation.}
+\label{fig:ch41-checker-pipeline}
+\end{figure}
+
+\begin{table}
+\caption{Counterexample-query outcomes have different consequences for an optimization.}
+\label{tab:ch41-outcomes}
+\centering
+\begin{tabular}{p{0.15\linewidth}p{0.36\linewidth}p{0.36\linewidth}}
+\toprule
+Result & Meaning for the formula & Action for the proposed rewrite \\
+\midrule
+SAT & At least one satisfying assignment exists. & Project the model onto inputs and replay the proposed counterexample. \\
+UNSAT & No assignment satisfies the query in the selected theory. & Accept the conditional theorem if encoding and premises are justified. \\
+UNKNOWN & The solver has established neither satisfiability nor unsatisfiability. & Retain the original program or use an independently justified rule. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+An interface may report resource exhaustion or cancellation separately from UNKNOWN.
+For optimization decisions, neither supports acceptance of an otherwise unproved rewrite.
+UNKNOWN is not a third semantic truth value of the formula.
+A satisfiable formula remains satisfiable even if a particular run cannot find its model.
+A model supplied after an inconclusive result should not be treated as a counterexample until independently checked against the query.
+
+A SAT result is especially useful during rule development.
+Decode widths and signedness, evaluate the original and replacement IR on the input, and display the first differing observation.
+For the four-bit doubling example, report $x=8$, wrapped sum $0$, source result $0$, and replacement result $8$.
+Reporting only six auxiliary Boolean values from a circuit encoding would obscure the bug.
+Retain the model together with the exact precondition and type parameters as a regression case.
+
+An UNSAT result can be accompanied by a proof certificate when the solver and chosen mode support one.
+A separate checker can validate that certificate and reduce reliance on a large search implementation.
+It still checks a theorem about the encoded formula.
+The instruction semantics, query construction, certificate checker, and application of the resulting rewrite remain part of the trusted path.
+Certificate checking is therefore valuable without being a substitute for a semantic specification.
+
+For repeated queries, shared expression nodes and an incremental solver context can reuse common premises.
+Scope each query's extra assumptions carefully: an assumption leaked from a previous rewrite can make a later query vacuously unsatisfiable.
+Cache keys must include operator semantics, widths, signedness, overflow conditions, and the premises under which the result was established.
+A theorem under $x<8$ is not an unconditional theorem merely because the expression graph matches a previous query.
+
+\section{What undecidability rules out}
+\label{sec:ch41-limits}
+
+There are two distinct reasons a checker may fail to answer promptly.
+A decidable problem can require too much time or memory on a particular input.
+An undecidable problem admits no algorithm that terminates with a correct yes-or-no answer on every input in its specified class.
+The second is a limit on every possible algorithm, not a complaint about the performance of the current implementation~\cite{boolos-2007-computability}.
+
+Arbitrary first-order validity is undecidable, although standard first-order calculi are sound and complete.
+There is no contradiction.
+An effective enumeration of finite proofs eventually finds a proof of each valid sentence, but need not terminate on an invalid sentence.
+Completeness guarantees existence of a finite proof when validity holds; it does not give a terminating unsuccessful-search test.
+The result concerns validity across first-order structures and must not be confused with deciding a particular restricted theory or evaluating a formula in one finite structure.
+
+A similar boundary appears for whole-program equivalence in a language capable of unbounded computation.
+Given a machine $M$ and an input $u$, construct a program $A$ that simulates $M(u)$ and returns $0$ if the simulation halts.
+Construct $B$ that loops forever.
+Assume the simulation has no externally visible effects and that termination is observable.
+Then $A$ and $B$ have the same behavior exactly when $M(u)$ does not halt.
+A total equivalence decider for all such programs would therefore decide the halting problem by complementing its answer.
+No such decider exists~\cite{boolos-2007-computability}.
+The reduction states its computational and observational assumptions; it is not a claim that every local optimization problem is undecidable.
+
+Fixed-width straight-line arithmetic with finitely many inputs has a finite input space.
+Exhaustive enumeration is a decision procedure, even if the number of assignments is prohibitive.
+A fixed finite-state machine also has decidable reachability: explore reachable states until every successor has been visited or a bad state is found.
+For a deterministic machine with at most $2^m$ complete states, revisiting a state repeats its future behavior, so an unbounded run can be detected after a finite exploration.
+The state must include everything that determines the next step, including control location and any modeled environment state.
+Unbounded memory, unbounded integers, or an unmodeled external environment invalidate that finite-state argument.
+
+These distinctions suggest a workable compiler design.
+Use sound analysis to obtain premises; restrict local queries to theories suited to the operations; use invariants or summaries at loops and calls; and apply time limits with conservative fallbacks.
+Check a single candidate transformation rather than claiming to decide equivalence for every possible program.
+That restricted task can have a complete finite decision procedure even though unrestricted program equivalence cannot.
+The limit tells us how to state the service contract, not that automation is futile.
+
+\section{Exercises}
+\label{sec:ch41-exercises}
+
+Solutions and C11 checks are in \path{example-code/logic-checks/}.
+
+\begin{enumerate}
+\item\label{ex:ch41-root}
+Encode $p\land\neg p$ using a fresh conjunction variable $z$ and the clauses of Table~\ref{tab:ch41-gate-clauses}.
+Show that the encoding with unit clause $(z)$ is unsatisfiable.
+Give a model after removing that unit clause.
+
+\item\label{ex:ch41-projection}
+For the six-atom encoding in Section~\ref{sec:ch41-encoding-example}, count the satisfying assignments with and without the root clause.
+Explain why the count does not multiply by $2^3$ when auxiliary atoms are introduced.
+
+\item\label{ex:ch41-overflow}
+For four-bit unsigned addition, give the weakest condition on $x$ under which $((x+3)\bmod16)>x$ is true.
+List all counterexamples when the condition is absent.
+
+\item\label{ex:ch41-width}
+Generalize the doubling-and-halving rewrite of Section~\ref{sec:ch41-query} to width $w\geq1$.
+Derive the exact subset of inputs on which it equals $x$, and a formula for the erroneous result on all remaining inputs.
+
+\item\label{ex:ch41-vc}
+For the transition relation in Section~\ref{sec:ch41-vcs}, change the postcondition to $y_1\geq9$.
+Find the weakest condition on integer $x_0$ that makes the counterexample query unsatisfiable, and give every excluded integer input.
+
+\item\label{ex:ch41-unknown}
+A rewrite checker accepts a rule whenever the solver does not return SAT.
+Explain the error, repair the acceptance condition, and state what an UNSAT answer at an unrolling bound of $20$ proves when no completeness argument is available.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch41-reading}
+
+Huth and Ryan~\cite{huth-2004-logic} provide foundations for satisfiability, proof systems, and verification conditions, including the distinction between semantic claims and procedures that search for evidence.
+Boolos, Burgess, and Jeffrey~\cite{boolos-2007-computability} develop reductions, first-order undecidability, and the relation between completeness and effective proof search; these results explain exactly which universal checker specifications are impossible.
+The C11 committee draft~\cite{wg14-2011-c11}, particularly its integer promotions and expression rules, is a useful exercise in translating a language specification into explicit arithmetic and definedness premises.

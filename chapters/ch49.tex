@@ -1,0 +1,320 @@
+\chapter{Regular Languages and Lexer Construction}
+\label{ch:lexer-construction}
+
+The rule for an identifier is small; a scanner containing hundreds of overlapping rules is not.
+A generator must preserve the meaning of every rule while also deciding which rule wins, where its lexeme ends, and what happens when the next byte belongs to no token.
+Chapter~\ref{ch:lexical-analysis} built these decisions directly into control flow.
+Here we derive a reusable recognizer from regular expressions, then add the output and rollback policies that turn recognition into lexing.
+The construction also supplies the terminal matcher used by the Aurocks generator in Chapter~\ref{ch:aurocks-case-study}.
+
+\section{Separate a language from a token policy}
+\label{sec:ch49-language-policy}
+
+Let $\Sigma$ be a finite alphabet and $\Sigma^*$ the finite strings over it.
+The empty string is $\epsilon$; it is not the empty language $\emptyset$.
+A regular expression denotes a language: union selects either language, concatenation joins one word from each, and star permits zero or more concatenated words.
+Character classes are abbreviations for unions of alphabet symbols.
+For a byte-oriented scanner, $\Sigma$ can be the $256$ byte values; Unicode scalar values require decoding and a different alphabet interface.
+The automata constructions do not decide that interface for us~\cite{hopcroft-2007-automata}.
+
+Consider the expression $a(b\mid c)^*d$.
+It accepts \code{ad}, \code{abd}, and \code{abccd}, but not \code{a}, \code{abcdc}, or the empty string.
+Acceptance answers a whole-string question.
+A scanner instead asks for an accepted prefix at its current position and must distinguish the accepted prefix from the bytes inspected while looking for a longer one.
+These are different contracts even when they use the same automaton.
+
+Now combine rules for the keyword \code{if}, identifiers, \code{=}, \code{==}, and decimal integers.
+On \code{if2==7}, the identifier wins over the keyword because it consumes more characters.
+On \code{if}, both keyword and identifier consume two; a declared rule priority breaks that tie.
+Table~\ref{tab:ch49-token-spans} computes the resulting spans.
+Priority is consulted only after length, not before it.
+
+\begin{table}[htbp]
+\caption{Longest match and then rule priority tokenize six bytes without splitting the identifier.}
+\label{tab:ch49-token-spans}
+\centering
+\begin{tabular}{llll}
+\toprule
+Input slice & Span & Competing shorter prefix & Chosen kind \\
+\midrule
+\code{if2} & $[0,3)$ & \code{if} & identifier \\
+\code{==} & $[3,5)$ & \code{=} & equality \\
+\code{7} & $[5,6)$ & none & integer \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The output of an accepting state must therefore include a token kind and priority.
+Minimizing the combined machine merely as an accept/reject recognizer can merge states that recognize different tokens.
+The recognized union language would survive while the compiler's token stream changed.
+
+\section{Build a nondeterministic machine from fragments}
+\label{sec:ch49-fragments}
+
+A \term{nondeterministic finite automaton} (NFA) can have several successors for one input symbol and transitions consuming no symbol.
+We call the latter epsilon edges.
+A convenient compiler represents a fragment by one entry state and a list of still-unconnected outgoing slots.
+Patching a slot changes an edge target; it does not duplicate the destination fragment.
+Algorithm~\ref{alg:ch49-fragments} describes the recursive construction.
+Each recursive call returns fresh states, even when two expression nodes have the same spelling.
+
+\begin{algorithm}[htbp]
+\caption{Compile a regular expression into a fragment with patchable exits.}
+\label{alg:ch49-fragments}
+\begin{pseudocode}
+\Require expression tree $r$ over symbols, epsilon, union, concatenation, and star
+\Ensure fragment with entry and exit slots, preserving the expression language
+\Function{Compile}{$r$}
+\If{$r$ is symbol $a$ or epsilon}
+  \State create one consuming or epsilon state with an unpatched exit
+  \State \Return its entry and its one exit slot
+\ElsIf{$r=u\cdot v$}
+  \State $U\gets\Call{Compile}{u}$; $V\gets\Call{Compile}{v}$
+  \State patch every exit of $U$ to the entry of $V$
+  \State \Return entry of $U$, exits of $V$
+\ElsIf{$r=u\mid v$}
+  \State compile $U,V$; create a split with epsilon edges to both entries
+  \State \Return split entry, concatenation of the two exit lists
+\Else
+  \State $U\gets\Call{Compile}{u}$ where $r=u^*$
+  \State create split $s$ with one edge to $U$ and one unpatched edge
+  \State patch every exit of $U$ to $s$
+  \State \Return $s$, its remaining exit slot
+\EndIf
+\EndFunction
+\State patch the completed fragment's exits to a new accepting state
+\end{pseudocode}
+\end{algorithm}
+
+Induction on the expression tree explains the construction.
+Concatenation requires a successful path through the first fragment before entering the second.
+Union introduces a choice without consuming input.
+The star split either exits immediately or enters the child and returns to the same choice.
+For an expression tree of $R$ nodes, the number of states and edges is $O(R)$.
+Construction is also $O(R)$ if exit lists support constant-time concatenation and each slot is patched once; repeatedly copying lists can increase that cost.
+Counted repetition must be charged by its expanded size, rather than by the number of digits in its textual bound.
+
+Figure~\ref{fig:ch49-star} shows the star fragment's crucial zero-iteration route.
+The accepting state is not placed inside the child: reaching a child exit still permits another iteration.
+Nullable children create epsilon cycles, so a matcher needs visited marks even before consuming its first byte.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=18mm and 25mm]
+\node[basic block] (s) {split};
+\node[basic block,right=of s] (u) {child entry};
+\node[basic block,right=of u] (v) {child exit};
+\node[basic block,below=of u] (out) {next fragment};
+\draw[cfg edge] (s)--node[above] {$\epsilon$}(u);
+\draw[cfg edge] (u)--node[above,font=\small] {child word}(v);
+\draw[back edge] (v) to[bend right=35] node[above] {$\epsilon$}(s);
+\draw[cfg edge] (s)|-node[below,font=\small] {zero iterations}(out);
+\end{tikzpicture}
+\caption{A star fragment loops after a child match and can also leave without consuming input.}
+\label{fig:ch49-star}
+\end{figure}
+
+\section{Simulate sets, then intern them}
+\label{sec:ch49-subsets}
+
+The \term{epsilon closure} $E(X)$ contains every state reachable from $X$ using only epsilon edges, including $X$ itself.
+A worklist computes it by marking a state before following its outgoing edges.
+For a fixed NFA with $m$ states and $e$ epsilon edges, one closure costs $O(m+e)$ in the worst case with indexed marks.
+Clearing the marks also has a cost; generation counters avoid clearing on every small closure but need a wraparound policy.
+
+After consuming symbol $a$, the next active set is
+\[
+ E\left(\bigcup_{q\in X}\delta(q,a)\right).
+\]
+One NFA simulation applies this equation at every position.
+For bounded-degree expression NFAs, the cost of one length-$L$ match is $O(mL)$ state operations, with $O(m)$ active-set storage.
+The same equation constructs a \term{deterministic finite automaton} (DFA): each distinct active set becomes a single named DFA state.
+Algorithm~\ref{alg:ch49-subsets} visits only reachable sets.
+
+\begin{algorithm}[htbp]
+\caption{Intern reachable NFA subsets as DFA states.}
+\label{alg:ch49-subsets}
+\begin{pseudocode}
+\Require NFA start $s$, alphabet classes $\Sigma$, accepting states with token priorities
+\Ensure DFA with the same prefix languages and winning output at every state
+\State $X_0\gets E(\{s\})$; intern $X_0$; queue $X_0$
+\While{an unprocessed subset $X$ remains}
+  \State remove $X$ from the queue
+  \State output of $X\gets$ highest-priority accepting token in $X$, or none
+  \ForAll{alphabet classes $a\in\Sigma$}
+    \State $Y\gets E(\bigcup_{q\in X}\delta(q,a))$
+    \If{$Y$ has not been interned}
+      \State intern $Y$ and queue it
+    \EndIf
+    \State set transition $(X,a)$ to the interned identifier of $Y$
+  \EndFor
+\EndWhile
+\end{pseudocode}
+\end{algorithm}
+
+The empty subset is the dead state and transitions to itself.
+There can be $2^m$ subsets; conversion is not guaranteed to produce a small table.
+With $K$ reachable subsets, $A$ alphabet classes, and $O(m)$ transition/closure work per class, a straightforward bounded-degree implementation costs $O(KAm)$ state operations plus interning, and stores $O(Km+KA)$ bits or cells according to representation.
+Hashing a bitset is not free; its machine-word length belongs in the interning cost.
+Lazy DFA construction computes transitions on demand and can fall back to NFA simulation when a cache budget is exhausted.
+
+For a small independent example, use states $0,1,2,3$ with edges $0\xrightarrow{a}1$, $1\xrightarrow{\epsilon}2$, and $2\xrightarrow{b,c}2$, $2\xrightarrow{d}3$.
+Only $3$ accepts.
+This compact NFA recognizes $a(b\mid c)^*d$, though it is not the unoptimized fragment output above.
+Table~\ref{tab:ch49-subsets} works the conversion completely.
+
+\begin{table}[htbp]
+\caption{Five reachable subsets arise before equivalent continuation states are merged.}
+\label{tab:ch49-subsets}
+\centering
+\begin{tabular}{lllllll}
+\toprule
+Name & Subset & $a$ & $b$ & $c$ & $d$ & Accepts \\
+\midrule
+$A$ & $\{0\}$ & $B$ & $Z$ & $Z$ & $Z$ & no \\
+$B$ & $\{1,2\}$ & $Z$ & $C$ & $C$ & $D$ & no \\
+$C$ & $\{2\}$ & $Z$ & $C$ & $C$ & $D$ & no \\
+$D$ & $\{3\}$ & $Z$ & $Z$ & $Z$ & $Z$ & yes \\
+$Z$ & $\emptyset$ & $Z$ & $Z$ & $Z$ & $Z$ & no \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Minimize future behavior, including outputs}
+\label{sec:ch49-minimize}
+
+Two DFA states are equivalent when every suffix produces the same observable acceptance output from either state.
+For a token machine the output includes the winning token kind, not merely an accepting bit.
+Partition refinement starts with groups having identical current outputs, then separates states whose transitions reach different groups.
+Algorithm~\ref{alg:ch49-refine} uses a simple full-sweep method rather than claiming the bound of a more sophisticated splitter algorithm.
+
+\begin{algorithm}[htbp]
+\caption{Refine a complete token DFA until transition signatures agree within blocks.}
+\label{alg:ch49-refine}
+\begin{pseudocode}
+\Require reachable complete DFA, alphabet classes, token output per state
+\Ensure quotient DFA preserving every future output
+\State partition states by current token output, including none
+\Repeat
+  \State remember the current partition $P$
+  \ForAll{blocks $B$ of $P$}
+    \State group states in $B$ by the vector of successor block identifiers
+    \State replace $B$ by those nonempty groups
+  \EndFor
+\Until{no block was split}
+\State emit one quotient state per block, with its common output and transitions
+\end{pseudocode}
+\end{algorithm}
+
+Use a snapshot of the old partition for all signatures in one sweep.
+With $K$ states and $A$ classes, there are at most $K-1$ splitting sweeps.
+Sorting length-$A$ signatures gives a coarse $O(AK^2\log K)$ comparison-based bound; dictionary-based grouping changes the assumptions and constants.
+At stabilization, equivalent blocks stay together under every transition, so induction on suffix length proves preservation.
+Conversely, a split records a distinguishing output now or after a finite suffix~\cite{hopcroft-2007-automata}.
+
+In the worked DFA the first output partition is $\{D\}$ and $\{A,B,C,Z\}$.
+The symbol $d$ separates $B,C$ from $A,Z$.
+Then $a$ separates $A$ from $Z$.
+The final blocks are $\{A\},\{B,C\},\{D\},\{Z\}$.
+Figure~\ref{fig:ch49-minimal} shows the useful transitions of that four-state result; all omitted transitions go to $Z$.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=27mm]
+\node[basic block] (a) {$A$};
+\node[basic block,right=of a] (b) {$B,C$};
+\node[basic block,right=of b,double] (d) {$D$: accept};
+\node[basic block,below=of b] (z) {$Z$: dead};
+\draw[cfg edge] (a)--node[above] {$a$}(b);
+\draw[cfg edge] (b)--node[above] {$d$}(d);
+\draw[cfg edge] (b) edge[loop above] node[above] {$b,c$}(b);
+\draw[back edge] (d)--node[right,font=\small] {any byte}(z);
+\draw[cfg edge] (z) edge[loop below] node[below,font=\small] {any byte}(z);
+\end{tikzpicture}
+\caption{The subset states $B$ and $C$ have identical futures and become one state; the accepting output remains distinct.}
+\label{fig:ch49-minimal}
+\end{figure}
+
+\section{Remember acceptance while scanning ahead}
+\label{sec:ch49-last-accept}
+
+A DFA can leave an accepting state while investigating a longer candidate.
+Failure later does not erase the earlier accepted prefix.
+Algorithm~\ref{alg:ch49-munch} keeps a separate saved endpoint and token output.
+Token rules must exclude the empty word; otherwise repeated emission can leave the source position unchanged.
+End of input is a separate condition, not a byte chosen as a sentinel from the source alphabet.
+
+\begin{algorithm}[htbp]
+\caption{Select one longest token while preserving the last accepting endpoint.}
+\label{alg:ch49-munch}
+\begin{pseudocode}
+\Require source $s$ of length $n$, start offset $b<n$, nonnullable token DFA
+\Ensure longest token and endpoint, or lexical failure at $b$
+\State $q\gets start$; $i\gets b$; $best\gets none$
+\While{$i<n$ and the next transition is not dead}
+  \State $q\gets\delta(q,s[i])$; $i\gets i+1$
+  \If{$q$ has a token output}
+    \State $best\gets(i,output(q))$
+  \EndIf
+\EndWhile
+\If{$best=none$}
+  \State \Return lexical failure at $b$
+\EndIf
+\State \Return token spanning $[b,best.end)$, with next cursor $best.end$
+\end{pseudocode}
+\end{algorithm}
+
+Figure~\ref{fig:ch49-rollback} uses token rules \code{a} and $a^*b$ on \code{aaaa!}.
+The scanner remembers acceptance after the first \code{a}, continues looking for \code{b}, then returns to the saved endpoint.
+The next token repeats much of that search.
+On $a^n$, this implementation can inspect $n+(n-1)+\cdots+1$ bytes, giving quadratic total work despite constant-time DFA transitions.
+The linear bound for the direct Mini scanner does not automatically apply to arbitrary maximal-munch specifications.
+Bounded rollback, buffering, or memoized failed state/position searches need their own argument~\cite{grune-2008-parsing}.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=17mm,y=10mm]
+\foreach \x/\c in {0/a,1/a,2/a,3/a,4/!} {
+ \node[draw,minimum width=17mm,minimum height=8mm] at (\x,0) {\ttfamily\c};
+}
+\draw[cfg edge] (-0.5,1)--node[above,font=\small] {inspect toward a possible \code{b}}(4.5,1);
+\draw[back edge] (4.5,-1)--node[below,font=\small] {resume at saved token end}(0.5,-1);
+\draw[dashed] (0.5,-1.5)--(0.5,0.6);
+\node[font=\small,anchor=west] at (0.7,-2) {accepted span: one \code{a}};
+\end{tikzpicture}
+\caption{Inspection and consumption have different endpoints; rollback can repeatedly inspect the same suffix.}
+\label{fig:ch49-rollback}
+\end{figure}
+
+\section{Engineering the character boundary}
+\label{sec:ch49-engineering}
+
+A byte span is not automatically a display-column span.
+UTF-8 uses variable-length encodings, tabs change display position, and combining characters can share a displayed column.
+Keep byte offsets for slicing and separately define decoding and diagnostic coordinates.
+An ASCII identifier policy should reject or delegate non-ASCII bytes explicitly; indexing a byte table with a negative signed \code{char} is an implementation bug.
+
+Lexical modes add a finite control component for strings, comments, or interpolation.
+Each mode can select a different start state; the token output may switch modes after emission.
+Arbitrarily nested block comments require a counter or stack, so that feature is no longer solely a finite-state recognizer.
+Do not disguise the extra state as a particularly elaborate regular expression.
+
+The case-study matcher uses NFA simulation and longest prefix matching for each requested terminal separately.
+It does not construct one combined token DFA or apply a global keyword priority policy.
+That choice keeps the generated runtime small and makes grammar-directed lexical choices possible, but grammar backtracking can invoke the same matcher repeatedly.
+Its complexity must include both matching and parser search.
+
+\section{Exercises}
+\label{sec:ch49-exercises}
+\begin{enumerate}
+\item\label{ex:ch49-subsets} Trace \code{acbd} through Table~\ref{tab:ch49-subsets}, including its initial subset. Is \code{acb} accepted?
+\item\label{ex:ch49-distinguish} Give a distinguishing suffix for each pair among the four minimized states in Figure~\ref{fig:ch49-minimal}.
+\item\label{ex:ch49-cost} For rules \code{a} and $a^*b$, count the successful \code{a}-transition inspections on input $a^5$ across all token attempts.
+\item\label{ex:ch49-output} Two accepting states produce different token kinds but have identical outgoing transitions. Explain why accept/reject minimization is insufficient for a lexer.
+\end{enumerate}
+Checked answers and executable automata checks accompany the front-end examples.
+
+\section{Further reading}
+\label{sec:ch49-reading}
+Hopcroft, Motwani, and Ullman supply the language-equivalence arguments behind NFA simulation, determinization, and minimization~\cite{hopcroft-2007-automata}.
+Grune and Jacobs place lexical recognition alongside parsing strategies, helping distinguish a regular-language matcher from the policy of a complete scanner~\cite{grune-2008-parsing}.

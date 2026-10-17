@@ -19,9 +19,9 @@ local config = {
   main      = "index.ltx",
   jobname   = "index",
   engine    = os.getenv("ENGINE") or "xelatex",
-  chapters  = 39,
+  chapters  = 93,
   chapdir   = "chapters",
-  chapfmt   = "ch%02d",          -- ch01 ... ch39
+  chapfmt   = "ch%02d",          -- stable source IDs, not printed chapter numbers
   extra     = { "frontmatter/preface.tex", "references.bib",
                 "appendices/appendix-a.tex", "appendices/appendix-b.tex",
                 "appendices/appendix-c.tex", "appendices/appendix-d.tex" },
@@ -250,5 +250,6 @@ if not fn then
     die("unknown command '" .. cmd .. "'. Try: build, draft, draftfull, quick, fonts, check, clean, distclean")
 end
 
-local ok = fn(table.unpack and table.unpack(arg, 2) or unpack(arg, 2))
+local unpack_args = table.unpack or unpack
+local ok = fn(unpack_args(arg, 2))
 os.exit(ok and 0 or 1)

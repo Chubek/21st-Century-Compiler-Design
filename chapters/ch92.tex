@@ -1,0 +1,217 @@
+\chapter{Lazy Evaluation, Graph Reduction, and Runtime Systems}
+\label{ch:lazy-functional-runtime}
+
+Delaying an expression is easy: retain its syntax and environment until a value is needed.
+Sharing the result safely is harder.
+The runtime must distinguish an unevaluated thunk, a thunk currently evaluating, a completed value, and a failure policy.
+It must also avoid retaining dead environments after an update and distinguish productive cyclic data from circular demand.
+
+\section{Represent suspended computation explicitly}
+\label{sec:ch92-thunks}
+A \term{thunk} stores a delayed expression and the lexical environment needed to evaluate it.
+The call-by-need machine binds an argument parameter to a thunk instead of eagerly computing the argument.
+Variable lookup forces that thunk; repeated lookup reuses a stored result after successful evaluation.
+Let-bound values use the same mechanism, so two uses of one binding share work.
+
+For let x=18+5 in x+x, the first x evaluates the delayed addition to 23 and updates its thunk.
+The second x returns the cached 23.
+The final answer is 46, and the lab's first-evaluation counter is one.
+Table~\ref{tab:ch92-sharing} traces these events.
+The counter counts newly evaluated thunks, not every source arithmetic operation or machine instruction.
+
+\begin{table}[htbp]
+\caption{Call-by-need updates one shared suspension after its first demand.}
+\label{tab:ch92-sharing}
+\centering
+\begin{tabular}{p{0.20\linewidth}p{0.31\linewidth}p{0.34\linewidth}}
+\toprule
+Event & Thunk state & Returned value \\
+\midrule
+bind x & pending expression 18+5 & none yet \\
+first use of x & busy, then done & 23 \\
+second use of x & done & cached 23 \\
+outer addition & done & 46 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The thunk environment must come from the argument's call site, not from the function's definition site.
+The function body itself still uses the closure's definition-site environment.
+Confusing these two environments yields subtle scope errors that a first-order arithmetic test never reveals.
+Nested closures and shadowing tests exercise both paths in the companion.
+
+\section{Force with update and black-hole detection}
+\label{sec:ch92-force}
+Algorithm~\ref{alg:ch92-force} is the implemented forcing protocol.
+Marking busy before evaluation detects reentry into the same unfinished computation.
+The lab raises a black-hole error in that situation.
+After successful evaluation it clears the retained expression and environment, reducing accidental retention of otherwise dead inputs.
+
+\begin{algorithm}[htbp]
+\caption{Force and update a single-threaded call-by-need thunk.}
+\label{alg:ch92-force}
+\begin{pseudocode}
+\Require live thunk; serialized evaluation; explicit failure policy
+\Ensure cached value on success or propagated failure without a false done state
+\If{state is done} \State return cached value \EndIf
+\If{state is busy} \State report circular demand \EndIf
+\State mark busy and evaluate stored expression in stored environment
+\If{evaluation fails} \State reset to pending and propagate failure \EndIf
+\State store value; mark done; release expression/environment references
+\State return cached value
+\end{pseudocode}
+\end{algorithm}
+
+Successful repeated access costs constant thunk bookkeeping plus dispatch in this model.
+The first force includes arbitrary expression evaluation and environment-copy costs.
+The failure policy resets to pending rather than caching an exception; a retry can reevaluate the expression if a caller catches the host-side failure.
+The source core has no exception handler, so the public CLI simply terminates with failure.
+A language with catchable exceptions must specify whether failed thunks memoize the exception and its identity.
+
+Figure~\ref{fig:ch92-states} shows the transitions.
+In a multithreaded runtime, busy can mean another thread is computing the value rather than a true self-dependent black hole.
+Ownership identity, wait queues, atomic publication, and cancellation then become necessary.
+The single-threaded lab does not claim those concurrent semantics.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=19mm]
+\node[basic block] (p) {pending};\node[basic block,right=of p] (b) {busy};
+\node[basic block,right=of b] (d) {done};
+\draw[cfg edge] (p)--(b);\draw[cfg edge] (b)--node[above,font=\small]{success}(d);
+\draw[cfg edge,dashed] (b.south) to[bend left=35] node[below,font=\small]{failure resets}(p.south);
+\end{tikzpicture}
+\caption{Only successful evaluation publishes a done value in the reference runtime.}
+\label{fig:ch92-states}
+\end{figure}
+
+\section{Observe weak-head structure before traversing data}
+\label{sec:ch92-whnf}
+\term{Weak-head normal form} exposes the outer constructor or lambda without necessarily normalizing its fields or body.
+The lazy cons operation stores head and tail as thunks and returns the constructor pair immediately.
+A list case forces the scrutinee only enough to distinguish Nil from Cons, then binds the existing field thunks.
+Selecting an empty branch does not evaluate the cons branch, and selecting a head does not require traversing the tail.
+
+This supports productive infinite structures in a richer recursive-data language, though the case-study surface restricts letrec to functions.
+The distinction remains visible in finite examples with divergent field computations.
+An eager conversion of a lazy list to a host list would force every tail and change both termination and memory behavior.
+The CLI avoids that problem by printing scalar results only.
+
+Figure~\ref{fig:ch92-list} shows one exposed list constructor.
+The collector traces both field thunks and their environments while they remain reachable.
+After a field is forced and updated, its old environment may become unreachable and reclaimable.
+Whether that actually reduces memory depends on other live references, not solely on the update operation.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=14mm and 16mm]
+\node[basic block] (c) {Cons: outer value available};
+\node[basic block,below left=of c] (h) {head thunk};
+\node[basic block,below right=of c] (t) {tail thunk};
+\draw[cfg edge] (c)--(h);\draw[cfg edge] (c)--(t);
+\end{tikzpicture}
+\caption{Exposing a lazy constructor does not require evaluating either field.}
+\label{fig:ch92-list}
+\end{figure}
+
+\section{Map graph reduction to runtime entry conventions}
+\label{sec:ch92-entry}
+An implementation can represent applications as graph nodes and reduce a spine until enough arguments reach a function entry.
+Alternatively, compiled closures can enter native code directly with explicit argument and update frames.
+The STG design separates function closures, constructor closures, and updateable suspended computations and gives a practical mapping to stock hardware~\cite{peytonjones-1992-stg}.
+The lab's Python closure interpreter is a reference model, not an STG implementation.
+
+Partial application needs a value retaining supplied arguments until enough arguments arrive.
+Overapplication must handle a returned function receiving remaining arguments.
+Arity information, entry points, and specialized calling paths reduce overhead, but every path must agree on which arguments are already evaluated and which are pointers to closures.
+A backend also needs stack maps and update-frame metadata for GC and debugging.
+
+Table~\ref{tab:ch92-runtime} distinguishes these runtime objects.
+Treating a constructor as a zero-argument function can simplify one abstract presentation but can hide dispatch and allocation costs in a practical runtime.
+Likewise, a thunk that returns a function still needs its own update protocol if it is shared.
+The representation of the resulting function is not the representation of the suspended computation that produced it.
+
+\begin{table}[htbp]
+\caption{Lazy runtime objects have different entry and tracing obligations.}
+\label{tab:ch92-runtime}
+\centering
+\begin{tabular}{p{0.20\linewidth}p{0.31\linewidth}p{0.34\linewidth}}
+\toprule
+Object & Entry behavior & Retained state \\
+\midrule
+function closure & consume argument(s), execute body & code and captures \\
+thunk & evaluate once, update on success & expression/code and environment \\
+constructor & expose tag and fields & field references \\
+partial application & accumulate missing arguments & function and supplied values \\
+update frame & install result after evaluation & target thunk and continuation \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Analyze space, not only repeated work}
+\label{sec:ch92-space}
+Sharing can save computation and increase residency.
+A thunk retaining an entire environment may keep a large input alive even if its eventual result is small.
+A long chain of delayed accumulator updates can create a space leak where a strict accumulator would stay compact.
+Conversely, forcing everything early destroys the ability to avoid unused divergent arguments.
+Demand analysis and strictness information guide selective evaluation rather than replacing lazy semantics globally.
+
+Algorithm~\ref{alg:ch92-update} states a runtime memory-accounting discipline for thunk transitions.
+It is a design checklist, not a collector implemented by the Python lab.
+Tracing cost depends on live closure graph size, including retained environments and update frames.
+Cycles require a collector capable of reclaiming unreachable cycles or an explicitly different ownership scheme.
+
+\begin{algorithm}[htbp]
+\caption{Account for roots and obsolete references across a thunk update.}
+\label{alg:ch92-update}
+\begin{pseudocode}
+\Require runtime GC protocol, active update target, result closure/value
+\Ensure no live reference is lost and obsolete captures are not retained unnecessarily
+\State keep update target and evaluation continuation visible as roots
+\State publish the result through the runtime's required write barrier
+\State change thunk state consistently with result visibility
+\State remove obsolete expression and environment references
+\State retire update-frame roots only after publication is complete
+\end{pseudocode}
+\end{algorithm}
+
+For a concurrent or generational collector, publication and field clearing must follow the collector's barrier and memory-ordering rules.
+The single-threaded Python object assignments rely on the host runtime's memory management and do not demonstrate a new barrier implementation.
+Performance evaluation should report allocation and maximum live memory as well as elapsed time and number of thunk evaluations.
+Counting reductions alone can hide the cost of graph manipulation and retained data.
+
+\section{Follow a demand through a list case}
+\label{sec:ch92-demand-example}
+Consider a list whose head is integer four and whose tail computation loops forever, then a case returning the head in the Cons branch.
+The lazy constructor allocates two field thunks and exposes Cons without entering the tail.
+The case binds those existing thunks, evaluates the head variable, and returns four.
+The tail remains pending and may become unreachable when the case finishes.
+The strict machine instead evaluates the tail while constructing the list and never reaches the case result.
+This difference follows from constructor-field strictness as well as argument strategy.
+
+Demand analysis can identify fields or arguments that every terminating path will evaluate, allowing some thunk allocation to be avoided under a proven transformation.
+But a syntactically present variable use is not enough to establish unconditional demand.
+A use in an unselected branch may never execute, and an earlier divergent computation can prevent a later use.
+The analysis must overapproximate the operational cases relevant to the particular strictness theorem rather than turning every occurrence into an eager evaluation point.
+
+Sharing also changes how this example consumes memory.
+If another closure retains the list, the unused tail thunk remains reachable even after the head-selecting case returns.
+If no root retains the list, the constructor and pending tail can be reclaimed together by the host collector.
+The thunk state machine tells us whether work has happened; reachability tells us whether the representation must remain allocated.
+Neither fact alone predicts residency, which is why lazy-runtime measurements need both evaluation and heap information.
+
+\section{Exercises}
+\label{sec:ch92-exercises}
+\begin{enumerate}
+\item\label{ex:ch92-share} Trace let x=18+5 in x+x, giving the cached result and number of first-time thunk evaluations.
+\item\label{ex:ch92-blackhole} A pending thunk's expression immediately forces that same thunk.
+Give the state sequence and failure point.
+\item\label{ex:ch92-fields} Explain why selecting the head of a lazy Cons need not evaluate its tail and why eagerly converting the entire value to a host list changes the contract.
+\item\label{ex:ch92-retention} A completed thunk still retains its original environment containing a large input.
+Which references can be cleared, and why does that not prove the input is globally dead?
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch92-reading}
+Peyton Jones develops closure entry, updates, and compiled non-strict execution in the STG machine~\cite{peytonjones-1992-stg}.
+The garbage-collection handbook provides the broader tracing and reclamation context~\cite{jones-2023-garbage}.

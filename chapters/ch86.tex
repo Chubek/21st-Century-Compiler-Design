@@ -1,0 +1,227 @@
+\chapter{Term Graph Rewriting, Sharing, and Cycles}
+\label{ch:term-graph-rewriting}
+
+The tree $\operatorname{pair}(u,u)$ has two occurrences of u.
+A graph may represent both by one node with two incoming edges.
+Updating that node changes both unfolded occurrences at once.
+This is the mechanism behind useful sharing, but it is also the reason a graph rewrite is not merely a faster implementation of an arbitrary tree rewrite.
+
+\section{Define the graph and its read-back}
+\label{sec:ch86-graphs}
+A rooted term graph has labeled nodes whose ordered outgoing edges match symbol arities.
+Several edges may point to the same node.
+For an acyclic graph, \term{unfolding} recursively follows edges to produce a tree, duplicating a shared subtree whenever it is reached through different incoming paths.
+The unfolding can be exponentially larger than the graph.
+
+For a chain $n_{i+1}=\operatorname{pair}(n_i,n_i)$ above a leaf $n_0$, the graph has $h+1$ nodes at height h.
+Its unfolded tree has $2^{h+1}-1$ nodes.
+Table~\ref{tab:ch86-growth} works the first heights.
+A graph algorithm bounded by graph size must not quietly materialize the whole unfolding inside its claimed constant-time equality operation.
+
+\begin{table}[htbp]
+\caption{Sharing can compress exponentially many tree occurrences into a short graph.}
+\label{tab:ch86-growth}
+\centering
+\begin{tabular}{rrr}
+\toprule
+Height & Graph nodes & Unfolded tree nodes \\
+\midrule
+0 & 1 & 1 \\
+1 & 2 & 3 \\
+2 & 3 & 7 \\
+3 & 4 & 15 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Algorithm~\ref{alg:ch86-unfold} performs an explicit finite read-back and rejects a cycle on the active recursion path.
+Its time and output storage are proportional to unfolded output size, not just the number of distinct heap nodes.
+The active-path set detects cycles without mistaking harmless repeated visits through separate paths for cycles.
+This is the read-back implemented in the lab; it deliberately does not interpret cyclic graphs as infinite rational terms.
+
+\begin{algorithm}[htbp]
+\caption{Read back a finite acyclic term graph, rejecting cyclic tree unfolding.}
+\label{alg:ch86-unfold}
+\begin{pseudocode}
+\Require valid node IDs, ordered arity-correct children, root
+\Ensure unfolded tree or cycle diagnostic
+\Function{Unfold}{$n,active$}
+\If{$n\in active$} \State reject cyclic unfolding \EndIf
+\State add $n$ to the path-local active set
+\If{$n$ is an indirection} \State return unfolding of its target \EndIf
+\State recursively unfold children with this active set
+\State return labeled tree node containing those child trees
+\EndFunction
+\end{pseudocode}
+\end{algorithm}
+
+\section{Distinguish node update from occurrence replacement}
+\label{sec:ch86-update}
+The lab graph has nodes v, zero, add(v,zero), and pair(add,add).
+One add node is shared by both pair edges.
+Applying add-zero in place replaces the add node with an indirection to v.
+Unfolding afterward yields pair(v,v); both occurrences changed.
+Figure~\ref{fig:ch86-sharing} shows the topology before the update.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=13mm and 15mm]
+\node[basic block] (p) {pair};\node[basic block,below=of p] (a) {shared add};
+\node[basic block,below left=of a] (v) {v};\node[basic block,below right=of a] (z) {zero};
+\draw[cfg edge] (p.south west) to[bend right=20] (a.west);
+\draw[cfg edge] (p.south east) to[bend left=20] (a.east);
+\draw[cfg edge] (a)--(v);\draw[cfg edge] (a)--(z);
+\end{tikzpicture}
+\caption{Two parent edges identify one shared redex, so a node update affects both unfolded occurrences.}
+\label{fig:ch86-sharing}
+\end{figure}
+
+If the intended semantics changes only the first occurrence, use path copying or split sharing before the update.
+If the intended semantics is call-by-need, updating a shared thunk is deliberate: later uses reuse the same computed value.
+For an effectful action, merging two originally separate computations can reduce the number of effects and change behavior.
+Sharing therefore requires a semantic justification, not merely a structural hash collision check.
+
+Algorithm~\ref{alg:ch86-update} states the executed pure identity update.
+The graph must be a valid acyclic arithmetic term graph, the selected node must have add arity two, and the second child must denote the zero constant.
+Only under the pure total identity contract is replacing the node with an indirection sound.
+The actual local update costs $O(1)$; maintaining reverse uses, analysis facts, and reclaiming now-dead nodes adds separate work.
+
+\begin{algorithm}[htbp]
+\caption{Redirect a shared pure add-zero node while preserving all incoming edges.}
+\label{alg:ch86-update}
+\begin{pseudocode}
+\Require valid acyclic pure arithmetic graph; add node $n$ with children $(a,zero)$
+\Ensure every use of $n$ denotes $a$ under the identity contract
+\State replace node $n$'s payload with an indirection to $a$
+\State invalidate facts that depend on $n$'s former operator or children
+\State account for removed child references under the heap's ownership policy
+\end{pseudocode}
+\end{algorithm}
+
+The small lab implements payload redirection and tests read-back; it does not implement a collector or reverse-use maintenance.
+It retains all allocated nodes in its finite test heap, so unreclaimed zero nodes are an explicit model boundary, not a claim of leak-free production graph reduction.
+The runtime chapter develops the actual ownership and reclamation obligations for a language implementation.
+
+\section{Preserve meaning under nonlinearity and matching}
+\label{sec:ch86-nonlinear}
+A tree pattern pair(x,x) asks whether the two subject subterms are equal under the pattern's equality notion.
+A graph matcher that tests pointer identity recognizes existing sharing, not all equal unfoldings.
+Two distinct nodes can represent equal finite trees; one node can also participate in a cyclic graph whose read-back is outside the finite-term domain.
+Choosing identity, structural equality, bisimulation, or equational equality changes the matching problem.
+
+Table~\ref{tab:ch86-equalities} distinguishes these relations.
+Hash-consing can make finite structural equality coincide with node identity for canonical immutable acyclic nodes, but only if every construction passes through the interning discipline.
+Destructive updates can invalidate a hash-cons key, so mutable reducer heaps and immutable hash-consed DAGs should not share one undocumented invariant.
+Indirections need normalization or explicit treatment in both equality and indexing.
+
+\begin{table}[htbp]
+\caption{Graph identity and represented-term equality answer different questions.}
+\label{tab:ch86-equalities}
+\centering
+\begin{tabular}{ll}
+\toprule
+Relation & Meaning \\
+\midrule
+node identity & exactly the same allocated node \\
+finite structural equality & equal acyclic tree unfoldings \\
+bisimulation & matching labeled behavior including allowed cycles \\
+rewrite convertibility & connected by the chosen equational theory \\
+observational equivalence & indistinguishable in permitted program contexts \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Graph/term correspondence theorems require restrictions on rules, graph interpretation, and reduction strategy.
+For example, sharing a variable occurrence on the right side preserves one computation rather than copying its operational work.
+The term-graph literature studies precisely when that implementation simulates term rewriting; those results must not be generalized to arbitrary effectful graphs or arbitrary node merging~\cite{barendregt-1987-term-graphs}.
+
+\section{Give cycles an explicit operational meaning}
+\label{sec:ch86-cycles}
+A cycle can encode recursion or an infinite data structure, but a finite tree reader cannot simply recurse through it.
+A lazy list such as ones can be represented by a constructor whose tail points back to the same evaluated list.
+Forcing the outer constructor can terminate even though fully unfolding the list cannot.
+A self-dependent unevaluated thunk, by contrast, can reenter its own evaluation and require black-hole detection.
+
+Figure~\ref{fig:ch86-cycle} contrasts these roles.
+The distinction is whether observation reaches a constructor before recurring, not whether the heap contains any cycle at all.
+A collector must also reclaim unreachable cycles; plain reference counting without a cycle strategy can retain them forever.
+Recursive closure environments in the functional lab rely on Python's managed heap rather than claiming a new collector implementation.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=28mm]
+\node[basic block] (cons) {evaluated Cons};
+\node[basic block,right=of cons] (thunk) {evaluating thunk};
+\draw[cfg edge] (cons) edge[loop below] node[below,font=\small]{tail points back}(cons);
+\draw[cfg edge,dashed] (thunk) edge[loop below] node[below,font=\small]{reenters before value}(thunk);
+\end{tikzpicture}
+\caption{A productive constructor cycle and an evaluation black hole require different treatment.}
+\label{fig:ch86-cycle}
+\end{figure}
+
+\section{Separate ordinary sharing from optimal reduction}
+\label{sec:ch86-optimal}
+Sharing one thunk across its uses avoids recomputing that particular suspended expression.
+It does not automatically implement optimal lambda reduction, which concerns avoiding certain duplicated reduction work across families of residuals.
+Sharing graphs with explicit duplication management introduce additional node kinds and correctness invariants.
+Their graph bookkeeping can itself be expensive; optimality in a formal reduction metric is not a universal wall-clock performance guarantee.
+
+Asperti and Guerrini provide background on that larger design space~\cite{asperti-1998-optimal}, while the executable lab intentionally implements only finite read-back and one ordinary shared update.
+The functional evaluator implements call-by-need memoization, not a Lamping-style optimal reducer.
+Keeping those claims separate lets the reader extend a small correct model without inheriting an unsupported optimality label.
+
+\section{Track residual work after duplication and erasure}
+\label{sec:ch86-residuals}
+A redex can move, duplicate, or disappear when an enclosing redex is contracted.
+Its surviving counterparts are often described as residuals.
+For f(x)$\to$pair(x,x), reducing the outer f duplicates the occurrences of a tree redex inside the substituted x.
+For f(x)$\to$c, the same inner work is erased.
+An evaluator that always reduces arguments before the outer call can therefore perform work that an outermost or lazy strategy never needs.
+
+A shared graph can preserve one underlying x node across both pair edges, so updating that node realizes the effect of reducing both corresponding tree residuals.
+That explains the performance opportunity and the simulation complication at the same time.
+Counting one graph update as exactly one tree rewrite is generally wrong when there are multiple incoming paths.
+Correctness should relate represented values or an appropriately defined reduction simulation, while performance should state which operations are being counted.
+
+The distinction also appears in garbage collection.
+An erasing rewrite removes references to an argument subgraph but does not prove that the argument is globally unreachable.
+Other graph roots or shared parents may retain it.
+A reference-count implementation decrements the removed edges and may trigger recursive release; a tracing collector discovers reachability from the complete root set.
+Neither should free a node merely because one redex stopped using it.
+
+\section{Maintain indirections and sharing without corrupting indexes}
+\label{sec:ch86-indirections}
+Indirections let an update preserve node identity while changing the value it denotes.
+Chains of indirections can accumulate after successive rewrites.
+Path compression can shorten future traversals, but a reducer must respect the heap's mutation, GC, and concurrency rules when rewriting those links.
+A self-indirection is not a valid finite acyclic shortcut and is rejected by the lab's read-back.
+The shape of indirections should be part of heap verification rather than an assumption buried in the evaluator.
+
+Hash-consing poses a different issue.
+An intern table keyed by an immutable operator and child tuple is valid only while that tuple remains immutable.
+Updating an interned node in place without removing or repairing its old table entry can make later construction retrieve a node with the wrong structure.
+One design separates immutable syntax DAGs from mutable evaluation nodes; another uses stable handles to replace immutable payloads while maintaining explicit versioned indexes.
+Both require a deliberate invariant, not merely a shared pointer type.
+
+Finally, graph matching must say whether it preserves or reflects sharing.
+A homomorphic match may map distinct pattern nodes to one host node; an injective match forbids that identification.
+Those choices affect deletion and duplicated-variable behavior.
+The shared arithmetic fixture performs neither general search nor arbitrary graph homomorphism: the caller supplies one node in a known finite graph.
+That narrow contract makes the executed update easy to audit while leaving the broader matching design visible.
+
+\section{Exercises}
+\label{sec:ch86-exercises}
+\begin{enumerate}
+\item\label{ex:ch86-unfold} Compute graph and unfolded sizes at height four in the doubled-pair family.
+\item\label{ex:ch86-update} Unfold the lab's pair/shared-add graph before and after redirecting add-zero.
+How many tree occurrences change?
+\item\label{ex:ch86-identity} Two distinct immutable nodes both represent f(a).
+Explain why pointer inequality does not imply unequal tree patterns.
+\item\label{ex:ch86-cycle} Contrast a constructor tail cycle with a thunk that immediately forces itself.
+Which can expose weak-head structure, and why does finite read-back reject both cycles?
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch86-reading}
+Barendregt and colleagues study the graph/term correspondence under explicit restrictions~\cite{barendregt-1987-term-graphs}; Ohlebusch provides the broader rewrite-theoretic context~\cite{ohlebusch-2002-rewriting}.
+The STG paper shows how sharing and updates become runtime mechanisms for non-strict functional execution~\cite{peytonjones-1992-stg}.

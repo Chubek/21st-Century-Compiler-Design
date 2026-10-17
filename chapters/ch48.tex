@@ -1,0 +1,460 @@
+\chapter{Case Study: Developing a Model Checker}
+\label{ch:model-checker-case-study}
+
+A code cache can contain machine code that was correct when compiled and unsafe when called.
+Suppose an optimization depends on a class hierarchy remaining unchanged.
+The runtime publishes an optimized entry, later invalidates the hierarchy assumption, and eventually removes or replaces the entry.
+An unchecked call between invalidation and removal can enter stale code.
+Testing a successful compile-and-call sequence does not exercise that ordering.
+The missing test is a sequence of protocol transitions, rather than a different arithmetic input to the generated function.
+
+A small \term{finite-state model checker} makes these sequences explicit and searches them systematically.
+The software developed here accepts a finite labeled graph, checks whether any initial state can reach a bad state, and returns a shortest failing execution when one exists.
+It also evaluates three temporal operators over sets of states.
+The complete C11 lab is in \code{example-code/model-checker/}; its input files, command-line interface, independent test oracles, and exercise answers accompany the implementation.
+The checker uses only the C standard library and has a declared capacity of 64 states.
+That bound keeps the representation inspectable without pretending that arbitrary compiler behavior has become finite or small.
+
+\section{Choose a property and an abstraction boundary}
+\label{sec:ch48-model}
+
+Our property is precise: no execution starting in the interpreted state may invoke optimized code after its assumption has been invalidated.
+We represent one cache entry, one relevant assumption, and one call at a time.
+Compilation, invalidation, invocation, and retirement are atomic model steps.
+We do not represent instructions inside compiled code, the data reconstructed by deoptimization, or concurrent reads of a publication pointer.
+Those choices determine what a successful check means.
+
+Table~\ref{tab:ch48-states} assigns stable IDs to the six model states.
+The proposition mask belongs to a state; it is not the state's numeric ID.
+Bit zero means \code{bad}, and bit one means \code{completed}.
+The second proposition is available to callers even though the CLI's safety query uses only the first.
+
+\begin{table}[htbp]
+  \caption{The cache protocol records validity and invocation outcomes separately.}
+  \label{tab:ch48-states}
+  \centering
+  \begin{tabular}{clc}
+    \toprule
+    ID & Meaning & Proposition mask \\
+    \midrule
+    0 & Interpreted execution; no optimized entry & 0 \\
+    1 & Optimized entry published; assumption valid & 0 \\
+    2 & Assumption invalidated; entry still present & 0 \\
+    3 & Unchecked invocation entered stale code & 1 \\
+    4 & Valid optimized call completed & 2 \\
+    5 & Guard rejected entry; deoptimized call completed & 2 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Figure~\ref{fig:ch48-cache} contains the whole transition relation.
+State 0 is the only initial state.
+From state 1 a valid call can complete, or the assumption can be invalidated first.
+From state 2 the buggy protocol permits both a guarded fallback and an unchecked invocation.
+Nondeterminism represents the possibility that different call paths enforce the guard differently.
+The corrected protocol removes the unchecked edge $2\to3$: every call in state 2 must take the guarded deoptimization path.
+State 3 remains a named state in both files, so we can distinguish unreachable errors from errors deleted from the vocabulary.
+
+\begin{figure}[htbp]
+  \centering
+  \input{figures/checker-cache.tex}
+  \caption{The dashed edge admits the stale-code bug. Removing that edge makes the guarded invocation mandatory; the error state's loop is supplied by the dead-end convention.}
+  \label{fig:ch48-cache}
+\end{figure}
+
+This graph is a model of a compiler runtime protocol, not a proof of a whole compiler.
+An implementation can violate a modeled atomic step, omit an invalidation event, or reconstruct the wrong frame while following the graph's legal edges.
+To transfer a safety result to a real runtime, we need an abstraction map from concrete executions to model executions and a reason that concrete errors are represented by bad model states.
+An abstraction that omits possible concrete transitions can falsely report safety.
+An abstraction that adds transitions may report an infeasible counterexample, which must then be investigated or refined.
+The graph checker establishes a fact about the supplied graph; the modeling argument connects that fact to software.
+
+\section{Make input and ownership part of the design}
+\label{sec:ch48-interface}
+
+Figure~\ref{fig:ch48-pipeline} separates parsing, validation, query evaluation, and result consumption.
+This separation is useful even in a small program.
+A malformed file must not become a partially constructed graph that happens to have no reachable error.
+A budget failure must not become an empty satisfaction set interpreted as a completed analysis.
+The output status therefore controls whether an output value has mathematical meaning.
+
+\begin{figure}[htbp]
+  \centering
+  \input{figures/checker-pipeline.tex}
+  \caption{The parser publishes a graph only after validation. Query results carry a status that callers must inspect before replaying a trace or composing a state set.}
+  \label{fig:ch48-pipeline}
+\end{figure}
+
+The graph file is a sequence of unsigned decimal integers separated by whitespace.
+Its header contains $N$, the number of states; $K$, the number of initial states; and $M$, the number of edge records.
+The next $K$ integers are distinct initial state IDs.
+The next $N$ integers are proposition masks in state order.
+The remaining $2M$ integers form source--destination pairs.
+The parser then requires whitespace followed by end of file.
+Listing~\ref{lst:ch48-model-file} is the actual failing model consumed by the tests, not a second transcription of it.
+
+\begin{listing}[htbp]
+  \inputminted{text}{example-code/model-checker/stale.graph}
+  \caption{The failing model has six states, one initial state, and seven explicit edges.}
+  \label{lst:ch48-model-file}
+\end{listing}
+
+IDs must lie in $[0,N)$; $1\leq N\leq64$, $1\leq K\leq N$, and $0\leq M\leq4096$.
+Duplicate edges are harmless and coalesce into one bit.
+Duplicate initial IDs are rejected, so the declared initial-state count is meaningful.
+Signs, hexadecimal prefixes, nonnumeric suffixes, truncated records, and trailing tokens are invalid.
+Masks may use every bit of an unsigned 64-bit integer.
+Before accumulating decimal digit $d$ into value $v$, the parser checks
+\[
+  v \leq \left\lfloor\frac{\mathrm{UINT64\_MAX}-d}{10}\right\rfloor.
+\]
+Only then does it evaluate $10v+d$.
+An integer that cannot be represented is invalid; a representable header exceeding the supported state or edge capacity produces a resource-limit result.
+The parser can stop at that header and need not consume the remaining stream.
+
+The graph contains an initial-state bitset, one proposition mask per state, and one successor bitset per state.
+Listing~\ref{lst:ch48-api} shows the public types and query signatures.
+A proposition mask and a state set are both represented by \code{uint64\_t}, but they index different things.
+The function \code{mc\_atoms(g, mask)} converts the former to the latter: it returns states having \emph{any} proposition bit selected by \code{mask}.
+Passing zero selects no states.
+Explicit conversion avoids accidentally interpreting proposition bit zero as state zero.
+
+\begin{listing}[htbp]
+  \inputminted[firstline=9,lastline=32]{c}{example-code/model-checker/checker.h}
+  \caption{Caller-owned fixed-size objects make graph and trace lifetimes explicit.}
+  \label{lst:ch48-api}
+\end{listing}
+
+There is no heap allocation and no hidden graph handle.
+The caller owns the graph, trace, and result bitset; input and output objects must be distinct and nonoverlapping.
+No function retains a pointer after returning, and no destruction function is needed.
+The parser clears its output, builds a temporary graph, and copies that graph to the output only on success.
+Queries validate graph dimensions, the nonempty initial set, and successor masks before indexing arrays.
+Validation assumes live C objects: it cannot determine whether an arbitrary pointer denotes an allocation of the advertised type.
+The graph is immutable during a query, which also makes independent concurrent queries possible when their output objects are separate.
+
+The status contract has five values.
+\code{MC\_OK} means that parsing or a temporal-set operation completed.
+\code{MC\_SAFE} and \code{MC\_UNSAFE} belong to safety reachability.
+\code{MC\_INVALID} reports invalid input, and \code{MC\_LIMIT} reports capacity or query-budget exhaustion.
+Every non-unsafe safety result leaves an empty trace.
+Every unsuccessful CTL operation leaves a zero output set, but that zero is not a semantic answer until the caller has checked the status.
+The CLI maps safe, unsafe, invalid, and resource-limit outcomes to exit codes 0, 1, 2, and 3 respectively.
+
+\section{Define what a dead end means}
+\label{sec:ch48-totalization}
+
+A finite graph may contain a state with no successors, but the temporal operators below quantify over infinite paths.
+We resolve that mismatch with \term{totalization}: a state with no explicit successor has an implicit edge to itself.
+Existing edges are unchanged.
+The library computes this effective successor set on demand instead of mutating the graph.
+The chosen interpretation says that after execution stops, its final observation persists.
+
+This convention affects temporal formulas.
+At a dead end satisfying $p$, both $EX\,p$ and $EG\,p$ hold because the repeated final state is an infinite witness.
+At a dead end not satisfying $p$, neither holds.
+Safety reachability is unchanged: the extra self-loop cannot make a different state reachable.
+If termination or deadlock is itself an error, the model exporter must mark the corresponding states before totalization.
+A formula observing only the proposition labels cannot distinguish a supplied self-loop from an implicit one.
+The checker imposes no fairness assumption; a permitted cycle may repeat forever even if another transition is continuously available.
+
+\section{Return a shortest safety counterexample}
+\label{sec:ch48-bfs}
+
+Let $I$ be the initial-state set and $B$ the states whose proposition masks intersect the requested bad mask.
+The safety question is whether any state in $B$ is reachable from any state in $I$.
+Algorithm~\ref{alg:ch48-bfs} uses a multi-source breadth-first search.
+Every initial state enters the queue before exploration starts, so all of them have distance zero.
+Each newly discovered state receives exactly one parent, and each root is its own parent.
+
+\begin{algorithm}[htbp]
+  \caption{Budgeted safety search with a replayable shortest trace.}
+  \label{alg:ch48-bfs}
+  \begin{pseudocode}
+    \Require Valid graph, nonempty initial set $I$, bad set $B$, dequeue budget $L$
+    \Ensure Safe, unsafe with a shortest trace, or resource limit
+    \State $Q\gets$ initial states in increasing order; $D\gets I$; $v\gets0$
+    \ForAll{$s\in I$}
+      \State $\operatorname{parent}[s]\gets s$
+    \EndFor
+    \While{$Q$ is not empty}
+      \If{$v=L$}
+        \State \Return resource limit
+      \EndIf
+      \State $s\gets\operatorname{popFront}(Q)$; $v\gets v+1$
+      \If{$s\in B$}
+        \State Follow parents from $s$ to its root and reverse the sequence
+        \State \Return unsafe with that sequence
+      \EndIf
+      \ForAll{effective successors $t$ of $s$, in increasing order}
+        \If{$t\notin D$}
+          \State $D\gets D\cup\{t\}$; $\operatorname{parent}[t]\gets s$
+          \State Append $t$ to $Q$
+        \EndIf
+      \EndFor
+    \EndWhile
+    \State \Return safe
+  \end{pseudocode}
+\end{algorithm}
+
+The critical invariant is marking on enqueue, not on dequeue.
+Once a state is marked, no later edge appends it or changes its parent.
+The queue therefore contains at most $N$ entries, and parent chains cannot acquire cycles except the intentional root self-parent.
+Queue order is nondecreasing shortest distance from the initial set.
+The first dequeued bad state consequently gives a shortest counterexample in number of transitions.
+An initially bad state produces a one-state trace, representing zero transitions.
+Increasing-ID iteration makes equal-length choices reproducible, without claiming a preferred semantic explanation among several shortest failures.
+
+For the buggy cache model, the successive queue contents, retaining already examined entries, are
+\[
+  [0],\quad [0,1],\quad [0,1,2,4],\quad [0,1,2,4,3,5].
+\]
+Examining state 4 adds nothing because state 0 has already been discovered.
+The next examination reaches state 3.
+Its parent chain is $3,2,1,0$; reversing it returns $0,1,2,3$.
+The trace has three edges: publish, invalidate, and unchecked invocation.
+Notice that five dequeues were needed, because state 4 preceded state 3 in the queue.
+A budget measures work, not the length of the eventual witness.
+
+Listing~\ref{lst:ch48-bfs-core} includes the executed dequeue, error test, reconstruction, and discovery code.
+Trace replay checks that its first state is initial, each consecutive pair is an edge in the effective graph, and its last state is bad.
+The sequence contains state IDs rather than memory addresses or internal queue positions.
+It can be saved in a regression test and resolved against a stable model export.
+Because this graph has no transition labels or parallel-edge identities, replay identifies a state path, not a unique external action sequence in a richer system.
+
+\begin{listing}[htbp]
+  \inputminted[firstline=109,lastline=135]{c}{example-code/model-checker/checker.c}
+  \caption{The BFS core publishes a trace only when it has reached a bad state.}
+  \label{lst:ch48-bfs-core}
+\end{listing}
+
+The implementation scans all $N$ possible destinations for each examined state.
+Its worst-case safety-query cost is therefore $O(N^2)$, not the $O(N+M)$ cost of an adjacency-list BFS.
+The queue, parent array, and trace use $O(N)$ machine words; graph storage uses $N$ successor words and $N$ proposition words for $N\leq64$.
+A sparse-graph implementation can replace successor scans with adjacency lists while preserving the queue and parent invariants.
+This lab chooses a small bounded representation so that bounds checks and bit operations remain visible.
+
+\section{Build temporal queries from state sets}
+\label{sec:ch48-ctl}
+
+Safety asks whether an error can happen at any future point.
+Other useful questions ask whether an event can occur on the next step, whether a condition can be maintained until a goal is reached, or whether some execution can remain in a region forever.
+The lab implements the existential next, until, and globally operators of computation tree logic, abbreviated CTL, using the standard finite-state semantics described by Baier and Katoen~\cite{baier-2008-model-checking}.
+Each operand and result is a set of states.
+The operators are evaluated over all states, including those unreachable from the initial set.
+
+For state set $X$, define its existential predecessor set by
+\[
+  \operatorname{Pre}(X)
+  = \{s\mid\text{some effective successor of }s\text{ belongs to }X\}.
+\]
+The operator $EX\,p$ holds where at least one immediate successor satisfies $p$.
+Thus its satisfaction set is $\operatorname{Pre}(P)$ when $P$ is the satisfaction set of $p$.
+The implementation needs one scan of the successor words.
+
+The operator $E[p\ U\ q]$ requires a path with a finite position satisfying $q$, with $p$ holding at every earlier position.
+The endpoint need not satisfy $p$, and a current state satisfying $q$ is already a witness of length zero.
+Its least-fixpoint computation starts at $X_0=Q$ and iterates
+\[
+  X_{i+1}=Q\cup\bigl(P\cap\operatorname{Pre}(X_i)\bigr).
+\]
+Here $X_i$ contains states with witnesses of at most $i$ transitions.
+The sequence grows monotonically, and every strictly changing round adds at least one state.
+Starting from the empty set and applying the same transfer function is also correct, but spends an extra initial round installing $Q$.
+
+The operator $EG\,p$ requires an infinite path on which $p$ always holds.
+Its greatest-fixpoint computation starts at $Y_0=P$ and iterates
+\[
+  Y_{i+1}=P\cap\operatorname{Pre}(Y_i).
+\]
+Each round removes states that cannot stay in the current candidate region for another step.
+At convergence, every surviving state has a surviving successor.
+Repeatedly choosing such a successor produces an infinite path in $P$.
+Conversely, an infinite path entirely in $P$ cannot lose its states during this elimination, because each state on the path retains a qualifying successor.
+For a finite graph this also means that a qualifying path can reach a cycle entirely inside $P$.
+
+Listing~\ref{lst:ch48-ctl-core} is the complete temporal-operation entry point.
+The loop maintains a private approximation and writes the caller's result only after completion.
+EU and EG require at most $N$ changing rounds and one equality check, so $N+1$ is a sufficient budget.
+One predecessor operation costs $O(N)$ word operations in this representation, giving an $O(N^2)$ worst-case bound for either fixpoint and $O(N)$ for EX, including input validation.
+These bounds assume a machine word holding all states; extending the capacity requires a multiword bitset or a different graph representation and a revised cost analysis.
+
+\begin{listing}[htbp]
+  \inputminted[firstline=146,lastline=168]{c}{example-code/model-checker/checker.c}
+  \caption{One entry point implements EX and the ascending EU and descending EG iterations.}
+  \label{lst:ch48-ctl-core}
+\end{listing}
+
+On the buggy graph, $E[\mathit{true}\ U\ \mathit{bad}]$ grows through
+\[
+\begin{split}
+  \{3\}&\subset\{2,3\}\subset\{1,2,3\}\\
+         &\subset\{0,1,2,3\}\subset\{0,1,2,3,4,5\}.
+\end{split}
+\]
+A fifth sweep confirms equality with the final set.
+Four sweeps produce the same bitset internally but do not establish convergence in this implementation, so a four-round budget returns \code{MC\_LIMIT} with no published answer.
+In the repaired graph the starting set $\{3\}$ is already a fixpoint; one sweep confirms it.
+The repaired model still has a bad state, but no initial state can reach it.
+
+Boolean composition uses union, intersection, and complement relative to the universe of $N$ states.
+For example, the model satisfies a state formula with set $F$ exactly when $I\subseteq F$.
+Universal safety can be checked by testing
+\[
+  I\cap\llbracket E[\mathit{true}\ U\ \mathit{bad}]\rrbracket=\varnothing.
+\]
+In contrast, $EG\,\neg\mathit{bad}$ merely asserts the existence of an infinite safe path.
+It holds at state 0 even in the buggy model: the cycle $0\to1\to4\to0$ never enters stale code.
+Confusing existential survival with universal safety would therefore hide the bug.
+EX, EU, EG, and Boolean operations supply a basis for CTL state formulas, but the lab exposes an operator API rather than a formula-language parser.
+It does not implement general LTL checking, fairness constraints, or temporal witness extraction for EU and EG.
+
+\section{Integrate the checker into a compiler workflow}
+\label{sec:ch48-integration}
+
+The CLI takes a graph path and an optional maximum number of BFS dequeues.
+Its default budget is 64, sufficient to examine every state of any accepted graph.
+After a completed safety query, it also prints three CTL state sets using an independent $N+1$-round budget.
+From the repository root, the following commands build and run the failing example; the nonzero exit status is intentional.
+
+\begin{verbatim}
+gcc -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 \
+  example-code/model-checker/checker.c \
+  example-code/model-checker/main.c \
+  -o /tmp/opencode/model-checker/checker
+/tmp/opencode/model-checker/checker \
+  example-code/model-checker/stale.graph
+\end{verbatim}
+
+Create the output directory first, as shown in the lab README.
+The actual failing output is
+\begin{verbatim}
+unsafe
+trace: 0 1 2 3
+EX bad: 0x000000000000000c
+E[true U bad]: 0x000000000000003f
+EG !bad: 0x0000000000000037
+\end{verbatim}
+Running the same executable on \code{fixed.graph} returns exit status zero and prints
+\begin{verbatim}
+safe
+EX bad: 0x0000000000000008
+E[true U bad]: 0x0000000000000008
+EG !bad: 0x0000000000000037
+\end{verbatim}
+Mask \code{0x8} denotes state 3 alone, \code{0x3f} denotes all six states, and \code{0x37} denotes $\{0,1,2,4,5\}$.
+The unchanged EG answer is expected: the repair eliminates a bad choice without eliminating the existing infinite safe executions.
+These outputs are checked against the API's results by the lab tests.
+
+A compiler integration can export a pass-manager protocol in the same format: states record which analyses are valid, and bad states record a pass consuming invalidated data.
+A cache integration can instead generate the six-state abstraction from an explicit transition specification and keep a side table mapping IDs to protocol states and actions.
+For either integration, the exporter and abstraction are part of the verification boundary.
+A regression gate should preserve the graph, query parameters, and returned trace, and should distinguish all four CLI outcomes.
+Treating every nonzero exit code as a discovered compiler bug loses the difference between an invalid model, an incomplete query, and a real model counterexample.
+
+The fixed graph documents a protocol requirement: validity must be checked before entry.
+It does not prove that a concrete guard closes a concurrent invalidation race.
+If invalidation can happen between the guard and the jump, those events need separate states and interleavings.
+If an old code body may be reclaimed while a caller still holds its address, reclamation state must also appear.
+If the objective is correctness of reconstructed frames, the abstract state must retain the relevant values or invariants.
+Model checking becomes useful when the property, transition granularity, and correspondence to the runtime are reviewed together.
+
+\section{Test with a different algorithm}
+\label{sec:ch48-testing}
+
+A checker is particularly vulnerable to tests that merely reproduce its own recurrence.
+Comparing one EU fixpoint loop with a differently spelled EU fixpoint loop may preserve the same semantic error.
+The lab instead uses finite path enumeration and all-pairs distances as independent oracles.
+The test harness runs through every directed graph on one, two, and three labeled states, including all choices of explicit self-loops and missing successors.
+There are $2^1+2^4+2^9=530$ such graphs.
+
+For safety, every nonempty initial set is paired with every possible bad-state set.
+An independent Floyd--Warshall computation supplies distances between every pair of states.
+The oracle takes the minimum distance from an initial state to a bad state, then compares both the status and the returned trace length.
+Every unsafe trace is replayed edge by edge.
+This gives 28,868 safety queries per test run, including initially bad states, unreachable errors, multiple initial states, cycles, and dead ends.
+
+For EU, a recursive oracle searches simple paths, stopping successfully upon reaching $Q$ and requiring $P$ at all preceding states.
+Removing a repeated-state segment preserves an until witness, so this search is complete for the finite graphs under test.
+For EG, a separate recursive oracle searches paths with $N$ edges, all of whose states satisfy $P$.
+Such a path visits $N+1$ states and must repeat one; its repeated segment can be traversed forever.
+Conversely, any infinite $P$ path supplies such a prefix.
+EX is checked by scanning individual edges and destination membership.
+All operand sets are enumerated, including every ordered pair for EU, giving 41,360 CTL queries per run.
+
+Targeted tests supplement the tiny-graph enumeration.
+Twenty malformed streams exercise lexical errors, overflow, missing fields, illegal IDs, duplicate initial IDs, and trailing data.
+Additional tests exercise accepted duplicate edges, null arguments, invalid operator values, out-of-universe masks, and zeroed outputs after errors.
+A 64-state chain checks bit 63, a 63-edge trace, exact BFS and fixpoint budget boundaries, and \code{SIZE\_MAX} budgets.
+A complete 64-state graph is parsed with 64 initial states and all 4096 edge records.
+The two cache files are loaded through the real parser, and their safety outcomes and all six printed CTL sets are checked.
+
+The command
+\begin{verbatim}
+sh example-code/model-checker/test.sh
+\end{verbatim}
+was run with GCC 16.2.1 and Clang 22.1.8.
+Each compiler built the CLI and tests using \code{-std=c11 -Wall -Wextra -Wpedantic -Werror}, first at optimization level \code{-O2}, then with AddressSanitizer and UndefinedBehaviorSanitizer at \code{-O1} with debug information and frame pointers.
+All four configurations passed the oracle, boundary, model, and CLI checks; the sanitizer runs reported no errors.
+The runner writes executables and captured CLI output under \code{/tmp/opencode/model-checker}.
+These are executed tests, not promised future coverage.
+They are also finite evidence: the 64-state space was not exhaustively enumerated, stream I/O failures were not fault-injected, and the implementation has not been formally verified.
+
+\section{Limits and useful extensions}
+\label{sec:ch48-limits}
+
+The limit of 64 states is checked explicitly rather than hidden behind a shift or an overflowing allocation size.
+The universe helper handles $N=64$ separately, because shifting a 64-bit value by 64 is not a way to construct an all-ones mask in C.
+The parser bounds stored records, but does not impose a byte budget or a deadline on its input stream.
+Query budgets count BFS dequeues and CTL predecessor sweeps; they are deterministic work limits, not wall-clock limits.
+These distinctions belong in an API contract because callers may otherwise assume that a bounded graph implies bounded time spent waiting for input.
+
+Larger explicit-state checkers need a representation strategy before they need more temporal syntax.
+An adjacency-list graph supports sparse BFS in $O(N+M)$ time.
+Reverse edges and a worklist can propagate an EU frontier without rescanning every state each round.
+EG can be computed using strongly connected components in the subgraph induced by $P$, retaining states that reach a cycle inside that subgraph.
+These are algorithmic alternatives to the small bitset kernel, not claims about optimizations implemented here.
+
+Generating states on demand can avoid constructing unreachable parts of a model for reachability queries.
+Hash-consing state descriptions then becomes part of correctness: different concrete model states must not be merged merely because their hashes collide.
+Symbolic representations can compress some large sets but do not remove the need for precise transition and proposition semantics.
+Partial-order reduction requires conditions connecting the reduced interleavings to the properties being checked.
+Fairness adds obligations beyond accepting any reachable cycle.
+Each extension changes the verification argument, the output contract, or both; a larger checker should preserve the small lab as a reference oracle on bounded instances.
+
+\section{Exercises}
+\label{sec:ch48-exercises}
+
+Answers are in \code{example-code/model-checker/SOLUTIONS.md}.
+\begin{enumerate}
+  \item \label{ex:ch48-dead-end}
+    A graph contains only initial state 0 and no explicit edge.
+    Compute $EX\,p$, $EG\,p$, and $E[\mathit{true}\ U\ p]$ when $p$ holds at 0 and when it does not.
+    Explain how an exporter could preserve the ability to detect deadlock after totalization.
+  \item \label{ex:ch48-until-rounds}
+    Compute every EU approximation for the buggy cache graph with $P$ equal to all states and $Q=\{3\}$.
+    How many predecessor sweeps does the implementation need to return success?
+    What does a budget of four return, and what changes for the repaired graph?
+  \item \label{ex:ch48-existential-safety}
+    Exhibit an infinite safe execution of the buggy graph and a finite failing execution from the same initial state.
+    Give a set expression using EU that checks universal safety of all initial states.
+  \item \label{ex:ch48-multiple-roots}
+    Use four states with initial set $\{0,2\}$, edges $0\to1$, $1\to3$, and $2\to3$, and bad set $\{3\}$.
+    Work through the queue and parents, and give the shortest returned trace.
+    Explain why overwriting a parent on a second discovery would break the argument.
+  \item \label{ex:ch48-capacity}
+    For the chain $0\to1\to\cdots\to63$ with only state 63 bad, determine the smallest budgets that let BFS and $EU(\mathit{true},\mathit{bad})$ complete.
+    Repeat for $EG(\{0,\ldots,62\})$.
+    Justify the fixed queue and trace capacities without appealing to a successful test run.
+  \item \label{ex:ch48-refinement}
+    Refine the cache model so that checking an entry guard and entering code are separate transitions.
+    Describe an invalidation interleaving omitted by the coarse model.
+    State what additional runtime protocol must be modeled before claiming that the repair handles that interleaving.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch48-reading}
+
+Baier and Katoen~\cite{baier-2008-model-checking} develop transition-system semantics, temporal logics, and the algorithms that connect formulas to finite graphs.
+Huth and Ryan~\cite{huth-2004-logic} provide a useful bridge from logical specifications to practical model-checking computations and their correctness arguments.
+The \emph{Handbook of Model Checking}~\cite{clarke-2018-handbook} places explicit-state checking alongside symbolic techniques, abstraction, reduction, and other approaches needed when a model outgrows this lab's deliberately small representation.

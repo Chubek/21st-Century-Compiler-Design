@@ -1,0 +1,201 @@
+\chapter{Binary Lifting and Cross-Architecture Translation}
+\label{ch:binary-lifting}
+
+A linker produces bytes that a processor can execute, but a binary optimizer needs more than bytes.
+It needs explicit definitions, uses, control edges, memory effects, and instruction semantics.
+\term{Binary lifting} translates machine instructions into an IR suitable for analysis or further translation.
+It recovers an executable description of machine behavior, not the original source program.
+Names, types, loop structure, and source abstractions may be absent or ambiguous after compilation.
+
+The small lifter in this chapter handles three real x86 byte instructions.
+Its narrow scope makes every state update inspectable and enables comparison against hardware.
+The surrounding architecture discussion explains what a general lifter would additionally need for control flow, memory, exceptions, and translation to another ISA.
+
+\section{Choose the observable machine state}
+\label{sec:ch64-state}
+
+For the example, state contains a 64-bit \code{RAX} value and six arithmetic flags.
+Each instruction changes the low byte \code{AL}; the upper $56$ bits stay unchanged.
+The supported byte sequences are listed in Table~\ref{tab:ch64-subset}.
+Every instruction has length two, and unsupported opcodes or truncated immediates are rejected.
+Prefixes, memory operands, branches, and instruction-fetch faults are outside this executable subset.
+
+\begin{table}[htbp]
+\caption{The lifter accepts three fixed-form byte operations with distinct flag contracts.}
+\label{tab:ch64-subset}
+\centering
+\begin{tabular}{lll}
+\toprule
+Bytes & Operation & Arithmetic flags \\
+\midrule
+\code{B0 ib} & move immediate to AL & unchanged \\
+\code{04 ib} & add immediate to AL & all six computed \\
+\code{34 ib} & exclusive OR immediate with AL & AF unspecified; others computed \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The encoding and flag distinctions are documented in the instruction reference~\cite{cloutier-2026-x86}.
+In particular, XOR clears carry and overflow, computes sign, zero, and parity, and leaves auxiliary carry undefined.
+The model represents that last condition by an unspecified marker rather than choosing a fake architectural value.
+A later operation that observes an unspecified flag would need nondeterministic semantics or an explicit restriction.
+None of our accepted instructions reads that flag.
+
+For byte addition, let $a,b\in\{0,\ldots,255\}$ and $r=(a+b)\bmod256$.
+Carry is true when $a+b\ge256$; zero is true when $r=0$; sign is bit seven of $r$; parity is true when $r$ has an even number of set bits.
+Auxiliary carry records carry out of bit three.
+Signed overflow is true when the operands have the same sign bit and the result has the other sign bit.
+These predicates distinguish $255+1$ from $127+1$: the former has unsigned carry without signed overflow, and the latter has signed overflow without unsigned carry.
+
+\section{Lift writes into single-assignment values}
+\label{sec:ch64-lift}
+
+The lifter gives every new low-byte value a distinct name.
+It also retains the source byte offset for provenance.
+Algorithm~\ref{alg:ch64-lift} describes the straight-line conversion; flag updates are interpreted according to the lifted opcode's contract.
+For $n$ accepted instructions, decoding and row construction take $O(n)$ time and storage.
+Unlike a general x86 decoder, this one never guesses an instruction boundary.
+
+\begin{algorithm}[htbp]
+\caption{Lift the fixed two-byte AL instruction subset.}
+\label{alg:ch64-lift}
+\begin{pseudocode}
+\Require byte buffer, known entry at offset zero, accepted opcode profile
+\Ensure SSA value rows with original offsets, or explicit rejection
+\State $pc\gets0$; $current\gets$ entry low-byte value
+\While{$pc$ is below the buffer length}
+  \State reject unless opcode is accepted and one immediate byte remains
+  \State allocate fresh value name $v$
+  \State emit the opcode's byte operation with source $current$ and immediate
+  \State associate its flag contract and source offset $pc$
+  \State $current\gets v$; $pc\gets pc+2$
+\EndWhile
+\State return the lifted rows and final low-byte value
+\end{pseudocode}
+\end{algorithm}
+
+Start with \code{RAX=0x12345600} and execute bytes \code{B0 FF 04 01}.
+The first operation produces low byte $255$ without changing flags.
+The second produces low byte zero, carry one, zero one, sign zero, parity one, auxiliary carry one, and overflow zero.
+The final full register is \code{0x12345600}, because neither byte write clears the upper bits.
+Table~\ref{tab:ch64-flags} includes a second addition that exercises signed overflow.
+
+\begin{table}[htbp]
+\caption{Unsigned carry and signed overflow describe different properties of byte addition.}
+\label{tab:ch64-flags}
+\centering
+\begin{tabular}{rrrrrrrrr}
+\toprule
+$a$ & $b$ & $r$ & CF & PF & AF & ZF & SF & OF \\
+\midrule
+$255$ & $1$ & $0$ & $1$ & $1$ & $1$ & $1$ & $0$ & $0$ \\
+$127$ & $1$ & $128$ & $0$ & $0$ & $1$ & $0$ & $1$ & $1$ \\
+$128$ & $128$ & $0$ & $1$ & $1$ & $0$ & $1$ & $0$ & $1$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:ch64-register} shows the register update as a merge of unchanged high bits and a new low byte.
+A translator that treats every subregister write as a full-width assignment would lose the high bits.
+A translator that generalizes this byte rule to every x86 register width would also be wrong; width-specific behavior belongs in the machine semantics.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=14mm and 16mm]
+\node[basic block] (high) {old RAX bits 63..8};
+\node[basic block,right=of high] (low) {new AL bits 7..0};
+\node[basic block,below=of high] (merge) {merge unchanged high bits};
+\node[basic block,below=of merge] (out) {new full RAX};
+\draw[cfg edge] (high)--(merge); \draw[cfg edge] (low)--(merge); \draw[cfg edge] (merge)--(out);
+\end{tikzpicture}
+\caption{The lifted byte operation preserves register state outside its architectural write footprint.}
+\label{fig:ch64-register}
+\end{figure}
+
+\section{Recovered control flow has an evidence boundary}
+\label{sec:ch64-cfg}
+
+General binaries contain direct branches, indirect branches, calls, returns, embedded data, and sometimes code that changes after loading.
+A decoder can identify the instruction at a supplied address without proving that the address is reachable code.
+A control-flow recovery process must distinguish discovered successors from unknown successors.
+Dropping an unresolved indirect edge is not a conservative analysis.
+
+Algorithm~\ref{alg:ch64-discover} sketches a worklist for a fixed code image.
+It reports unresolved targets explicitly and assumes any indirect-target analysis it uses is sound for its stated environment.
+With a finite set of $N$ discovered instruction starts and $E$ supplied successor edges, graph bookkeeping is $O(N+E)$, excluding decoding, target analysis, and overlap handling.
+For variable-length ISAs, two entries can lead to overlapping instruction interpretations; a representation may preserve those interpretations or reject that input profile, but must not silently merge incompatible decodes.
+
+\begin{algorithm}[htbp]
+\caption{Discover control flow while retaining unresolved behavior.}
+\label{alg:ch64-discover}
+\begin{pseudocode}
+\Require immutable code image, trusted entry set, instruction semantics
+\Ensure discovered instruction graph and explicit unresolved exits
+\State initialize worklist with entries and an empty visited set
+\While{the worklist is nonempty}
+  \State remove address $a$; skip it if already visited
+  \State decode and lift at $a$, or record a decoding failure
+  \State record direct successors and soundly established indirect successors
+  \If{some possible successor remains unresolved}
+    \State retain an unknown exit with the required machine-state contract
+  \EndIf
+  \State enqueue unvisited known successors
+\EndWhile
+\end{pseudocode}
+\end{algorithm}
+
+Dynamic translation can resolve an indirect destination at runtime and dispatch to a translated block.
+Its cache key must include everything that affects decoding and semantics, such as code identity and execution mode.
+Self-modifying code requires invalidation or a stronger immutable-code assumption.
+Fault attribution and asynchronous observation may require mappings from translated instructions back to guest instruction boundaries.
+
+\section{Translate semantics, then lower to a host}
+\label{sec:ch64-cross-isa}
+
+A \term{cross-architecture translator} composes a guest decoder and semantic lifter with a host backend and runtime services.
+Figure~\ref{fig:ch64-bridge} makes the intermediate machine state explicit.
+The host need not have the same flags or register widths; it may compute guest flags as ordinary values and omit computations proved dead.
+The proof obligation is preservation of guest-visible behavior, not one host instruction per guest instruction.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=13mm]
+\node[basic block] (guest) {guest bytes and machine state};
+\node[basic block,below=of guest] (ir) {explicit semantic IR};
+\node[basic block,below=of ir] (host) {host instructions and runtime};
+\draw[cfg edge] (guest)--node[right,font=\small] {lift}(ir);
+\draw[cfg edge] (ir)--node[right,font=\small] {lower}(host);
+\end{tikzpicture}
+\caption{Cross-ISA translation composes two semantic boundaries and an environment model.}
+\label{fig:ch64-bridge}
+\end{figure}
+
+Memory ordering, endianness, alignment, atomicity, system calls, and ABI details can break a translator even when integer expressions are correct.
+An emulator may provide an entire guest environment, while a process translator may adapt selected operating-system interfaces.
+Neither scope follows automatically from choosing an IR.
+Binary optimization likewise needs to preserve live registers and flags at exits, even if no recovered source variable appears to use them.
+
+\section{Verification and exercises}
+\label{sec:ch64-exercises}
+
+The hardware oracle in \path{example-code/architecture-labs/flags.c} runs byte addition for all $65{,}536$ operand pairs and captures the six arithmetic flags.
+The Python tests compare those observations with the lifted evaluator, including preservation of high register bits.
+The oracle uses register-register addition to exercise the same arithmetic semantics; encoding acceptance is a separate decoder check.
+GCC and Clang builds, with and without address/undefined-behavior sanitizers, provide four configurations.
+This experiment does not validate a general decoder, a memory lifter, or a host code generator.
+
+\begin{enumerate}
+\item\label{ex:ch64-add} Compute all six modeled flags for $128+128$ and explain why both carry and overflow are set.
+\item\label{ex:ch64-partial} Starting with \code{RAX=0xABCD12}, execute \code{B0 07 04 09}.
+Give the final register and explain why the upper bytes survive.
+\item\label{ex:ch64-unknown} An indirect branch has two observed targets but no proof that they are exhaustive.
+Explain why a static optimizer cannot use those observations alone to delete the unknown exit.
+\item\label{ex:ch64-xor} Which flag cannot be compared to a fixed expected bit after XOR under the documented contract?
+Explain the difference between an unspecified result and preserving the previous value.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch64-reading}
+
+BAP provides a published architecture for binary analysis through lifted representations~\cite{brumley-2011-bap}.
+The instruction reference gives the encodings and state effects used in the small experiment~\cite{cloutier-2026-x86}.

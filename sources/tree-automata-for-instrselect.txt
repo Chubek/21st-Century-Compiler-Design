@@ -1,0 +1,1175 @@
+Tree Automata for Code Selection
+Christian Ferdinand
+Helmut Seidly
+Reinhard Wilhelm
+
+FB 14 { Informatik, Universitat des Saarlandes
+Saarbrucken Germany
+
+Abstract
+
+We deal with the generation of code selectors in compiler backends. The
+fundamental concepts are systematically derived from the theory of regular tree grammars and nite tree automata. We use this general approach
+to construct algorithms that generalize and improve existing methods.
+
+1 Introduction
+
+A code generator for a compiler is applied to an intermediate representation
+(IR ) of the input program that has been computed during preceding phases
+of compilation. This intermediate representation can be viewed as code for an
+abstract machine. The task of code generation is to translate this code into an
+ecient sequence of instructions for a concrete machine.
+Besides register allocation and instruction scheduling (for processors with
+pipelined architectures), code selection, i.e., the selection of instructions, is
+one subtask of code generation. It is especially important for CISC (C omplex
+I nstruction S et C omputer) architectures where there are usually many possibilities to generate code for the same piece of program. However, with the
+increasing complexity of RISC architectures the problem reappears.
+
+Example 1.1 Consider the simplest member of the MC680x0 family, namely
+
+the MC68000. The instruction
+MOVE.B dist(A1, D1.W), D5
+loads one byte into the lowest quarter of data register D5. The address of the
+operand is determined by adding the lower half of the contents of D1 together
+with the 8 bit constant dist to the contents of base register A1. This addressing
+mode is called \address register indirect with index and 8 bit displacement". If
+the costs of instructions are counted in terms of execution time, i.e., the number
+of necessary processor cycles, then this instruction has cost 14. An alternative
+code sequence without indexed addressing and displacement is:
+ Funded by the ESPRIT Project #5399 (COMPARE)
+y Funded by DFG SFB #124 VLSI-Design and Parallelism
+
+ADD.W #dist, A1 cost: 16
+ADD.W D1, A1
+cost: 8
+MOVE.B (A1), D5 cost: 8
+with total cost 32
+
+Another possibility is:
+
+ADD.W D1, A1
+cost: 8
+MOVE.B dist(A1), D5 cost: 12
+with total cost 20
+
+This example shows the necessity of an intelligent code selection algorithm
+for CISC architectures.
+Note, however, that the two alternative code sequences above are equivalent only with respect to the storage and to the result register D5. They are
+not equivalent with respect to the condition codes and register A1! The code
+selector has to guarantee that these alternatives are valid in a given context.
+2
+We assume, as usual, that there is some canonical way to translate the
+control structure of programs, that storage allocation and storage layout of data
+structures has been determined before, and that access to data are represented
+appropriately in the IR. What is left to the code selector is the generation of
+code for expression trees.
+The use of code selector generators signi cantly simpli es the development
+of code generators for new target architectures.
+The input of a code selector generator is some kind of machine language
+description. We expect the IR to be a tree form (at least conceptually). One
+possibility to describe machine instructions is by rules of a regular tree grammar. The right hand side of a rule describes the \e ect" of the instruction (in
+terms of IR operators). The terminals denote (sub-)operations that are executed by the instruction. Nonterminals denote locations or resource classes,
+e.g., di erent types of registers. The left hand side nonterminal of a rule describes where (i.e., in which resource class) the result of the instruction will be
+stored.
+Such a machine grammar must generate all possible IR trees of expressions.
+A derivation tree for an IR tree describes one possibility to generate code for
+the corresponding expression. In general (especially for CISC processors), the
+machine grammar is ambiguous. In this case several derivation trees may exist
+for the same expression corresponding to several possible instruction sequences.
+To allow for a selection of an ecient instruction sequence one annotates the
+rules of the grammar with costs that, e.g., give the number of machine cycles
+to execute the instruction. The goal is to pick the minimal cost derivation tree.
+This corresponds to a locally optimal instruction sequence. However, there are
+processors (e.g., Motorola 68020) for which the number of necessary machine
+cycles cannot precisely be predicted since the execution time depends on the
+runtime context. Here, we have to use approximations.
+The number of combinations of instructions, addressing modes and word
+lengths of customary CISC processors is rather large (in the order of 1000). To
+avoid the introduction of distinct rules and costs for all combinations one splits
+the rules for instructions into operator rules, rules for addressing modes and
+lengths of operands.
+
+indir
+DREG
+
+-
+
+byte
+plus
+bb
+
+
+b
+
+plus
+wconst
+,
+@
+@@
+,,
+
+AREG
+
+word
+
+DREG
+
+DREG
+
+! indir (byte (plus (plus (AREG ; word (DREG )); wconst )))
+
+Figure 1: Instruction of example 1.1. Nonterminals are in uppercase. Terminals
+are in lowercase.
+To enlarge the applicability of code selection one can allow jump or assignment operators at the root node of a tree. Jumps or assignments do not return
+a \result" in the above sense. Therefore, rules for such instructions contain a
+dummy nonterminal as left hand sides. This nonterminal does not occur in the
+right hand sides of any of the rules.
+
+2 Comparison to Related Work
+Ripken [26] was the rst to suggest a machine description language for processor
+architectures from which a code generator should be generated. Since the
+necessary tree parsing algorithms were not available Glanville and Graham [11,
+12] proposed a linearization of the intermediate language to apply LALR parser
+techniques to code selection. This idea was further developed and brought to
+applicability by Henry [14]. Other approaches combined ecient algorithms
+for pattern matching in trees [18, 17, 3, 20] with dynamic programming to
+determine locally optimal instruction sequences [1, 15, 27] or extended the tree
+pattern matchers to allow for a direct selection of locally optimal instruction
+sequences [24, 16].
+In a sequence of publications Giegerich and Schmal [10, 9] try to develop
+a uni ed framework for the two di erent approaches of tree pattern matching
+and tree parsing. The problem of code selection is reduced to determining the
+inverse of a \derivor", i.e., a tree homomorphism from a target algebra to an
+IR-algebra.
+Pelegri-Llopart [23] and Emmelmann [6] use (restricted versions of) term
+rewriting systems as speci cation tools for their generators. These systems al-
+
+low for more convenient machine descriptions. E.g., commutativity of operators
+can be expressed easily.
+Most of these works do not really exploit the theoretically well known connections between algorithms for tree pattern matching and tree parsing on the
+one side and nite tree automata on the other. A good overview about the
+classical results on tree automata can be found in [8, 21]. Without explicitly
+referring to code selection Kron in [18] anticipates many of today's techniques
+for tree pattern matching.
+For simplicity, we restrict ourselves to machine descriptions by means of
+regular tree grammars. A compilation of ground term rewriting systems or
+other restricted classes of rewrite systems to tree automata is possible as well
+(see [23, 4, 6]).
+
+3 Tree Pattern Matching
+
+A ranked alphabet is a nite set  of operators1 together with a ranking function
+ :  ! N0 . We write k for fa 2  j (a) = kg. The homogeneous tree
+language over , T is the smallest set T such that
+ 0  T;
+ If t1; : : :; tn are in T and a 2 n then a(t1 ; : : :; tn) 2 T.
+As usual, nodes or occurrences in a tree are denoted by addresses in N . The
+set O(t) of nodes
+S of a tree t = a(t1; : : :; tk) is inductively de ned by:
+O(t) := fg[ kj=1 j:O(tj ). The subtree t=n of t at node n is de ned by t= := t
+and t=n := tj =n0 if t = a(t1; : : :; tk ) and n = j:n0.
+Assume V is a set of variables of rank 0. A member of T (V ) := T[V is
+called a pattern over . A pattern is called linear if no variable in it occurs
+more than once.
+Example 3.1 Let  = fa; cons ; nil g with (a) = (nil ) = 0; (cons ) = 2.
+Trees over  are, e.g., a, cons (nil ; nil ); cons (cons (a; nil ); nil ).
+Let V = fX g: Then, X; cons (nil ; X), and cons (X; nil ) are patterns over .
+2
+A substitution is a map  : V ! T (V ).  is extended to a map  :
+T (V ) ! T (V ) by t := x if t = x 2 V and t := a(t1 ; : : :; tk ) if t =
+a(t1 ; : : :; tk ).2 We also write t = t[t1nx1; : : :; tk nxk ] if the variables occurring
+in t are from fx1; : : :; xk g and xj  = tj for all j.
+A pattern  2 T (V ) with variables from fx1 ; : : :; xk g matches a tree t if
+there are trees t1 ; : : :; tk in T such that t = [t1nx1; : : : : : :; tk nxk ].
+
+De nition 3.1 (The Tree Pattern Matching Problem)
+
+An instance of the tree pattern matching problem consists of a nite set of
+patterns T = f1 ; : : :; k g  T (V ) together with an input tree t 2 T . The
+solution of the tree pattern matching problem for this instance is the set of
+all pairs (n; i) such that pattern i matches t=n. An algorithm that for every
+1
+2
+
+in functional languages also called constructors.
+Traditionally, the application of a substitution  to a pattern t is written t.
+
+input tree t 2 T returns the solution of the tree pattern matching problem
+for (T; t) is called a tree pattern matcher for T. An algorithm that on input
+of a pattern set T returns a tree pattern matcher for T is called a tree pattern
+matcher generator .
+2
+Example 3.2 Assume 1 = cons (X; nil ) and 2 = cons (a; X) are patterns,
+and t = cons (cons (a; nil ); nil ) is an input tree. The solution of the instance
+(f1; 2 g; t) of the pattern matching problem is the set f("; 1); (1; 1); (1; 2)g:
+2
+In fact, we are interested in constructing ecient tree pattern matcher generators. The pattern matchers generated by the following algorithms will only work
+for linear patterns. We have two possibilities to generate tree pattern matchers for sets of non-linear patterns. First, we can introduce tests for equality of
+subtrees whenever needed. This may not be ecient since the pattern matcher
+may have to visit the same subtree several times. The second alternative is
+to let the tree pattern matcher execute all possible equality tests in advance.
+This is achieved by representing the input tree as a directed acyclic graph that
+contains exactly one node for each set of equal subtrees. This subtree graph
+can be computed in linear time [5].
+
+4 Tree Parsing
+
+A regular tree grammar G is a triple (N; ; P) where
+ N is a nite set of nonterminals ,
+  is the ranked alphabet of terminals , 3
+ P is a nite set of rules of the form X ! s with X 2 N and s 2 T[N .
+Let p : X ! s be a rule of P. p is called a chain rule if s 2 N, and a
+non-chain rule otherwise. p is of type (X1 ; : : :; Xk ) ! X if the j-th occurrence
+of a nonterminal in s is Xj . For a right side s, we de ne the pattern s~ as the
+pattern in T (fx1; : : :; xkg) that one obtains from s by replacing, for all j, the
+j-th occurrence of a nonterminal by the variable xj .
+A X {derivation tree for a tree t 2 T[N is a tree 2 TP [N satisfying the
+following conditions:
+ If 2 N then = X = t.
+ If 62 N then = p( 1 ; : : :; k ) for some rule p : X ! s 2 P of
+type (X1 ; : : :; Xk ) ! X such that t = s~[t1nx1; : : :; tk nxk ] and j are
+Xj {derivation trees for the trees tj .
+Finally, we de ne the derivation head , head( ), of a X{derivation tree .
+ If = X then head( ) := X.
+ If = p( 1 ; : : :; k ) and p is a non-chain rule then head( ) := p.
+3
+
+The notion \terminals" was chosen in analogy to context free word grammars.
+
+ If = p( 1) and p is a chain rule then head( ) := p  head( 1).
+The derivation head of a X{derivation tree is also called X{derivation head.
+Thus, the derivation head of describes the \upper" part of , which
+consists of a sequence of applications of chain rules followed by the rst nonchain rule or a nonterminal.
+For X 2 N we de ne the language of G relative to X as L(G; X) := ft 2
+T j 9 2 TP [N : is a X{derivation tree for tg.
+
+Example 4.1 Let G1 be the regular tree grammar (N1; ; P1);
+ = fa; cons ; nil g with (a) = (nil ) = 0; (cons ) = 2, N1 = fE; S g and
+P1 = f S ! nil,
+S ! cons (E; S);
+E ! ag
+L(G1; S) is the set of linear lists of a's including the empty list, i.e., L(G1; S) =
+fnil ; cons (a; nil ); cons (a; cons (a; nil )); : : :g:
+
+2
+
+Example 4.2 Let Gm be the regular tree grammar (Nm ; ; Pm);
+ = fconst ; m ; plus ; REG g with (const ) = 0; (m ) = 1; (plus ) = 2,
+Nm = fREG g and
+Pm = f addmc : REG ! plus (m (const ); REG );
+addm : REG ! plus (m (REG ); REG );
+add :
+REG ! plus (REG ; REG );
+ldmc : REG ! m (const );
+ldm : REG ! m (REG );
+ldc :
+REG ! const ;
+ld :
+REG ! REG g
+
+Pm describes a subset of an instruction set of a simple processor. The rules are
+labeled with the names of the corresponding instructions.
+The rst three rules represent instructions for addition that add
+ the contents of a storage cell whose address is given by a constant
+ the contents of a storage cell whose address resides in a register
+ the contents of a register itself
+to the contents of a register and store the resulting value into a register.
+The remaining rules describe load instructions that load
+ the contents of a storage cell whose address is given by a constant
+ the contents of a storage cell whose address is given by the contents of a
+register
+ a constant
+ the contents of a register
+into a register.
+2
+
+De nition 4.1 (The Tree Parsing Problem)
+
+An instance of the tree parsing problem consists of a regular tree grammar G
+together with a nonterminal X and an input tree t. The solution of the tree
+parsing problem for this instance is (a representation of) the set of all X{
+derivation trees of G for t. A tree parser for G is an algorithm that, for every
+tree t, returns the solution of the instance (G; t) of the tree parsing problem.
+A tree parser generator is an algorithm that, for every regular tree grammar
+G, returns a tree parser for G.
+2
+Similar to regular word languages, the family of languages generated by regular tree grammars (relative to some nonterminal) has particularly nice properties. For example, it is closed under intersection and complementation. Also,
+emptyness can be decided in polynomial time.
+In the following we show how nite tree automata can be used to implement
+both tree pattern matchers and tree parsers.
+
+5 Finite Tree Automata
+
+A nite tree automaton A is a 4-tuple A = (Q; ; ; QF ) where
+ Q is a nite set of states ;
+ QF  Q is the set of nal or accepting states;
+  is the nite ranked input alphabet; and
+   Sj 0 Q  j  Qj is the set of transitions .
+The automaton A is called deterministic if for every a 2 k and every sequence
+q1; : : :; qk of states there is at most one transition (q; a; q1 : : :qk ) 2 . In this
+case,  can be written as a partial function
+  : Sj 0 j  Qj ! Q
+Given an input tree t the automaton A traverses t. At every visited node,
+A changes its state according to the transition from  chosen at this node.
+If A is deterministic then there is at most one possible choice at every node,
+otherwise there may be several. Technically, we describe such a computation by
+an annotation of the input tree. For this, we introduce an extended alphabet
+  Q whose operators now consist of pairs of operators from  and states of
+A.
+So, let   Q be the ranked alphabet fha; qi j a 2 ; q 2 Qg where
+ha; qi has the same rank as a. A q{computation  of the nite tree automaton A on the input tree t = a(t1 ; : : :; tm ) is inductively de ned as a
+tree  = ha; qi(1; : : :; m) 2 TQ where j are qj {computations for the
+subtrees tj , j = 1; : : :; m, for some states qj such that (q; a; q1 : : :qm ) is a transition from .  is called accepting , if q 2 QF . The language L(A) accepted
+by A consists of all trees for which an accepting computation of A exists. A
+transition  2  is called super uous if it does not occur in any computation
+of A. Clearly, super uous transitions can be removed from  without changing
+the \behavior" of A.
+
+In the literature a distinction is sometimes made between bottom-up tree
+automata and top-down tree automata which in the nondeterministic case are
+equivalent [8]. According to our de nition of a computation the direction is
+irrelevant. In informal descriptions we allow ourselves any of the two views to
+support intuition.
+If A is deterministic then at most one computation exists for every input
+tree. We can then extend the partial function  to a partial function   : T !
+Q by:   (t) = (a;   (t1) : : :  (tk )) whenever t = a(t1 ; : : :; tk ). For simplicity,
+we also denote   by . Induction on the structure of t shows that   (t) is
+de ned and equals q if and only if a q{computation of A for t exists.
+As a rst application consider the tree pattern matching problem. Let  be
+a linear pattern in T (V ). We want to construct a (possibly non-deterministic)
+nite tree automaton A that detects whether or not  matches the given input tree. Intuitively, A works as follows. Outside of pattern , A is in
+an unspeci c state ?; whereas inside of pattern  the state memorizes the
+subpattern already traversed. Since we are not interested in the precise numbering of the variables we replace all variables by ? (\everything is matched
+by a variable"). Hence in the sequel, we assume that  2 T[f?g . Then
+we de ne A := (Q ; ;  ; Q;F ) where Q := fs j s subpattern of  g [ f?g,
+Q;F := f g, and  is de ned as follows.
+ (?; a; ? : : : ?) 2  for all a 2 ;
+ If s 2 Q and s = a(s1 ; : : :; sk ) then (s; a; s1 : : :sk ) 2 .
+Obviously, we have:
+1. For every tree t there is a ?{computation;
+2. For a tree t there is a {computation if and only if  matches t.
+The example easily generalizes to the case of a set T = f1; : : :; ng of linear
+patterns of which we again w.l.o.g. assume that all occurrences of variables are
+replaced with S
+?. As the set of states for the nite tree automaton AT we now
+choose QT := nj=1 Q with QT;F := T. The de nition of the set of transitions
+does not change.
+If we want to determine which patterns of T match an input tree t we just
+have to compute the set of all nal states of accepting computations of AT for
+t. A method to determine this set can be obtained from AT by means of the
+subset construction for nite tree automata.
+j
+
+De nition 5.1 (Subset Construction I)
+
+Let A = (Q; ; ; QF ) be a nite tree automaton. The corresponding subset
+automaton is the deterministic nite tree automaton P(A) = (Q1 ; ; 1; Q1;F )
+with
+ Q1 := 2Q is the power set of Q;
+ Q1;F := fB  Q j B \ QF 6= ;g;
+ 1 is the (total) function with
+1 (a; B1 : : :Bk ) = fq 2 Q j 9q1 2 B1 ; : : :; qk 2 Bk : (q; a; q1 : : :qk ) 2  g.
+2
+
+By induction on the structure of an input tree one nds:
+Lemma 5.1 Let t 2 T. Then 1 (t) is the set of all states q 2 Q for which
+there is a q{computation of A for t. Especially, L(A) = L(P(A)).
+2
+The subset construction provides an algorithm to generate tree pattern
+matchers. The generation proceeds in two stages. Given pattern set T, we rst
+construct the nite tree automaton AT . Then we apply the subset construction
+to obtain P(AT ) = (Q; ; ; QF ). Whenever an input tree t is given, the set
+(t) \ T consists precisely of all patterns from T that match t.
+Example 5.1 Let T = f1; 2g with
+1 = b(a(a(X1 ; X2); X3 ); X4) and 2 = b(X1 ; c(X2; c(X3 ; X4 ))).
+Then, AT = (QT ; ; T ; QT;F ) where
+QT = f?, a(?; ?), a(a(?; ?); ?), b(a(a(?; ?); ?); ?),
+2
+c(?; ?),
+c(?; c(?; ?)),
+b(?; c(?; c(?; ?))) g.
+AT needs 7 states. If we apply Construction I we nd that for our example (as for most practical cases) this construction is hopelessly inecient: the
+generated automaton for the given two small (!) patterns has already 27 = 128
+states. It can be shown that in the worst case exponentially many states are
+inevitable. However, often most of the states introduced by Construction I are
+super uous. For instance in our example the set fa(?; ?); b(?;c(?;c(?; ?)))g
+is generated which consists of \contradicting" patterns, i.e., patterns that cannot match the same tree. Therefore, we present a \cheaper" Construction II,
+which from the beginning generates only such subsets of states that actually
+occur in computations of the subset automaton.
+
+De nition 5.2 (Subset Construction II)
+
+Let A = (Q; ; ; QF ) be a nite tree automaton. The corresponding (reduced) subset automaton is the deterministic nite tree automaton Pr (A) =
+(Qr ; ; r ; Qr;F ) with Qr;F := fB 2 Qr j B \ QFS6= ;g whose sets of states
+and
+S
+(
+n
+)
+transitions are iteratively determined by Qr := n0 Qr and r := n0 r(n)
+where
+(0)
+ Q(0)
+r := ;; r := ;;
+ Assume n > 0. For a 2 k and B1 ; : : :; Bk 2 Q(rn?1) let B := fq 2 Q j
+9q1 2 B1 ; : : :; qk 2 Bk : (q; a; q1 : : :qk ) 2  g. If B 6= ; then B 2 Qr(n) and
+(B; a; B1 : : :Bk ) 2 r(n) .
+2
+Since for all n, Qr(n)  Qr(n+1) and r(n)  r(n+1) iteration can be terminated
+as soon as no new states are generated. Therefore, Qr = Qr(n) and r = r(n) for
+the rst n with Qr(n) = Qr(n+1) . Consequently, the algorithm terminates after
+at most 2jQj iterations.
+By induction on the structure of an input tree one nds:
+
+Lemma 5.2
+
+1. For every t 2 T the following holds.
+ If r (t) is unde ned then no computation of A for t exists.
+ If r (t) is de ned then r (t) is the set of all states q for which a
+q{computation of A for t exists.
+2. L(A) = L(Pr (A)).
+3. For every state B 2 Qr , a tree t exists such that r (t) = B .
+2
+
+Consider the nite tree automaton AT . We nd that no longer all subsets
+of subpatterns are generated as new states but only subsets that are maximally
+compatible . Here, a set S  T of patterns is called compatible if a tree t exists
+that is matched by every pattern in S. S is called maximally compatible if
+there is a tree that is matched by all patterns from S and not matched by any
+of the patterns in T nS.
+The set of states Qr of the reduced subset automaton for AT consists exactly
+of the maximally compatible subsets S of subpatterns. Thus, we obtain for our
+example:
+Qr = f f?g;
+f?; b(a(a(?; ?); ?); ?); b(?; c(?; c(?; ?)))g,
+f?; a(?; ?)g; f?; a(?; ?); a(a(?; ?); ?)g; f?; b(a(a(?; ?); ?); ?)g;
+f?; c(?; ?)g; f?; c(?; ?); c(?; c(?; ?))g; f?; b(?; c(?; c(?; ?)))gg
+The reduced subset automaton possesses eight states! Compared with 128
+states, according to Construction I, this is a signi cant improvement.
+
+6 How to Generate Tree Parsers
+
+Let G = (N; ; P) be a regular tree grammar and X 2 N. To obtain a
+description of all possible X{derivation trees for a given input tree, we proceed as in the case of tree pattern matching. First, we construct a (possibly
+non-deterministic) nite tree automaton AG;X whose computations represent
+derivation trees of G. Then, we apply Subset Construction II to AG;X . This
+automaton is the basis of our tree parser.
+Intuitively, the nite tree automaton AG;X operates on input t 62 N as
+follows. At the root, AG;X guesses
+an X{derivation head p1 : : :pk p of an X{
+derivation tree for t with p : X 0 ! s. Then, AG;X veri es that s in fact
+\ ts" i.e., that s~ matches t. If during veri cation, AG;X hits a node where
+the right hand side s contains a nonterminal Xj , then AG;X again guesses
+an Xj {derivation head and so on. Formally, we therefore de ne AG;X =
+(QG ; ; G ; fX g) where QG = N [ fs0 j 9X ! s 2 P with s0 subpattern of sg.
+G consists of two components: the rst one is responsible for the veri cation
+of the right hand sides whereas the second one performs the guesses. We de ne:
+G := (f(s; a; s1 : : :sk ) j s = a(s1 ; : : :; sk ) 2 QG g) [
+(f(X; s; ) j s 2  and 9X{derivation tree for sg [
+f(X; a; s1 : : :sk ) j 9X 0 ! s 2 P : 9X{derivation tree for X 0
+and s = a(s1 ; : : :; sk )g)
+It can be shown that several of the tree parsers described in the literature
+can be obtained from AG;X as de ned above by means of Subset Construction
+
+II. However, taking a closer look at the de nition one nds that G contains
+several super uous transitions! The automaton also allows (s; a; s1 : : :sk ) if
+s is a right hand side but itself is not a proper subpattern of another right
+hand side. Obviously, such transitions cannot be used by any X{computation.
+Therefore, we de ne instead:
+G := f(s; a; s1 : : :sk ) j s = a(s1 ; : : :; sk ) is a proper subpattern of a right
+hand sideg [
+f(X; s; ) j s 2  and 09X{derivation tree for sg [
+f(X; a; s1 : : :sk ) j 9X ! s 2 P : 9X{derivation tree for X 0
+and s = a(s1 ; : : :; sk )g
+
+Example 6.1 Let Gm be the grammar from example 4.2. The non-
+
+deterministic automaton A = (Q; ; ; QF ) for Gm has the set of states
+Q = fconst; REG; m(const); m(REG)g
+and the set of transitions:
+ = f (const; const; )
+(REG; const; )
+(REG; REG; )
+(m(const); m; const)
+(REG; m; const)
+(m(REG); m; REG)
+(REG; m; REG)
+(REG; plus; m(const) REG)
+(REG; plus; m(REG) REG)
+(REG; plus; REG REG)g
+The reduced subset automaton Ar = (Qr ; ; r ; QF;r ) for A has the set of
+states Qr = fq1; q2; q3; q4g where
+q1 = fREG g
+q2 = fconst ; REG g
+q3 = fm (REG ); REG g
+q4 = fm (const ); REG ; m (REG )g
+We have:
+
+Lemma 6.1 Let G be a regular tree grammar and t an input tree.
+ A X {derivation tree of G exists for t if and only if a X {computation of
+
+AG;X exists for t.
+Especially, L(G; X) = L(AG;X ).
+ Let A = (Q; ;0; QF ) be the
+(reduced) subset automaton for AG;X . Then
+(t) \ N = fX 2 N j 9X 0 {derivation tree for tg.
+2
+
+It is easy to reconstruct the X{derivation trees of G for a given input tree
+t from the X{computations of AG;X for t.4 Hence, the tree parsing problem
+4 However, observe that the number of X {computations for t is always nite even if the
+number of X {derivationtrees may be in nite. This is due to the fact that the set of derivation
+heads corresponding to a guessing transition may form an in nite regular set.
+
+for a regular tree grammar G can be reduced to the problem of determining all
+accepting computations of a nite tree automaton A for a given input tree.
+Let A = (Q; ; ; QF ) be a nite tree automaton and Ar = (Qr ; ; r ; Qr;F )
+the corresponding (reduced) subset automaton. The following algorithm nondeterministically traverses a q{computation of a tree t, given a B{computation
+of Ar for t. A corresponding deterministic algorithm, enumerating all qcomputations, can be derived by systematically making all possible choices.
+Let  = (B; a; B1 : : :Bk ) 2 r and q 2 B. De ne
+()q := f(q; a; q1 : : :qk ) 2  j q1 2 B1 ; : : :; qk 2 Bk g
+()q denotes the set of transitions of A corresponding to  with q as
+successor state.
+Assume  = ha; B i(1 ; : : :; k) is the B{computation of Ar for t. The algorithm traverses  in pre-order. Let  be the transition chosen at the root of .
+The algorithm selects a transition (q; a; q1 : : :qk ) 2 ()q . Then, recursively qj {
+computations j , j = 1; : : :; k, are determined from the Bj {computations j .
+Finally, the algorithm returns ha; qi( 1 ; : : :; k). Di erent choices of transitions
+correspond to di erent derivation trees.
+
+7 Application to Code Selection
+We would like to apply our tree parser generator to the code selection problem.
+In this setting we have to select the \best" derivation tree from the possibly
+huge set of all derivation trees. As for the generation of tree parsers, we proceed
+in three steps. We assume that the rules of the grammar G are annotated with
+cost functions that describe the \costs" of the corresponding instruction. We
+translate these cost functions into cost functions for the transitions of the tree
+automaton AG;X . Finally, we show how a cheapest computation of AG;X can
+be determined from the computation of the subset automaton for AG;X .
+Hence, assume that for every rule p of type (X1 ; : : :; Xk ) ! X we are given
+a k-ary function C(p) : N0k ! N0 . C can be extended to a function that maps
+every derivation tree to costs C( ) 2 N0. If = X 2 N then C( ) := 0.
+If = p( 1 ; : : :; k) then C( ) := C(p)C( 1) : : :C( k ), i.e., we apply the
+function C(p) to the already computed values C( 1 ); : : :; C( k ).
+Analogously, we can attach cost functions to transitions of nite tree automata and use them to compute the costs of computations.
+A cost measure C is called monotone or additive if C(p) is monotone or of
+the form C(p) = cp + x1 +    + xk ; cp 2 N0 ; respectively, for all p 2 P. Cost
+measures that are used in practice are usually additive. Examples are cost
+measures that compute the number of necessary processor cycles5 , the number
+of referenced memory cells, or the number of the operands of an instruction.
+A cost measure that is monotone but not additive is given by CR, which computes the minimal number of registers necessary to evaluate an expression. The
+advantage of additive cost measures (even if they approximate \reality" in complex processor architectures rather roughly) is that they are easy to implement
+and maintain.
+5
+
+This measure is not additive for all machines (e.g., Motorola 68020).
+
+A simple cost measure is C] which maps every chain rule p to the cost
+function C] (p) = x1 and every non-chain rule p of type (X1 ; : : :; Xk ) ! X to
+the cost function C] (p) = 1 + x1 +    + xk . Then for every derivation tree ,
+C] ( ) evaluates to the number of occurrences of non-chain rules in .
+We now translate the cost annotation C of the grammar G into a cost
+annotation C  of the corresponding tree automaton AG;X for some nonterminal
+X of G. The proposed constructions assume an additive cost measure. In this
+case, we can represent the cost function of every rule by a cost in N0 . Hence
+in the sequel we consider C as a function from P ! N0 . Then we de ne C  as
+follows.
+ If  = (X; a; ) for a 2  then C  () is the minimal cost of a X{derivation
+tree for a.
+ If  = (s; a; s1 : : :sk ) with s = a(s1 ; : : :; sk ) then C  () := 0.
+ If  = (X; a; s10 : : :sk ) then C  () is the minimum of the values ( +C(p))
+for rules p : X ! a(s1 ; : : :; sk ) and minimal cost of a X{derivation tree
+for X 0 .
+By this de nition, the cost C  () of a X{computation  coincides with the
+minimal cost of a X{derivation tree represented by .
+More generally, assume A = (Q; ; ; QF ) is a nite tree automaton and C :
+ ! N0 is an additive cost measure. Let Ar = (Qr ; ; r ; Qr;F ) be the (reduced)
+subset automaton for A. We modify the above algorithm enumerating the
+computations of A to return a cheapest computation of A only. The idea
+is to provide every choice point of the algorithm with information about an
+optimal choice. Assume  is a B{computation of the subset automaton Ar
+for some input tree t. To  we attach two tuples C() = hC()q iq2B and
+D() = hD()q iq2B where C()q contains the cost of a cheapest q{computation
+for t and D()q the transition selected at the root of a q{computation with cost
+C()q . The tuples C(=n) and D(=n) for all nodes n of  can be computed
+during a post-order traversal of .
+Now, the modi ed algorithm traverses the computation  of Ar for t in preorder. At every node n it selects the corresponding component from D(=n).
+Thus, it returns a q{computation of A for t with minimal costs.
+Computing all the tuples of costs can be rather expensive. Therefore,
+Pelegri{Llopart succeeded to incorporate the cost computations into the state
+transitions themselves [23, 24]. He observed that for usual machine grammars Gm = (Nm ; ; Pm), the di erences of the minimal costs of X{derivation
+trees and X 0 {derivation trees for the same tree t are bounded by some constant. This is due to the presence of MOVE instructions in most physical
+machines that introduce chain rules between (almost) all nonterminals [24].
+This is the reason why it suces to consider cost di erences instead of total costs, when constructing a cheapest computation of the non-deterministic
+automaton A = (Q; ; ; QF ) from the computation of the subset automaton.
+Finitely many cost di erences can be compiled into the states of the subset
+automaton. This results in the subset automaton Ac = (Qc ; ; c; Qc;F ). Assume  2 Qc is a state of Ac . Then  contains information about reached states
+q of A together with a cost di erence d, i.e.,  : B ! N0 maps a subset B of Q
+to N0 . For q 2 B, the cost di erence (q) describes the di erence between the
+cost of a cheapest q{computation of A and the cost of a cheapest computation.
+
+De nition 7.1 (Subset Construction III)
+
+Let A = (Q; ; ; QF ) be a nite tree automaton and C :  ! N0 a cost function
+that maps every transition from  to a cost in N0 . The corresponding (reduced)
+subset automaton with integrated costs is the deterministic nite tree automaton
+Pc (A) = (Qc ; ; c; Qc;F ) with Qc;F := f : B ! N0 2 Qc j B \ QSF 6= ;g whose
+sets of states and transitions are iteratively given by Qc := n0 Qc(n) and
+S
+c := n0 c(n) as follows.
+(0)
+ Q(0)
+c := ;; c := ;;
+ Let n > 0. For a 2 k and j 2 Q(cn?1) with domain Bj , j = 1; : : :; k, let
+B := fq 2 Q j 9qj 2 Bj : (q; a; q1 : : :qk ) 2  g where for q 2 B,
+dq := min fC()+(q1 )+: : :+(qk ) j 9qj 2 Bj :  = (q; a; q1 : : :qk ) 2  g.
+If B 6= ;, de ne the mapping  : B ! N0 by (q) := dq ? d where
+d := min fdq j q 2 B g.
+Then  is added to Qc(n) and (; a; 1 : : :k ) is added to c(n) .
+2
+
+The algorithm to construct a q{computation of A from a computation of
+the subset automaton can be used to compute cheapest computations when
+given a computation of the (reduced) subset automaton with integrated costs
+Ac = (Qc ; ; c ; Qc;F ) just by replacing the sets of transitions ()q with
+c ()q . Here, for a transition  = (; a; 1 : : :k ) 2 c and q in the domain of , c ()q denotes the set of cheapest transitions of A contained in
+ with q as successor state. Assume Bj is the domain of j , j = 1; : : :; k.
+Then c ()q formally is de ned by c ()q := f = (q; a; q1 : : :qk ) 2  j
+q1 2 B1 ; : : :; qk 2 Bk such that C() + 1 (q1) + : : : + k (qk ) is minimalg. Let
+ = ha; B i(1 ; : : :; k ) be the B{computation of Ac for some input tree t. The
+algorithm traverses  in pre-order. Let  be the transition at the root of .
+The algorithm chooses a transition (q; a; q1 : : :qk ), now from c ()q . Then, it
+recursively determines qj {computations j , j = 1; : : :; k from j . As the result
+it returns ha; qi( 1; : : :; k ). All possible outputs are cheapest q{computations
+of A.
+The advantage of subset automata with integrated costs is that they allow
+for a much faster construction of a cheapest computation of the original tree
+automaton. In general, the subset automata of Construction III are larger
+than the corresponding automata generated by Construction II without cost
+di erences. Also, Construction III terminates only for nite tree automata with
+cost functions where the di erences between cheapest computations for trees t
+are bounded by a constant.
+We give a sucient condition guaranteeing that the di erence between the
+costs of cheapest computations for every input tree is bounded.
+A subset S  Q is called
+ unavoidable i the number of computations  without using states from
+S is nite;
+ dominating i for all trees t = a(t1 ; : : :; tk ) 2 T , all computations  =
+ha; qi(1; : : :; k ) of A for t with  = (q; a; q1; : : :; qk ) being the transition
+at the root of , and every s 2 S the following holds: whenever there is
+a s{computation of A for t then also (s; a; q1 : : :qk ) 2 .
+
+In the context of code selection, S corresponds to the set of \universal" registers; \unavoidable" means that every instruction sequence for expressions
+former or later uses such registers whereas the property of being \dominating"
+corresponds to the existence of move {instructions. Note that for the tree automaton of example 6.1, the set fREG g is both unavoidable and dominating.
+We prove:
+
+Lemma 7.1 Assume that some set S of states exists for a tree automaton A
+that is both unavoidable and dominating. Then for every additive cost function
+c the di erence of costs of cheapest computations is bounded.
+Proof: We extend the notion of a computation of a tree automaton to computations on input trees containing variables. Assume V = fx1; : : :; xkg and
+t 2 T (V ). A (q; p1 : : :pk ){computation  of the nite tree automaton A on t
+is a tree  2 TQ (V ) with the following properties.  = xj whenever t = xj ,
+and q = pj , and  = ha; qi(1; : : :; m) whenever t = a(t1; : : :; tm ), where j
+are (qj ; p1 : : :pk ){computations for the subtrees tj , j = 1; : : :; m (for suitable
+states qj ) and (q; a; q1 : : :qm ) is a transition from .
+Assume n = #Q, L is the maximal rank of a symbol of the input alphabet,
+ denotes the maximal cost of a transition of A, i.e.,  = maxfc()j 2  g.
+Consider some tree t 2 T , and let  and 0 denote the cheapest computation and the cheapest q{computation respectively of A for t. If q 2 S
+then c(0) ? c() 0 . 0 Otherwise,
+we decompose t = t0[t1 ; : : :; tm ],  =
+0[1; : : :; m] and  = 0 [01; : : :; 0m ] such that
+1. For all i  0, i and 0i are computations of A for ti ;
+2. No variable occurs in t0 (and in 0 and 00 ) more than once;
+3. 00 is a (q; s1 : : :sm ){computation without using states from S, but where
+s1 ; : : :; sm 2 S.
+Since S is unavoidable, depth (00) = depth (t0 ) < n. Hence, m  Ln?1 , and
+c(00) <   2  Ln?1 .
+Since S is dominating, c(0j ) ? c(j )   for j > 0. Therefore, we can
+conclude:
+c(0) ? c()
+
+
+
+
+X
+c(0 ) + [c(0 ) ? c(j )]
+m
+
+j
+j =1
+2    Ln?1 +   Ln?1
+3    Ln?1
+0
+
+=
+This implies the assertion.
+2
+Having constructed the subset automaton for A, the sucient condition
+provided by Lemma 7.1 can be tested rather eciently. Note however, that it
+is independent of the cost function c. Therefore, it does not detect boundedness
+implied by the speci c choice of the cost function.
+
+Example 7.1 Let Gc be the grammar from example 4.2 with following costs:
+Pc = f addmc : REG ! plus (m (const ); REG ) cost : 3;
+addm : REG ! plus (m (REG ); REG ) cost : 3;
+add :
+REG ! plus (REG ; REG )
+cost : 2;
+ldmc : REG ! m (const )
+cost : 2;
+ldm : REG ! m (REG )
+cost : 2;
+ldc :
+REG ! const
+cost : 1;
+ld :
+REG ! REG
+cost : 1g
+The subset automaton Ac = (Qc ; ; c; QF;c) according to Subset Construction III has the set of states Qc = f1; 2; 3; 4g where
+1 : REG
+! 0
+2 : const
+! 0
+REG
+! 1
+3 : m (REG ) ! 0
+REG
+! 2
+4 : m (const ) ! 0
+REG
+! 2
+m (REG ) ! 1
+The next section deals with ecient implementation techniques for tree
+automata. For simplicity, we will only consider subset constructions without
+integrated costs.
+
+8 Implementation of Deterministic Finite
+Tree Automata
+Assume A = (Q; ; ; QF ) is a deterministic tree automaton. As a rst approach, we represent the set a of transitions for an operator a of rank k as a
+k{dimensional array Ma . Ma [q1; : : :; qk ] = (a; q1 : : :qk ) whenever  is de ned
+for these arguments and Ma [q1; : : :; qk] = ? otherwise, where ? is a special
+error symbol.
+Assume that the input tree t is given as a node labeled ordered rooted tree.
+The state at a node n with label a 2 k is determined as Ma [q1; : : :; qk ] where
+q1 ; : : :; qk are the states at the children of n. The states are computed during
+a post-order traversal of t. Therefore, the computation time for such a \run"
+of the tree automaton consists of the time spent for the tree traversal, which
+is proportional to the size of t, together with an indexed array access for every
+node in t.
+In most existing processors, the time for such an array access is proportional
+to the number of indices. Since every subtree of t takes part in indexed accesses
+only once the total time is linear in the size of t and independent of the ranks
+of operators.
+
+Example 8.1 The reduced subset automaton Ar = (Qr ; ; r; QF;r ) from example 6.1 has the set of transitions r (represented as tables):
+
+r;const =
+
+q2
+
+r;REG =
+
+q1
+
+r;m =
+
+q1
+q3
+
+r;plus =
+
+left
+child
+
+q1
+q2
+q3
+q4
+
+q1
+q1
+q1
+q1
+q1
+
+child
+
+q2
+q4
+
+q3
+q3
+
+right child
+q2
+q1
+q1
+q1
+q1
+
+q3
+q1
+q1
+q1
+q1
+
+q4
+q3
+
+q4
+q1
+q1
+q1
+q1
+
+The representation of  as a set of arrays is usually rather storage space
+consuming because the size of an array Ma for an operator a 2 k is proportional to jQjk, i.e., exponential in the rank of a no matter how many (few)
+de ned transitions the implemented automaton has for a. In most of the cases
+occurring in practice the necessary storage space can signi cantly be reduced
+by standard table compression methods.
+An alternative method to represent the transition functions a is provided
+by decision trees (see gure 2). Let Q and D be nite sets and H : Qk ! D a
+partial function. A decision tree for H is a leaf labeled tree of height k whose
+set of vertices V is given by V = V0 [ : : : [ Vk where
+Vj := fq1 : : :qj j 9qj +1; : : :; qk 2 Q : H(q1 : : :qj qj +1 : : :qk ) is de ned g:
+Here, nodes q1 : : :qj ?1 and q1 : : :qj ?1q0 are connected by a directed edge
+(of level j) with label q0 . Furthermore, the leaves b = q1 : : :qk are labeled with
+H(q1 : : :qk ).
+For an operator a of rank k, we can represent a by the decision tree for the
+function Ha that is given by Ha (q1 : : :qk ) := (a; q1 : : :qk ). The nodes of the
+decision tree exactly represent the pre xes of state sequences occurring in a .
+The state at a node n with label a 2 k in the input tree for whose sons we
+have already computed the states q1 ; : : :; qk is obtained by following the path
+in the decision tree for a whose edges successively are labeled with q1 ; : : :; qk .
+The label at the nal node on this path yields the desired result.
+In case of the above presented tree parser generator the generated deterministic nite tree automaton is of the form Pr (AG;X ) for some regular tree grammar G and some nonterminal X of G. Here, we are not only interested in the
+state (of the subset automaton) at some node n but also in the set of possible
+transitions of the tree automaton AG;X at n. Accordingly, we choose Ha \more
+informative", i.e., as
+Ha(B1 : : :Bk ) := h(a; B1 : : :Bk ); i
+where  := f(q; a; q1 : : :qk ) 2 G j qj 2 Bj g.
+If we represent the tree automaton by decision trees then the required storage space for the automaton is proportional to the size of . However, if the
+transition function  of the deterministic nite tree automaton A is total (which
+
+is always the case for automata obtained by Subset Construction I) then the
+decision trees have the same size as the arrays.
+const:
+
+q2
+
+
+
+q1
+
+
+
+(const, const, )
+(REG, const, )
+
+REG:
+
+(REG, REG, )
+
+m:
+
+q1; q3; q4 
+q3
+
++
+
+
+
+
+ZZ~q2
+q 
+
+4
+(m(REG), m, REG) (m(const), m, const)
+(REG, m, REG)
+(REG, m, const)
+
+plus:
+
+q
+q2 
+1; 
+
+
+9
+
+
+q1; q2; q3; q4
+
+?
+
+q1
+
+
+
+ XXXXX
+XXq4XXz
+?q3 
+q1; q2; q3; q4
+
+?
+
+q1
+
+
+q1; q2; q3; q4
+
+?
+
+q1
+
+(REG, plus, REG REG) (REG, plus, m(REG) REG) (REG, plus, m(const) REG)
+(REG, plus, REG REG)
+(REG, plus, m(REG) REG)
+(REG, plus, REG REG)
+
+Figure 2: Compressed decision trees for the grammar of example 4.2
+Decision trees can (possibly) more economically be represented by identifying isomorphic subtrees. Such a graph is called a compressed decision tree or
+decision graph . Especially, we can represent a decision tree by its subtree graph.
+A (compressed) decision tree Ta again can be represented by a 2-dimensional
+array Na whose rst component is indexed with the inner nodes v of Ta and
+whose second component is indexed with labels q of edges. The entry Na [v; q]
+contains the successor node of v in Ta when following the edge labeled with q,
+if such a node exists, and ? otherwise.
+In the worst case, arrays Na are up to a linear factor of the same sizes as
+arrays Ma . In practice however, arrays Na are signi cantly smaller. Again, the
+arrays Na can be subject to all kinds of further table compression methods.
+For example [2] consider various decision tree and table compression methods
+for tree automata.
+Uncompressed decision trees often do not t into main storage. Hence,
+one is interested in directly producing compressed decision trees during the
+generation phase. This leads to Subset Construction IV.
+Let A = (Q; ; ; QF ) be a (non-deterministic) nite tree automaton and
+a 2 k . The idea of Subset Construction IV is to generate a decision graph for
+
+the set of transitions (r )a of the reduced subset automaton for a such that the
+nodes are sets of transitions of A tagged with the level of the node. The root is
+the complete a tagged 0. Edges are labeled with0 sets of states. An edge
+with
+label B leads from a node (v; j ? 1) to a node (v ; j) if and only if v0 consists
+of all transitions of v that have a j-th argument q 2 B. A leaf b is additionally
+labeled with the set of all states that occur as left sides in transitions in b. The
+generation of this graph can be combined with the Subset Construction II.
+
+De nition 8.1 (Subset Construction IV)
+
+Let A = (Q; ; ; QF ) be a nite tree automaton. For n  0 we de ne a set of
+states Qs(n) and graphs Ta(n), a 2 , as follows.
+(0)
+Q(0)
+s := ; and Ta , a 2 , are empty graphs.
+Let n > 0 and a 2 k . Then Ta(n) has a set of vertices V = V0 [ : : : [ Vk
+and a set of edges E, which are de ned as follows.
+ V0 := f(a ; 0)g.
+ Assume j > 0 and Vj ?1 has already been de ned. For every (v; j ? 1) 2
+Vj ?1 and B 2 Q(sn?1) consider the set v0 := f(q; a; q1 : : :qk ) 2 v j qj 2 B g.
+If v0 6= ; then we add (v0 ; j) to the set Vj and an edge (v; v0 ), with label
+B, to E.
+ Every node (v; k) 2 Vk is labeled with the set fq 2 Q j 9q1 ; : : :qk 2 Q :
+(q; a; q1 : : :qk ) 2 vg.
+The set Qs(n) is the set of all labels of leaves (b; k) of graphs Ta(n) , a 2 .
+2
+Ta(n) is a subgraph of Ta(n+1), and Ta(n) = Ta(n+1) provided Qs(n) = Qs(n+1) .
+By induction over n one proves:
+
+Lemma 8.1 Assume A = (Q; ; ; QF ) is a nite tree automaton, and Qr(n)
+
+and r(n) are the n-th approximations to the sets of states and transitions, respectively, of the reduced subset automaton according to Subset Construction
+II. Then for all n  0:
+
+ Qs(n) = Qr(n);
+ The graph obtained from Ta(n) by removing all nodes of which no labeled
+leaf can be reached is a decision graph for (r(n) )a .
+2
+
+Therefore, de ne Ta := Ta(n) for the rst n with Qs(n) = Qs(n+1). Assume A
+itself has no super uous transitions. It turns out that then Ta does not contain
+useless nodes, i.e., it is a compressed decision tree for (r )a .
+For our generated tree parser every leaf b should not only contain the state
+of the subset automaton but also the set of the transitions of A that correspond
+to the path to (b; k), namely b itself! Provided the nite tree automaton A did
+not contain super uous transitions, the generated decision graph equipped with
+this extended labeling Ha is minimal .
+
+Lemma 8.2 Assume A = (Q; ; ; QF ) is a nite tree automaton without super uous transitions. Then for all a 2 :
+ Ta is a decision graph for a ;
+ Ta is isomorphic to the subtree graph of the decision tree for Ha .
+Proof: We only prove the second statement. Assume Ta were not isomorphic
+to the subtree graph of the decision tree for Ha . Then two nodes (v; j) 6=
+0
+(v ; j) exist from which the same set of leaves are reachable. However, if every
+transition of A is used in some computation then the set of transitions of a node
+in Ta is precisely the union of the sets of transitions of the leaves reachable from
+it. Hence, v = v0 in contradiction to our assumption.
+2
+Construction IV generalizes the method (implicitly) described in [18], which
+for the special case of tree pattern matchers directly generates compressed
+decision trees. [27] use a similar construction to derive tree parsers.
+The Construction IV is optimal in that it returns decision graphs with a
+minimal number of nodes. However, Chase in [Ch87] observed that many states
+of the generated subset automaton are equivalent w.r.t. transitions. Again, let
+A = (Q; ; ; QF ) be a nite tree automaton and a 2 k . For j = 1; : : :; k we
+de ne the set Qa;j := fqj j (q; a; q1 : : :qk) 2  g. The (a; j){relevant part of a
+set B  Q is the set B \ Qa;j . Within the decision graph Ta of Construction
+IV, sets of states with identical (a; j)-relevant parts lead from the same nodes
+(v; j ? 1) to the same nodes (v0 ; j).
+The fth subset construction returns compressed decision trees Ta0 whose
+sets of vertices coincide with those of the Ta , but whose edges of level j are
+only labeled with (a; j)-relevant parts. Thus, the decision graphs themselves
+can be represented much more succinctly. The price one has to pay is to
+maintain separate tables that, for all a 2 k , j 2 f1; : : :; kg, and occurring sets
+of states B, contain the (a; j)-relevant parts of B. Determining the state at a
+node n with label a 2 k of the input tree is now done in two steps. First for
+the states B1 ; : : :; Bk at the children of n, we successively have to look up the
+(a; j)-relevant parts Bj0 . Then, the path with edge labeling B10 ; : : :; Bk0 in the
+decision graph for a yields the result.
+As in Subset Construction IV, we construct the modi ed decision graphs
+by \need".
+
+De nition 8.2 (Subset Construction V)
+
+Let A = (Q; ; ; QF ) be a nite tree automaton. For n  0 we de ne a set of
+(n) = fB \ Q j B 2
+states Qs(n) graphs Ta(n), a 2 k , together with sets Ra;j
+a;j
+Qs(n) gnf;g for 1  j  k as follows.
+(0)
+Q(0)
+s := ; and Ta , a 2  are empty graphs.
+Let n > 0 and a 2 k .
+Ta(n) has a set of vertices V = V0 [ : : : [ Vk and a set of edges E, which are
+de ned as follows.
+0
+
+0
+
+0
+
+ V0 := f(a ; 0)g.
+
+ Assume j > 0 and Vj ?1 has already been de ned. For every (v; j ? 1) 2
+Vj ?1 and B 2 R(a;jn?1) consider the set v0 := f(q; a; q1 : : :qk ) 2 v j qj 2 B g.
+If v0 6= ; then we add (v0 ; j) to the set Vj and an edge ((v; j ? 1); (v0 ; j)),
+
+with label B, to E.
+ Every node (v; k) 2 Vk is labeled with the set fq 2 Q j 9q1 ; : : :qk 2 Q :
+(q; a; q1 : : :qk ) 2 vg.
+
+2
+The set Qs(n) is the set of all labels of leaves (b; k) in Ta(n) , a 2 .
+Chase uses the idea of an equivalence relation on states to generate compressed tables for6 pattern matching [3]. C. Peper observes that in case of
+operators of arity 2, the sets of states corresponding to the labels on edges
+between two nodes of the compressed decision tree in Construction IV coincide
+with Chase's equivalence classes [25]. For greater arities, our Construction V
+generalizes the methods both of Chase and Kron.
+0
+
+9 Practical Experience
+
+The presented subset constructions have been implemented in an experimental
+generator [25]. Given an annotated regular tree grammar it produces tables
+and a driver program that selects code for an IR tree. As an example, the
+processor NSC32000 was described by a grammar [19]. This grammar has
+761 rules with 49 nonterminals and 173 terminals. The tree parser generated
+according Subset Construction II has 791 states. The arrays M for this parser
+would have 52938937 entries. The representation as compressed decision trees,
+i.e., as arrays Na according to Subset Construction V needs 13241 entries.
+Applying table compression methods as described in [2] we can further reduce
+the needed storage space to 3771 entries. The generation time including table
+compression on a SPARC station II was 10.7 seconds.
+The compressed parser tables according to Subset Construction V with
+integrated costs (processor cycles) for the grammars vax.bwl and mot.bwl
+that describe integer (byte, word, long) subsets of the VAX and the Motorola
+68000 need 7317 and 61572 entries.
+For detailed numbers on generation times and table sizes of code selectors
+we refer the reader to [3, 16, 23].
+
+10 Conclusion
+
+The present paper systematically presents the basic theory behind code selection. We exhibit the connections both of tree pattern matching and tree parsing
+algorithms to nite tree automata. We present general methods for the implementation of tree automata. Especially, we generalize the method of Kron to
+arbitrary tree automata. This makes it possible to write ecient generators of
+ecient code selectors.
+Our results are also of interest for other areas. Both tree pattern matching and tree parsing are useful for checking the syntactic applicability of tree
+6
+
+In most existing systems the arity of operators is restricted to at most 2.
+
+transformation rules [7, 22]. Especially tree pattern matching is used for the
+implementation of term rewriting systems [13].
+
+Acknowledgements
+
+We would like to thank Reinhold Heckmann and the unknown referees for their
+helpful comments on this paper, and Todd A. Proebsting for supplying his
+machine grammars.
+
+References
+
+[1] Aho AV, Ganapathi M: Ecient Tree Pattern Matching: An Aid to Code
+Generation. In: Proc. of the 12th ACM Symp. on Principles of Programming Languages, 1985, pp 334-340
+[2] Borstler J, Moncke U, Wilhelm R: Table Compression for Tree Automata.
+In: ACM Transactions on Programming Languages and Systems, Vol. 13,
+No. 3, July 1991, pp 295-314
+[3] Chase DR: An improvement to bottom-up tree pattern matching. In: Proc.
+of 14th ACM Symposium on Principles of Programming Languages, 1987,
+pp 168-177
+[4] Dauchet M, Deruyver A: Compilation of Ground Term Rewriting Systems and Applications. In Dershowitz (ed) Proceedings of the Conference:
+Rewriting Techniques and Applications, Springer, 1989, LNCS 355, pp
+556-558
+[5] Downey PJ, Sethi R, Tarjan ER: Variations on the common subexpression
+problem. In: JACM 27 , 1980, pp 758-771
+[6] Emmelmann H: Code Selection by Regularly Controlled Term Rewriting.
+In: Giegerich, Graham (eds): Code Generation{ Concepts, Tools, Techniques, Springer, 1991, Workshops in Computing Series, pp3-29
+[7] Ferdinand C: Pattern Matching in a Functional Transformation Language
+using Treeparsing. In: Deransart, Maluszynski (eds): Proceedings of the
+Workshop: Programming Language Implementation and Logic Programming 90, Springer, 1990, LNCS 456, pp 358-371
+[8] Gecseg F, Steinby M: Tree Automata. Akademiai Kiado, Budapest, 1984
+[9] Giegerich R: Code Selection by Inversion of Order-sorted Derivors. In:
+Theoretical Computer Science 73, 1990, pp 177-211
+[10] Giegerich R, Schmal K: Code Selection Techniques: Pattern Matching,
+Tree Parsing, and Inversion of Derivors. In: Ganzinger (ed) Proc. ESOP
+88, Springer, 1988, LNCS 300, pp 247-268
+[11] Glanville RS: A Machine Independent Algorithm for Code Generation
+and its Use in Retargetable Compilers. Ph.D. Thesis, Univ. of California, Berkeley, 1977
+
+[12] Glanville RS, Graham SL: A new Method for Compiler Code Generation.
+In: Proc. of the 5th ACM Symp. on Principles of Programming Languages,
+1978, pp. 231-240
+[13] Graf A: Left-to-Right Tree Pattern Matching. In Book (ed) Proceedings of
+the Conference: Rewriting Techniques and Applications, Springer, 1991,
+LNCS 488, pp 323-334
+[14] Henry RR: Graham{Glanville Code Generators. Ph.D. Thesis, Univ. of
+California, Berkeley, 1984
+[15] Henry RR, Damron PC: Algorithms for Table-Driven Code Generators
+Using Tree-Pattern Matching. Technical Report # 89-02-03, University of
+Washington, Seattle, 1989
+[16] Henry RR, Damron PC: Encoding Optimal Pattern Selection in a TableDriven Bottom-Up Tree-Pattern Matcher. Technical Report # 89-02-04,
+University of Washington, Seattle, 1989
+[17] Ho mann DM, O'Donnell MJ: Pattern Matching in Trees. In: JACM 29,1,
+1982, pp 68-95
+[18] Kron H: Tree Templates and Subtree Transformational Grammars.
+Ph.D. Thesis, Univ. of California, Santa Cruz, 1975
+[19] Mathis N: Weiterentwicklung eines Codeselektorgenerators und Anwendung auf den NSC32000. Diplomarbeit, Universitat des Saarlandes, 1990
+[20] Moncke U: Simulating Automata for Weighted Tree Reductions. Technischer Bericht Nr. A10/87, Universitat des Saarlandes, 1987
+[21] Nivat M, Podelski A (eds): Tree Automata and Languages. Elsevier Science
+Publishers, 1992, Amsterdam, the Netherlands
+[22] Moncke U, Weisgerber B, Wilhelm R: Generative support for transformational programming. In: ESPRIT: Status Report of Continuing Work,
+Elsevier Sc., Brussels, 1986
+[23] Pelegri-Llopart E: Rewrite Systems, Pattern Matching, and Code Generation. Ph.D. Thesis, Univ. of California, Berkeley, 1988
+[24] Pelegri-Llopart E, Graham SL: Optimal Code Generation for Expression
+Trees: An Application of BURS Theory. In: Proc. of the 15th ACM Symposium on Principles of Programming Languages, 1988, San Diego, CA,
+pp 294-308
+[25] Peper C: Generische Baumanalysatoren-Generatoren. Diplomarbeit, Universitat des Saarlandes, 1993
+[26] Ripken K: Formale Beschreibungen von Maschinen, Implementierungen
+und optimierender Maschinencode{Erzeugung aus attributierten Programmgraphen. Dissertation, TU Munchen, 1977
+[27] Weisgerber B, Wilhelm R: Two tree pattern matchers for code selection.
+
+In: Hammer (ed) Proceedings of the Workshop: Compiler Compilers and
+High Speed Compilation, Springer, 1988, LNCS 371, pp 215-229
+
+

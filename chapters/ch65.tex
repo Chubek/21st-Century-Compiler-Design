@@ -1,0 +1,246 @@
+\chapter{Adaptive Interpreters and Staged Compilation}
+\label{ch:adaptive-staged}
+
+An addition site may execute millions of times with integers and once with strings.
+A generic interpreter can handle both, but it repeatedly pays for cases that rarely occur.
+Compiling the whole application before seeing any inputs spends effort on code that may never run.
+Adaptive execution starts with a general implementation, specializes where observations justify the expense, and retains a correct route for later surprises.
+
+Adaptation and staging solve related but different problems.
+Adaptation changes execution strategy as runtime observations arrive.
+Staging separates computations according to which inputs are already known.
+A self-optimizing interpreter can provide a good substrate for a partial evaluator, but neither idea requires the other.
+
+\section{Quicken one operation before compiling a function}
+\label{sec:ch65-quickening}
+
+\term{Quickening} replaces a general execution action with a more specialized action after information becomes available.
+The replacement may be a bytecode opcode, an AST node, or an entry in a side table.
+The physical representation matters less than the dispatch contract: the fast action must check or otherwise establish its assumptions.
+
+Our addition site accepts exactly two integers or exactly two strings.
+Booleans are excluded even though Python treats its Boolean type as an integer subclass.
+This explicit choice avoids accidentally inheriting host-language semantics in the guest language.
+The site begins cold, changes to an integer-specialized state after an integer pair, and moves permanently to generic after a mismatch.
+Algorithm~\ref{alg:ch65-quicken} performs no observable action before the guard.
+
+\begin{algorithm}[htbp]
+\caption{Execute a guarded addition site with one-way generalization.}
+\label{alg:ch65-quicken}
+\begin{pseudocode}
+\Require operands $a,b$, site state in cold, integer, or generic
+\Ensure the language's integer/string addition result or type error
+\State $ints\gets$ both operands have exactly the integer type
+\If{the site is cold}
+  \State select integer state if $ints$, otherwise generic
+\EndIf
+\If{the site is integer and $ints$ is false}
+  \State increment miss count; replace the site state with generic
+\EndIf
+\If{$ints$}
+  \State \Return integer addition
+\EndIf
+\If{both operands have exactly the string type}
+  \State \Return string concatenation
+\EndIf
+\State \Return type error
+\end{pseudocode}
+\end{algorithm}
+
+The state transition and type checks take constant time; integer arithmetic and string construction cost depends on operand size.
+The Python model makes the state transitions visible but does not claim a dispatch-speed improvement: it still uses host-language conditionals to demonstrate the contract.
+A bytecode interpreter can install a different handler, while an AST interpreter can replace the executing node~\cite{wurthinger-2012-interpreters}.
+
+Table~\ref{tab:ch65-site} works three calls through the site.
+Returning to integers does not re-specialize in this model.
+That policy avoids oscillation but may sacrifice later performance; a production system can use counters, cooldowns, or polymorphic specializations.
+
+\begin{table}[htbp]
+\caption{A mismatch widens the site's behavior before evaluating the operation.}
+\label{tab:ch65-site}
+\centering
+\begin{tabular}{llll}
+\toprule
+Operands & Previous state & Result & New state \\
+\midrule
+$3,4$ & cold & $7$ & integer \\
+\code{a}, \code{b} strings & integer & \code{ab} & generic \\
+$8,9$ & generic & $17$ & generic \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:ch65-site} presents the state graph.
+An exception is an outcome of executing the operation, not a fourth specialization state.
+In a multi-threaded interpreter, replacing a handler or AST node also requires a publication protocol so readers never observe partially initialized specialization data.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=16mm and 20mm]
+\node[basic block] (cold) {cold};
+\node[basic block,below left=of cold] (ints) {integer};
+\node[basic block,below right=of cold] (generic) {generic};
+\draw[cfg edge] (cold)--node[left,font=\small] {integer pair}(ints);
+\draw[cfg edge] (cold)--node[right,font=\small] {otherwise}(generic);
+\draw[cfg edge] (ints)--node[below,font=\small] {mismatch}(generic);
+\end{tikzpicture}
+\caption{One-way generalization bounds the number of state changes at the addition site.}
+\label{fig:ch65-site}
+\end{figure}
+
+\section{Fuse dispatch while preserving observation points}
+\label{sec:ch65-superinstructions}
+
+A \term{superinstruction} combines a common sequence of interpreter actions into one dispatch unit.
+Loading two locals and adding them may become a single handler.
+This reduces dispatch overhead without necessarily changing the arithmetic representation.
+It differs from specializing the addition for integers, although the two techniques can be combined.
+
+Fusion must preserve the guest stack effect, exceptions, and any required intermediate observation points.
+If the second load can fail, the fused handler must report the corresponding guest location.
+If a debugger can stop between the loads and the addition, the runtime needs a way to reconstruct that intermediate state or a policy defining which boundaries remain observable.
+Signal, garbage-collection, and tracing requirements are part of this contract, not afterthoughts to opcode selection.
+
+Demand-driven compilation similarly requires a stable entry mechanism.
+An unresolved entry can invoke a compiler, install the resulting code, and then transfer control with the original arguments.
+Concurrent first calls need a materialization state so they do not publish incompatible duplicate definitions.
+LLVM ORC explicitly models symbol materialization and supports lazy compilation arrangements~\cite{llvm-2026-orc}.
+
+\section{Specialize an interpreter against a program}
+\label{sec:ch65-staging}
+
+Let $I(p,x)$ denote an interpreter running program $p$ on input $x$.
+A \term{partial evaluator} receives a computation and some known inputs and produces a residual computation for the remaining inputs.
+If $p$ is known and $x$ is dynamic, the desired equation is
+\[
+I(p,x)=I_p(x),
+\]
+where $I_p$ is the residual program obtained by specializing the interpreter with respect to $p$.
+Equality here means the specified observable behavior, including errors and termination, rather than just a successful numeric result.
+
+Our executable staging example uses expression syntax containing constants, one dynamic input, addition, and multiplication over mathematical integers.
+The specializer traverses the known syntax once and emits stack bytecode.
+It removes runtime traversal of the expression tree, but does not perform constant folding or generate native code.
+It is a hand-written specialization for this interpreter, not a general self-applicable partial evaluator.
+
+\begin{algorithm}[htbp]
+\caption{Residualize known expression syntax into stack bytecode.}
+\label{alg:ch65-stage}
+\begin{pseudocode}
+\Require finite expression tree with constants, input, addition, and multiplication
+\Ensure bytecode with one result and the same integer expression meaning
+\Function{Emit}{$e$}
+  \If{$e$ is a constant}
+    \State append a constant-push instruction
+  \ElsIf{$e$ is the dynamic input}
+    \State append an input-push instruction
+  \Else
+    \State \Call{Emit}{left child of $e$}; \Call{Emit}{right child of $e$}
+    \State append the corresponding binary operation
+  \EndIf
+\EndFunction
+\end{pseudocode}
+\end{algorithm}
+
+Algorithm~\ref{alg:ch65-stage} uses a shared output buffer, giving $O(n)$ construction time and output space for $n$ syntax nodes, with recursion depth equal to tree height.
+The compact Python companion concatenates lists instead, so its worst-case construction cost is $O(n^2)$ on a skewed tree.
+This difference is an implementation detail worth measuring rather than hiding behind the linear conceptual traversal.
+
+For $(x+5)\cdot3$, the residual sequence pushes input, pushes $5$, adds, pushes $3$, and multiplies.
+With $x=4$, stack states are $[4]$, $[4,5]$, $[9]$, $[9,3]$, and $[27]$.
+Figure~\ref{fig:ch65-staging} separates compile-time syntax from runtime input.
+The tests compare source interpretation and residual execution over $17$ constant choices and $201$ input values.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=14mm and 16mm]
+\node[basic block] (syntax) {known expression syntax};
+\node[basic block,below=of syntax] (code) {residual stack bytecode};
+\node[basic block,right=of code] (input) {dynamic input x};
+\node[basic block,below=of code] (result) {execution result};
+\draw[cfg edge] (syntax)--node[right,font=\small] {specialize}(code);
+\draw[cfg edge] (code)--(result); \draw[cfg edge] (input)--(result);
+\end{tikzpicture}
+\caption{Staging consumes the known program structure before dynamic inputs arrive.}
+\label{fig:ch65-staging}
+\end{figure}
+
+\section{Understand the Futamura projections precisely}
+\label{sec:ch65-projections}
+
+Write $S(f,a)$ for specializing a two-input program $f$ with its first input fixed to $a$.
+With compatible encodings and a suitable self-applicable specializer, the first projection is $S(I,p)$: a compiled form of $p$.
+The second is $S(S,I)$: a compiler that maps programs to those residual forms.
+The third is $S(S,S)$: a compiler generator that takes an interpreter and produces a compiler~\cite{futamura-1999-partial}.
+Table~\ref{tab:ch65-projections} records the inputs that remain dynamic at each level.
+
+\begin{table}[htbp]
+\caption{Each projection fixes another layer of interpretive machinery.}
+\label{tab:ch65-projections}
+\centering
+\begin{tabular}{lll}
+\toprule
+Expression & Produced artifact & Remaining input \\
+\midrule
+$S(I,p)$ & residual program & program data \\
+$S(S,I)$ & compiler & source program \\
+$S(S,S)$ & compiler generator & interpreter \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+These equations express semantic relationships, not guarantees of useful code quality or feasible specialization time.
+Binding-time analysis decides which computations may run early.
+Code growth, static recursion, dynamic control flow, and effect duplication can make an apparently simple specializer unusable.
+An effectful input read must remain residual unless the staging contract explicitly makes that read static.
+
+\section{Generate interpreters and bootstrap metacircular systems}
+\label{sec:ch65-generated}
+
+An opcode specification can drive several generated consumers.
+For a stack addition, the specification might record two pops, one push, integer operand kinds, an arithmetic operation, and a source-location rule for errors.
+A generator can use those fields to emit a decoder table, a verifier transfer, and an interpreter-handler skeleton.
+The generated components then share numeric tags and operand shapes rather than duplicating them by hand.
+The generator still needs a semantic definition for the handler body; a stack-effect tuple alone cannot distinguish addition from subtraction.
+
+Consider generating the residual machine used here.
+The input instruction pushes one dynamic value; a constant instruction pushes its payload; addition and multiplication consume two values and push one.
+Those shapes suffice to generate structural stack checks.
+They do not establish that the implementation pops the operands in the intended order, uses arbitrary-precision arithmetic, or reports the correct source continuation on failure.
+If subtraction were added, a reversed pop order would preserve every stack depth while computing the wrong answer.
+Differential tests against the expression interpreter therefore remain useful even when both consumers originate from one schema.
+
+A \term{metacircular interpreter} is written in the language it interprets, or in a closely corresponding language subset under a stated definition.
+That relationship can clarify semantics and support reuse, but does not make the interpreter a self-applicable specializer.
+Likewise, generating an interpreter from an opcode specification is code generation, not automatically the second Futamura projection.
+The distinctions keep useful implementation techniques from being credited with capabilities they do not implement.
+
+A metacircular system needs an initial execution path: a trusted host implementation, a small bootstrap interpreter, or an existing compiled version.
+Running the language's interpreter through itself adds another interpretive layer unless specialization or compilation removes it.
+Features delegated to the host must be identified, especially arithmetic overflow, object identity, exceptions, and evaluation order.
+The exact-type checks in our quickening example illustrate the issue: adopting Python's Boolean/integer subtype relationship accidentally would change the guest language before any optimization occurred.
+
+For a practical bootstrap, first compare the host-executed interpreter with the interpreter running guest programs through the bootstrap layer on small cases.
+Then validate any generated or specialized implementation against the same observable contract.
+This establishes a chain of explicit comparisons rather than assuming that using one language to implement itself confers correctness.
+The companion implements the expression/residual comparison only; a schema generator and a self-interpreting language are extensions with their own tests.
+
+\section{Exercises}
+\label{sec:ch65-exercises}
+
+\begin{enumerate}
+\item\label{ex:ch65-transition} Run the site on $(3,4)$, two strings, $(8,9)$, and a Boolean/integer pair.
+Give states, miss count, results, and the final error.
+\item\label{ex:ch65-stack} Emit residual bytecode for $(x+2)\cdot4$ and show its stack trace at $x=3$.
+\item\label{ex:ch65-effect} An interpreter reads a file as part of evaluating a source expression.
+Explain why knowing the syntax does not necessarily permit reading the file during specialization.
+\item\label{ex:ch65-projection} Which projection produces a compiler from an interpreter, and what self-application capability does it require?
+Explain why the companion does not implement that projection.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch65-reading}
+
+Self-optimizing AST interpreters provide a concrete approach to runtime node specialization~\cite{wurthinger-2012-interpreters}.
+Futamura's article develops the specialization relationships summarized above~\cite{futamura-1999-partial}.
+ORC's documentation supplies an implementation-oriented account of deferred materialization~\cite{llvm-2026-orc}.

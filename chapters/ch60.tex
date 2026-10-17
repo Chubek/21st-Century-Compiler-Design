@@ -1,0 +1,355 @@
+\chapter{Case Study: Building a Linker with Lua Memory Maps}
+\label{ch:lua-linker}
+
+The assembler case study ends with relocatable objects whose addresses remain undecided.
+The linker in \path{example-code/lua-toolchain/luald.c} completes the path: it reads those objects, resolves definitions, applies Lua-directed placement, patches relocations, and emits an executable ELF image.
+The final test is a native x86-64 Linux process, but the verification also inspects the intermediate addresses and fields.
+An exit status alone would not establish that the image's unused pointer or zero-fill metadata is correct.
+
+The implementation embeds Lua 5.4 in C11 and emits ELF bytes directly.
+It uses no external linker to construct its image.
+External tools provide independent producers and consumers in the tests, while a separate host-loader experiment covers dynamic linking outside this static implementation.
+The supported scope is an executable contract rather than an implied implementation of every feature discussed in the four linking chapters.
+
+\section{Define the input and output profiles}
+\label{sec:ch60-profile}
+
+Input objects must be little-endian x86-64 ELF64 relocatable files with an ordinary section table and one static symbol table.
+Allocated input sections may contain ordinary bytes or NOBITS storage and may request allocation, writing, or execution flags.
+The linker accepts local/global/weak symbols with the supported ordinary types, default or hidden visibility, ordinary defining sections, and bounded absolute definitions.
+It supports RELA relocations of types 64, PC32, PLT32, unsigned 32, and signed 32.
+
+Archives, section groups, common symbols, TLS sections, dynamic objects, and unsupported relocation kinds are rejected.
+Nonallocated debug-style sections are not copied into the output, and relocations targeting such sections are not applied.
+The output is a static \code{ET\_EXEC} image containing program headers and loadable payloads, without a section-header table or dynamic-linking metadata.
+It supports the tested syscall-only startup programs rather than a general hosted C runtime.
+
+Table~\ref{tab:ch60-capacities} records implementation capacities.
+The total output buffer is bounded as well as individual region capacities, so multiple individually valid region requests can still exceed the output limit.
+That outcome is diagnosed rather than allowing unchecked allocation growth.
+
+\begin{table}[htbp]
+\caption{Explicit capacities bound the teaching implementation without silently changing accepted object semantics.}
+\label{tab:ch60-capacities}
+\centering
+\begin{tabular}{ll}
+\toprule
+Resource & Limit \\
+\midrule
+Input objects & $64$ \\
+Sections per object & $64$ \\
+Symbols per object & $4096$ \\
+Relocations per RELA section & $8192$ \\
+Lua memory regions & $16$ \\
+Placement rules & $64$ \\
+Individual file/buffer or region extent & $16$ MiB \\
+Supported alignment & power of two, at most $4096$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Treat the object reader as a typed graph validator}
+\label{sec:ch60-reader}
+
+The ELF reader first checks the identification bytes, class, byte order, machine, version, file type, and record sizes.
+Only then does it interpret section counts and offsets.
+It verifies the section-header range before reading individual headers and requires a zero null header under this nonextended-count profile.
+For every file-backed section it checks that offset is within the file and size is no greater than the remaining bytes.
+This subtraction-based check avoids overflow in an unchecked \code{offset+size} expression.
+
+The section-name string table must itself be a valid string table.
+Every name offset must point inside its payload, and a terminating zero must occur before the end.
+The same rule applies independently to symbol names in the symbol string table.
+Checking only the name offset is insufficient: an unterminated string could otherwise make a later comparison read into unrelated records.
+
+The symbol reader checks entry size, divisibility, capacity, local-before-global ordering, binding/type/visibility support, and defining-section bounds.
+An ordinary symbol's value and size must fit within its defining section.
+Absolute and undefined entries use distinct paths.
+The null symbol is required to have the specified zero fields.
+Only validated indices are retained for later resolution.
+
+\begin{algorithm}[htbp]
+\caption{Validate an object before exposing its references to layout or relocation.}
+\label{alg:ch60-reader}
+\begin{pseudocode}
+\Require file byte buffer with known length
+\Ensure validated sections, symbols, and relocation-table links
+\State check ELF identification, target profile, header widths, and table bounds
+\ForAll{section headers}
+  \State validate size, alignment, file extent where present, and supported allocated semantics
+\EndFor
+\State validate section-name strings through the designated string table
+\State locate one symbol table and validate its entry and string-table contracts
+\ForAll{symbol entries}
+  \State validate binding, type, visibility, index, and defining extent
+\EndFor
+\ForAll{RELA sections}
+  \State validate symbol-table link, target-section index, entry width, and count
+\EndFor
+\end{pseudocode}
+\end{algorithm}
+
+Algorithm~\ref{alg:ch60-reader} establishes structural facts used by later passes.
+Field-width and relocation-symbol checks still occur when each relocation is applied, because its kind determines how many bytes are required.
+Figure~\ref{fig:ch60-validation} follows the layers of validation.
+An error at one layer prevents the next from interpreting unvalidated numeric fields as trusted identities.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=13mm]
+\node[basic block] (bytes) {file bytes and actual length};
+\node[basic block,below=of bytes] (headers) {checked headers and extents};
+\node[basic block,below=of headers] (names) {checked strings and symbols};
+\node[basic block,below=of names] (rels) {checked relocation links and fields};
+\draw[cfg edge] (bytes)--(headers); \draw[cfg edge] (headers)--(names); \draw[cfg edge] (names)--(rels);
+\end{tikzpicture}
+\caption{The reader validates the object's reference graph before using it to construct a memory image.}
+\label{fig:ch60-validation}
+\end{figure}
+
+\section{Execute the map, then copy its policy into C}
+\label{sec:ch60-map}
+
+The map script returns one table with \code{entry}, \code{regions}, and \code{sections} fields.
+Listing~\ref{lst:ch60-map} is the complete map used by the demo.
+Lua arithmetic computes capacities from a page constant, while dense arrays determine declaration and placement order.
+No hash-table iteration order is used as an implicit layout policy.
+
+\begin{listing}[htbp]
+\inputminted{lua}{example-code/lua-toolchain/map.lua}
+\caption{The Lua map supplies explicit region boundaries and an ordered exact-name placement policy.}
+\label{lst:ch60-map}
+\end{listing}
+
+The host requires plain tables without metatables and dense integer-indexed arrays.
+This keeps configuration access from invoking hidden Lua callbacks after the protected script call has completed.
+String fields are copied with checked lengths and no embedded NUL.
+Address, length, and alignment fields must be nonnegative Lua integers.
+The region bases and lengths are page-aligned, lengths are positive and bounded, and their endpoints remain inside the supported low-half address range.
+
+Region names must be unique, region extents must not overlap, and each section rule must name an existing region.
+Exact section-name rules must also be unique.
+The implementation accepts region permissions \code{r}, \code{rx}, or \code{rw}; an input section requiring writing or execution must be placed in a region that permits that access.
+Lua selects policy, but C performs every placement and range check.
+The Lua manual defines the integer and table behavior used at this boundary~\cite{ierusalimschy-2026-lua}.
+
+\section{Placement order and segment order are different orders}
+\label{sec:ch60-order}
+
+Placement visits section rules in their array order.
+Within one rule it visits input objects in command-line order and their matching sections in section-table order.
+This defines a reproducible concatenation policy.
+It records, for every mapped input section, its region, offset within that region, final virtual address, and whether the section contributes file bytes or only memory extent.
+
+Program-header emission has an additional ELF requirement: loadable segments appear in increasing virtual-address order~\cite{xinuos-2026-elf}.
+The linker therefore sorts a small array of region indices for emission.
+It does not reorder the region records themselves after section placements have stored their region identifiers.
+Reordering the backing array would invalidate those identifiers unless every reference were translated too.
+Figure~\ref{fig:ch60-order} separates the two orders.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=17mm and 22mm]
+\node[basic block] (rules) {section-rule order};
+\node[basic block,right=of rules] (objects) {input-object order};
+\node[basic block,below=of rules] (place) {input placement records};
+\node[basic block,below=of objects] (sort) {region index permutation};
+\node[basic block,below=of sort] (ph) {ascending PT\_LOAD addresses};
+\draw[cfg edge] (rules)--(place); \draw[cfg edge] (objects)--(place);
+\draw[cfg edge] (sort)--(ph); \draw[dashed,->] (place)--node[below=3mm,font=\small] {stable region IDs}(sort);
+\end{tikzpicture}
+\caption{Placement preserves declared contribution order while segment emission uses a separate address-sorted permutation.}
+\label{fig:ch60-order}
+\end{figure}
+
+The test suite deliberately declares the lower-address region after the higher-address region.
+It verifies sorted loadable headers and executes the resulting image.
+This test catches the tempting but incorrect implementation that simply emits program headers in Lua declaration order.
+
+\section{Resolve symbols through their owning objects}
+\label{sec:ch60-symbols}
+
+A local relocation target resolves directly through the referencing object's symbol entry and placed section.
+A nonlocal target invokes the strong/weak selection rule from Chapter~\ref{ch:link-symbols}.
+A selected ordinary definition becomes its placed section address plus symbol offset; an absolute definition uses its stored value.
+An unresolved weak name becomes zero, and an unresolved strong name produces a diagnostic.
+
+The implementation scans for definitions rather than constructing an optimized global index.
+If $T$ is the total number of symbols and $R$ the number of applied relocations, repeated full scans give a coarse $O(T^2+RT)$ resolution bound.
+Section matching similarly costs $O(QH)$ for $Q$ placement rules and $H$ input sections, before copying payloads.
+These bounds explain the deliberate capacities and identify the first scalability improvements: indexed exact-name placement and cached global resolution.
+
+Tests link two objects that both define a private label with the same spelling.
+They also compare weak-only resolution with weak-plus-strong resolution in both object orders.
+The resulting program returns the value from the selected definition, and a repeated strong object produces a duplicate-definition error.
+This exercises symbol policy through executable behavior as well as table inspection.
+
+\section{Apply relocations without hidden truncation}
+\label{sec:ch60-relocations}
+
+Each allocated relocation target has a byte-mark array recording fields already patched.
+The array belongs to the target input section, not to one relocation section, so two RELA sections cannot evade the overlap check by targeting the same field independently.
+Before touching output bytes, the linker validates the relocation type, field extent, symbol index, and arithmetic range.
+It refuses relocations into NOBITS storage because there is no initialized payload field to patch under this profile.
+
+The PC32/PLT32 path subtracts the place address before checked addition of the explicit addend.
+The unsigned-32 path requires a result between zero and \code{UINT32\_MAX}.
+The signed-32 path requires \code{INT32\_MIN} through \code{INT32\_MAX}.
+The full-width 64-bit path uses the specified unsigned bit arithmetic.
+All writes use the explicit little-endian byte helper.
+
+\begin{algorithm}[htbp]
+\caption{Link the complete static image in dependency order.}
+\label{alg:ch60-pipeline}
+\begin{pseudocode}
+\Require Lua map and ordered validated-profile relocatable inputs
+\Ensure an executable image and deterministic placement report, or an error
+\State execute Lua once and validate/copy its returned map
+\State read each object and validate its structural references
+\State assign every nonempty allocated section to an explicit placement rule
+\State validate capacities, permissions, alignment, and initialized-prefix ordering
+\State resolve global definitions and all required undefined references
+\State apply checked relocations using final placements
+\State verify the entry names a byte inside an executable contribution
+\State sort loadable region indices by virtual address and emit program headers
+\State write the completed image, set executable mode, and report placements
+\end{pseudocode}
+\end{algorithm}
+
+Algorithm~\ref{alg:ch60-pipeline} makes final layout precede relocation.
+The current implementation performs no later transformation that changes section sizes or addresses.
+If relaxation or dead-section removal were added, they would need to run before this final patch phase or explicitly invalidate its results.
+Keeping this ordering visible is more reliable than scattering address adjustments across instruction-specific patch code.
+
+\section{Emit an initialized prefix and a zero-filled tail}
+\label{sec:ch60-image}
+
+Each region owns a buffer for its initialized prefix and a separate memory extent.
+Initialized contributions are copied at their placed offsets, with intervening initialized gaps zero-filled.
+Once a nonempty NOBITS contribution is encountered, later nonempty initialized contributions in that region are rejected.
+This ensures the region can be represented by one file-backed prefix followed by a loader-supplied zero tail.
+
+The writer aligns each region payload's file offset to 4096 and emits a \code{PT\_LOAD} header containing its virtual base, file size, memory size, flags, and alignment.
+The entry is the selected \code{\_start} definition and must lie strictly inside an executable input section rather than merely equal its end.
+The image also carries a non-executable stack descriptor.
+The writer checks all semantic conditions before opening the output path; detected write failures remove the partial file.
+
+Figure~\ref{fig:ch60-pipeline} shows the two independent end-to-end paths used for the demo.
+Our assembler's object is consumed by both our linker and GNU \code{ld}.
+Our linker also consumes a restricted object produced by GNU \code{as}.
+These paths reduce the chance that a shared private misunderstanding between our writer and reader masks an object-format error.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=16mm and 22mm]
+\node[basic block] (as) {luaas};
+\node[basic block,right=of as] (obj) {ELF64 objects};
+\node[basic block,below left=of obj] (own) {luald + Lua map};
+\node[basic block,below right=of obj] (gnu) {GNU ld};
+\node[basic block,below=of own] (a) {native exit 42};
+\node[basic block,below=of gnu] (b) {native exit 42};
+\draw[cfg edge] (as)--(obj); \draw[cfg edge] (obj)--(own); \draw[cfg edge] (obj)--(gnu);
+\draw[cfg edge] (own)--(a); \draw[cfg edge] (gnu)--(b);
+\end{tikzpicture}
+\caption{Independent consumers check the teaching assembler's object contract through two native execution paths.}
+\label{fig:ch60-pipeline}
+\end{figure}
+
+\section{Run the image and inspect its structure}
+\label{sec:ch60-run}
+
+After the assembler commands in Chapter~\ref{ch:lua-assembler}, invoke the linker:
+\begin{verbatim}
+/tmp/opencode/lua-tools/luald example-code/lua-toolchain/map.lua \
+  /tmp/opencode/lua-tools/demo /tmp/opencode/lua-tools/demo.o \
+  /tmp/opencode/lua-tools/answer.o
+readelf -h -l /tmp/opencode/lua-tools/demo
+/tmp/opencode/lua-tools/demo
+\end{verbatim}
+The final command exits with status $42$, intentionally nonzero as a program result.
+The map report names each nonempty input contribution, its address, and size.
+It is derived from the same validated placements used for relocation, so it explains the actual image rather than a separately recomputed approximation.
+
+The hello example instead writes a Lua-generated message and exits with status zero.
+Its RIP-relative address-forming instruction continues to work when the code region is rebased, because the message and referencing instruction move together.
+The tests link and execute it at two different code origins.
+This verifies a specific position-relative layout change, not a claim that the output executable is an arbitrary-base PIE.
+
+\section{Test both success and rejection boundaries}
+\label{sec:ch60-tests}
+
+Table~\ref{tab:ch60-tests} organizes the end-to-end checks by the contract they test.
+The tool builds run under GCC and Clang, each normally and with address/undefined-behavior sanitizers and leak detection.
+The separate dynamic-loader/TLS experiment is compiled and executed with both compilers using the host loader.
+All generated objects, executables, maps, and malformed fixtures live in a temporary directory outside the repository.
+
+\begin{table}[htbp]
+\caption{The verification combines independent arithmetic, production-tool interoperability, and explicit failure cases.}
+\label{tab:ch60-tests}
+\centering
+\begin{tabular}{p{0.30\linewidth}p{0.57\linewidth}}
+\toprule
+Contract & Executed check \\
+\midrule
+Instruction encoding & Compare 276 selected forms against GNU assembler bytes. \\
+Object interoperability & GNU linker consumes luaas objects; luald consumes restricted GNU objects. \\
+Relocation arithmetic & Independently check both PC32 fields and the absolute demo pointer. \\
+Memory image & Inspect program headers and execute a GNU-produced BSS-reading program. \\
+Symbol policy & Local-name separation, weak/strong order, missing and duplicate definitions. \\
+Layout policy & Reordered regions, rebased code, overlap, alignment, permission, and missing-rule rejection. \\
+Range and parsing & Exact PC32 endpoints, overflow, truncated ELF, bad indices, and unsupported kinds. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Recent GNU assemblers can emit allocated processor-property notes by default.
+Those notes are outside the teaching linker's accepted profile.
+The interoperability fixture explicitly assembles with \code{-mx86-used-note=no}; the linker does not silently discard unknown allocated metadata.
+This makes the producer configuration part of the test contract instead of hiding a compatibility gap.
+
+For PC32 boundaries, the test constructs a valid object and adjusts its explicit addend so that the mathematical result is exactly $-2^{31}$, $2^{31}-1$, or one unit outside either endpoint.
+The two endpoints must serialize correctly, and the outside values must fail.
+These images are inspected rather than executed, because a range-valid branch field alone does not establish that the deliberately chosen target is mapped code.
+Separating format acceptance from safe execution of a particular fixture is essential to a meaningful test.
+
+\section{Extensions need their own invariants}
+\label{sec:ch60-extensions}
+
+Archive support would add demand-driven object selection before the current resolution/layout stages.
+Section garbage collection would add a sound root/edge graph and discard decisions before final placement.
+Thunk insertion would add a distance-sensitive layout iteration.
+Dynamic linking would add runtime tables and a loader protocol rather than a few extra relocation cases.
+Each extension should preserve the existing narrow contract until its new behavior is explicitly implemented and tested.
+
+A production tool would also replace global process-lifetime state with per-link contexts, indexed lookup, richer source diagnostics, atomic file replacement, and more complete metadata preservation.
+Those engineering changes matter for scale and embedding.
+The present artifact establishes the smaller but complete path from Lua-generated assembly through interoperable objects to a Lua-mapped executable.
+The accompanying theory explains how larger tools extend that path without suggesting those extensions are already present in the case study.
+
+\section{The emitted image as input to another compiler}
+\label{sec:ch60-lifting-link}
+
+An executable image can become input to a binary analysis or translation system.
+The loader establishes mapped bytes and entry addresses; a lifter then interprets instruction encodings as explicit machine-state operations.
+Symbols and relocation records can help recover intent when retained, but their absence does not authorize guessing missing control-flow targets.
+Chapter~\ref{ch:binary-lifting} follows this boundary with a small real x86 subset and a hardware flag oracle.
+
+Its arithmetic model is separate from this linker's implementation.
+The linker establishes address and image-format contracts, whereas lifting must preserve instruction-level widths, flags, and partial-register effects.
+Cross-architecture translation composes both kinds of obligations with a guest-environment model.
+
+\section{Exercises}
+\label{sec:ch60-exercises}
+\begin{enumerate}
+\item\label{ex:ch60-order} Declare data before code in the Lua region array while leaving addresses unchanged. State the placement order and required program-header order.
+\item\label{ex:ch60-size} A region has capacity 4096, used extent 4090, and the next section requires alignment 16 and size 8. Compute the aligned start and explain the rejection.
+\item\label{ex:ch60-entry} A symbol is defined at exactly the end of a text section. Why can it be a legitimate boundary symbol but not the entry point accepted by this linker?
+\item\label{ex:ch60-reloc-bounds} A section has 12 initialized bytes. Which offsets permit an eight-byte relocation field? State a subtraction-based bounds predicate.
+\item\label{ex:ch60-phase} Adding dead-section removal after relocation changes the address of answer. Identify every recorded result in the demo that must be reconsidered before publishing the image.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch60-reading}
+The ELF specification defines the validated graph and runtime image structures~\cite{xinuos-2026-elf}.
+The AMD64 supplement fixes the relocation semantics applied to those structures~\cite{matz-2012-amd64}.
+Lua's reference manual and GNU linker's script documentation provide contrasting interfaces for programmable layout policy~\cite{ierusalimschy-2026-lua,gnu-2026-ld}.

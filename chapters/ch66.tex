@@ -1,0 +1,211 @@
+\chapter{Speculative IR, Deoptimization, and State Transfer}
+\label{ch:speculative-state-transfer}
+
+A speculative loop can use a narrow accumulator while every observed sum fits in a machine range.
+When the next sum exceeds that range, returning a wrapped value would change the language.
+Restarting the function can also be wrong if earlier iterations already produced output.
+The runtime must resume a general computation at a precise continuation with the values and effects that continuation expects.
+That requirement determines what information the optimizing IR must retain.
+
+The earlier speculation chapter introduces guards and deoptimization.
+Here we make the state-transfer contract explicit, execute it at every loop position in a finite test domain, and extend the same reasoning to virtual objects and representation migration.
+
+\section{Represent assumptions and recovery together}
+\label{sec:ch66-contract}
+
+A \term{speculative IR} exposes assumptions, guards, and recovery states as part of optimization correctness.
+An assumption is a proposition such as a value having the integer type or a class layout retaining a given version.
+A guard establishes it along the fast path; invalidation may establish that previously compiled code can no longer rely on it.
+Every failure path needs a destination that is semantically valid at that point.
+
+Let $s_o$ be an optimized state and $s_b$ a baseline state at a designated continuation.
+A reconstruction relation $R(s_o,s_b)$ says that their remaining executions produce the same required observations under the established assumptions.
+The relation need not be a bijection: multiple optimized states can reconstruct to equivalent baseline states, and the optimized state may omit dead source variables.
+This continuation-oriented view is central to formal treatments of dynamic deoptimization~\cite{fluckiger-2018-deoptimization}.
+
+The recovery information must survive ordinary optimization.
+If a value is used only by a deoptimization recipe, dead-code elimination must still regard that use as live or retain a sound way to recompute it.
+Recomputation must itself be pure, terminating, and valid at the recovery point.
+Re-executing an arbitrary source expression is not a safe substitute for a state map.
+
+\section{Choose a continuation before effects commit}
+\label{sec:ch66-loop}
+
+The companion sums a sequence of exact integers and appends an event $(i,total)$ after each successful iteration.
+A noninteger produces a type error at its index, preserving earlier events.
+The baseline accumulator has arbitrary precision.
+The fast accumulator accepts only next sums in $[-128,127]$; it guards before updating either the sum or the event sequence.
+
+For input $[7,120,1]$, the first two sums are $7$ and $127$.
+At index two the proposed sum is $128$, so the guard fails.
+The reconstruction is the loop-header frame $(i,total)=(2,127)$ with the two already committed events.
+The baseline executes only the remaining iteration and appends $(2,128)$.
+Table~\ref{tab:ch66-trace} shows the complete trace.
+
+\begin{table}[htbp]
+\caption{Recovery resumes before the failing iteration and preserves the committed event prefix.}
+\label{tab:ch66-trace}
+\centering
+\begin{tabular}{llll}
+\toprule
+Index & Incoming total & Decision & Newly committed event \\
+\midrule
+$0$ & $0$ & fast addition & $(0,7)$ \\
+$1$ & $7$ & fast addition & $(1,127)$ \\
+$2$ & $127$ & reconstruct, then baseline & $(2,128)$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Algorithm~\ref{alg:ch66-transfer} uses this single recovery boundary.
+The type test must precede arithmetic on a value that may not support addition.
+The range test is mathematical or uses a checked operation; performing an overflowing signed host addition before testing its range would not implement the contract.
+
+\begin{algorithm}[htbp]
+\caption{Run a narrow speculative loop with loop-header recovery.}
+\label{alg:ch66-transfer}
+\begin{pseudocode}
+\Require input sequence, valid loop-header frame $(i,total,trace)$
+\Ensure the baseline outcome and observable event sequence
+\While{$i$ is below the input length}
+  \State $v\gets$ input element at $i$
+  \If{$v$ is not an exact integer}
+    \State \Return baseline execution from the current frame
+  \EndIf
+  \State compute candidate sum without host-language overflow
+  \If{the candidate is outside $[-128,127]$}
+    \State reconstruct the current frame
+    \State \Return baseline execution from that frame
+  \EndIf
+  \State commit the candidate sum and append its event
+  \State $i\gets i+1$
+\EndWhile
+\State \Return successful baseline-format outcome
+\end{pseudocode}
+\end{algorithm}
+
+Figure~\ref{fig:ch66-boundary} places the guard before the commit boundary.
+If the guard were moved after output, recovery at the earlier loop header would duplicate output.
+Moving it earlier can also fail if its reconstruction map references values not yet defined.
+Guard motion is thus constrained by both assumptions and reconstructability.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=16mm and 18mm]
+\node[basic block] (header) {header: i, total, trace};
+\node[basic block,below=of header] (guard) {type and sum-range guard};
+\node[basic block,below left=of guard] (fast) {commit sum and event};
+\node[basic block,below right=of guard] (recover) {baseline at same header};
+\draw[cfg edge] (header)--(guard);
+\draw[cfg edge] (guard)--node[left,font=\small] {pass}(fast);
+\draw[cfg edge] (guard)--node[right,font=\small] {fail}(recover);
+\end{tikzpicture}
+\caption{A failed guard transfers state without replaying effects from completed iterations.}
+\label{fig:ch66-boundary}
+\end{figure}
+
+For $n$ elements the model performs $O(n)$ iterations, with arithmetic costs dependent on integer width.
+Its diagnostic trace consumes $O(n)$ storage and is copied once on recovery; a real runtime usually stores committed external effects in the environment rather than copying them into a frame.
+The trace is an oracle for this experiment, not a proposed production frame format.
+
+\section{OSR is a second state-transfer problem}
+\label{sec:ch66-osr}
+
+\term{On-stack replacement} transfers an already active computation into another version, often at a loop header.
+In the companion, a baseline prefix executes a chosen number of iterations, then the remaining loop enters the guarded implementation.
+The transfer supplies index, accumulator, and the committed trace prefix.
+The fast loop rechecks its own conditions, so a large incoming sum does not silently enter unchecked narrow arithmetic.
+
+A native implementation that stores the incoming accumulator in an eight-bit location would first need an entry range guard, even if the next sum happened to fit.
+Our Python model holds the incoming value exactly and checks every proposed update.
+This illustrates why a representation-specific entry contract must be stated separately from the source-level continuation.
+
+OSR and deoptimization need not be inverses at every machine instruction.
+They can operate at selected safe boundaries, use different layouts, and transfer to different tiers.
+Table~\ref{tab:ch66-recipes} records representative recovery sources.
+Inlining may require reconstructing several logical frames from one optimized physical frame.
+
+\begin{table}[htbp]
+\caption{Recovery recipes explain how each required baseline value is obtained.}
+\label{tab:ch66-recipes}
+\centering
+\begin{tabular}{ll}
+\toprule
+Recipe kind & Example obligation \\
+\midrule
+Location & read a live register or stack slot of known width \\
+Constant & supply a value proved unchanged at this continuation \\
+Pure recomputation & add two retained values without new effects \\
+Virtual object & allocate and initialize the preserved object identity \\
+Logical frame & restore the continuation of an inlined caller \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Materialize identities before filling references}
+\label{sec:ch66-objects}
+
+Scalar replacement can eliminate an allocation from the fast path while retaining a recipe for the object's fields.
+Recovery may then need to \term{materialize} the object.
+Allocating a fresh object independently for each field reference breaks sharing.
+Recursively building fields before recording the object breaks cycles.
+Algorithm~\ref{alg:ch66-materialize} solves both problems with two passes.
+
+\begin{algorithm}[htbp]
+\caption{Materialize a finite virtual-object graph while preserving identity.}
+\label{alg:ch66-materialize}
+\begin{pseudocode}
+\Require well-formed recipes with stable object IDs and valid field references
+\Ensure concrete objects with the recipe graph's sharing and cycles
+\ForAll{virtual object IDs $v$}
+  \State allocate an uninitialized shell and record it as the image of $v$
+\EndFor
+\ForAll{virtual object IDs $v$}
+  \ForAll{fields in the recipe for $v$}
+    \State write the constant value or already allocated referenced shell
+  \EndFor
+\EndFor
+\State expose the completed objects to the recovered frame
+\end{pseudocode}
+\end{algorithm}
+
+For $V$ virtual objects and $F$ fields, the graph work is $O(V+F)$ with expected constant-time identity lookup, excluding allocation and collector overhead.
+Figure~\ref{fig:ch66-cycle} shows a two-object cycle.
+The companion checks that following two \code{next} fields returns the identical first object, not merely an equal-looking copy.
+Production implementations must also root intermediate shells for the collector, handle allocation failure according to the language contract, and prevent observation of incomplete objects.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=28mm]
+\node[basic block] (a) {object a};
+\node[basic block,right=of a] (b) {object b};
+\draw[cfg edge,bend left=25] (a) to node[above,font=\small] {next}(b);
+\draw[cfg edge,bend left=25] (b) to node[below,font=\small] {next}(a);
+\end{tikzpicture}
+\caption{Allocating both shells first lets recovery preserve a cyclic object graph.}
+\label{fig:ch66-cycle}
+\end{figure}
+
+\section{Verification and exercises}
+\label{sec:ch66-exercises}
+
+The tests enumerate every sequence of length zero through four over six values: $-129$, $-1$, $0$, $7$, $127$, and a noninteger.
+Each sequence is tested at every possible OSR prefix position.
+They compare final status, error index, exact accumulator, and the whole event trace against baseline execution.
+This detects duplicated effects, skipped inputs, wrong error locations, and lost values in the finite domain.
+It does not prove correctness of a native stack-map format or garbage collector.
+
+\begin{enumerate}
+\item\label{ex:ch66-overflow} Work the guarded execution of $[7,120,1]$ and give the recovered frame and final event trace.
+\item\label{ex:ch66-error} Execute $[7,\text{noninteger},4]$ with OSR before index one.
+Give the error position, accumulator, and committed events.
+\item\label{ex:ch66-replay} Explain the observable bug if recovery restarts the function after the first two events of the overflow example.
+\item\label{ex:ch66-identity} Two virtual objects point to each other and a recovered local aliases the first.
+Describe a two-pass recipe and the identity assertions that distinguish it from deep copying.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch66-reading}
+
+Flückiger and colleagues formalize correctness obligations for speculative optimization and dynamic deoptimization~\cite{fluckiger-2018-deoptimization}.
+Chapter~\ref{ch:continuous-compilation} uses these transfer contracts to manage multiple live code and data representations.

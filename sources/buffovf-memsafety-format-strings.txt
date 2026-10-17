@@ -1,0 +1,2628 @@
+Syracuse University
+
+SURFACE
+Electrical Engineering and Computer Science
+
+College of Engineering and Computer Science
+
+2002
+
+Buffer Overflow and Format String Overflow Vulnerabilities
+Kyung-suk Lhee
+Syracuse University
+
+Steve J. Chapin
+Syracuse University
+
+Follow this and additional works at: https://surface.syr.edu/eecs
+Part of the Computer Sciences Commons
+
+Recommended Citation
+Lhee, Kyung-suk and Chapin, Steve J., "Buffer Overflow and Format String Overflow Vulnerabilities" (2002).
+Electrical Engineering and Computer Science. 96.
+https://surface.syr.edu/eecs/96
+
+This Article is brought to you for free and open access by the College of Engineering and Computer Science at
+SURFACE. It has been accepted for inclusion in Electrical Engineering and Computer Science by an authorized
+administrator of SURFACE. For more information, please contact surface@syr.edu.
+
+SOFTWARE—PRACTICE AND EXPERIENCE
+Softw. Pract. Exper. 2002; 00:1–7
+
+Buffer Overflow and Format
+String Overflow
+Vulnerabilities
+Kyung-Suk Lhee and Steve J. Chapin∗,†
+Center for Systems Assurance, Syracuse University, Syracuse, NY 13210
+
+SUMMARY
+Buffer overflow vulnerabilities are among the most widespread of security problems.
+Numerous incidents of buffer overflow attacks have been reported and many solutions
+have been proposed, but a solution that is both complete and highly practical is yet to
+be found. Another kind of vulnerability called format string overflow has recently been
+found, and though not as popular as buffer overflow, format string overflow attacks are
+no less dangerous.
+This article surveys representative techniques of exploiting buffer overflow and format
+string overflow vulnerabilities and their currently available defensive measures. We also
+describe our buffer overflow detection technique that range checks the referenced buffers
+at run time. We augment executable files with type information of automatic buffers
+(local variables and parameters of functions) and static buffers (global variables in the
+data/bss section), and maintain the sizes of allocated heap buffers in order to detect an
+actual occurrence of buffer overflow. We describe a simple implementation with which
+we currently protect vulnerable copy functions in the C library.
+key words:
+
+1.
+
+Buffer overflow; format string overflow; array and pointer range checking; Linux, ELF
+
+INTRODUCTION
+
+Buffer overflow vulnerability is currently one of the most serious security problems. Various
+buffer overflow techniques have been discovered and numerous incidents of buffer overflow
+attacks have been reported to date [9, 7, 43]. Many solutions have been proposed, but a
+solution that completely eliminates the buffer overflow vulnerability that is also compatible
+with the existing environment and performs well is yet to be found. Moreover, another kind of
+vulnerability to what is called format string overflow has recently been found. Although not as
+
+∗ Correspondence to: Center for Systems Assurance, Syracuse University, Syracuse, NY 13210
+† E-mail: klhee@ecs.syr.edu, chapin@ecs.syr.edu
+
+c 2002 John Wiley & Sons, Ltd.
+Copyright °
+
+Received 31 May 2002
+Revised 13 August 2002
+Accepted 31 August 2002
+
+2
+
+K. LHEE AND S. J. CHAPIN
+
+popular as buffer overflow, format string overflow attacks are no less dangerous in effect than
+buffer overflow attacks.
+Vulnerability to buffer overflow and format string overflow is due to the characteristics of
+the C language. For example, an array in C is not a first-class object and is represented as
+a pointer. Hence, it is difficult for a compiler to check on whether an operation will overflow
+an array. C allows variadic functions such as string format functions. Since the number of
+arguments is not known at compile time, a string format function has to rely on the format
+string to figure it out at run time. Such characteristics are geared toward convenience and
+performance, and are therefore favored for numerous legacy applications. Such vulnerabilities
+can be eliminated by programmers through careful programming and by rigorous checking
+of array bounds and the like. However, it is unrealistic to assume that all programmers will
+follow such a strict programming practice since it would decrease the benefits of convenience
+and performance, just as it is unrealistic to assume that they will not make any programming
+mistakes.
+This article presents some of the well known techniques of exploiting buffer overflow and
+format string overflow vulnerabilities and their currently available defensive measures. Many
+exploitation techniques of buffer overflow and format string overflow vulnerabilities have been
+studied and published, but each of them focuses on a particular technique with platformspecific details and examples. We discuss them here collectively, considering only their core
+ideas, as an introduction to buffer overflow and format string overflow. The exploitation
+techniques in this article are by no means exhaustive (which would be impossible), but they
+are representative techniques that show the most important classes of attacks.
+Like the classification in [13], we loosely categorize the buffer overflow exploitation techniques
+based on the data structures and their associated algorithms that are frequent targets of most
+exploits. Most of those data structures are code pointers such as function activation record and
+function pointers (those used by programmers and those introduced implicitly by compiler and
+system libraries). We also discuss the internal data structure of the dynamic memory allocator
+(malloc), which is not a code pointer but can be used to influence code pointers.
+Defensive techniques against buffer overflow are divided into run-time techniques and
+compile-time analysis techniques. Run-time techniques include array/pointer range-checking
+techniques and techniques that check at certain points the integrity of systems (such as the
+integrity of memory space). Compile-time analysis techniques analyze source codes to detect
+possible buffer overflow. We discuss the advantages and disadvantages of run-time and compiletime techniques. We also describe our buffer overflow detection technique that range checks the
+referenced buffers at run time. We augment executable files with type information of automatic
+buffers (local variables and parameters of functions) and static buffers (global variables in the
+data/bss section), and maintain the sizes of allocated heap buffers in order to detect the
+actual occurrence of buffer overflow. Our discussion of format string overflow vulnerability
+then follows similarly, but in a smaller scale. Examples throughout this article assume Linux
+operating system on x86 architecture.
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+BUFFER OVERFLOW AND FORMAT STRING OVERFLOW VULNERABILITIES
+
+3
+
+void func (char *string)
+{
+char buffer[32];
+strcpy(buffer, string);
+}
+int main(int argc, char **argv)
+func(argv[1]);
+return 0;
+}
+Figure 1. A simple buffer overflow vulnerability.
+
+The calling function:
+1. Pushes parameters onto the stack
+2. Pushes the return address
+Function prologue of the called function:
+1. Pushes the frame pointer
+2. Frame pointer is assigned the stack pointer value
+3. Stack pointer is advanced to make room for local
+variables
+Function epilogue of the called function:
+1. Stack pointer is assigned the frame pointer value
+2. Saved frame pointer is popped and assigned to the
+frame pointer
+3. Return address is popped and assigned to the
+instruction counter
+Figure 2. A function-calling mechanism.
+
+2.
+
+BUFFER OVERFLOW VULNERABILITY AND EXPLOITS
+
+Buffer overflow vulnerability in a program can be exploited to overwrite other important data
+that is adjacent to the buffer, eventually leading to the changing of normal program behavior.
+If the string in Figure 1 is longer than 31, then strcpy not only modifies the buffer but also
+the memory area next to it. The memory area next to the buffer holds important information,
+the return address. By overflowing the buffer we can alter the return address and thus the
+program flow. This example shows that, with the knowledge of the structure of memory space
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+4
+
+K. LHEE AND S. J. CHAPIN
+
+and the algorithm associated with it, buffer overflow vulnerability can be used to change the
+intended program behavior. A buffer overflow exploitation requires:
+1. Buffer overflow vulnerability in a program, which consists of buffers and operations
+that can overflow them. In this example it is the buffer and strcpy.
+2. Some knowledge of memory structure of the program and algorithms associated with
+it. In this example it is the layout of function activation record in the stack and the
+function-calling mechanism in Figure 2.
+The knowledge of memory structure and the accompanying algorithm offer an opportunity
+to alter the program behavior, whereas the buffer overflow vulnerability provides a means to
+achieve it. Techniques in this section basically discuss these two requirements.
+We categorize buffer overflow exploitation techniques based on data structures on which
+most exploits target, as follows.
+1. Function activation record (the return address and the saved frame pointer)
+2. Function pointers (function pointer variables and other function pointers that are
+implicitly used by the system)
+3. Internal data structure in dynamic memory allocator (malloc)
+Those data structures are code pointers except for the malloc. We focus on exploiting code
+pointers (mostly in order to spawn a root shell). Other data structures can be the primary
+target, but such cases are rarer in practice and exploits that alter code pointers are more
+illustrative since they immediately take control of the target system.
+2.1.
+
+Exploits on function activation record
+
+2.1.1.
+
+Stack smashing attack
+
+This is the most popular technique, by [1, 26], for exploiting the simple vulnerability in Figure 1
+(a vulnerable strcpy). It overflows the buffer with an attack string that consists of 1) the
+“shellcode”, and 2) the memory address where the shellcode is to be copied. The shellcode
+is an array of character-coded assembly instructions that performs “execve(“/bin/sh”)” to
+spawn a shell. The memory address (address of the shellcode) needs to be aligned to overwrite
+the return address. The result is that when the function returns it will jump to the shellcode
+and spawn a shell. If the process has a root privilege, then it becomes a root shell. Figure 3
+illustrates this.
+For a local exploitation, an attack can be performed by a small program that spawns the
+vulnerable program with the attack code as its command-line argument (or an environment
+variable). For a remote exploitation, the attack code can be delivered through an I/O channel
+(if a vulnerable function accepts a string from I/O). For the exploit in Figure 3 to succeed,
+we need to know the address of the buffer, because it is the memory address with which
+we overwrite the return address. Although the address of the buffer on the stack is usually
+unknown, there are ways to find (or guess) it. For example, we can observe it by running the
+vulnerable program in a debugger. For the same set of input in a similar environment, the
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+BUFFER OVERFLOW AND FORMAT STRING OVERFLOW VULNERABILITIES
+
+stack
+grows down
+
+addr of buffer
+
+addr of buffer
+
+shellcode
+
+shellcode
+
+nop’s
+
+argv[1]
+
+return addr
+
+5
+
+nop’s
+addr of buffer
+
+saved frame ptr
+shellcode
+addr of
+buffer
+
+buffer
+address
+grows up
+
+MSB
+
+nop’s
+
+LSB
+
+Figure 3. The stack smashing attack that exploits the program in Figure 1. It shows the stack frame
+before and after strcpy(buffer, argv[1]). We assume that the stack grows down and the address of
+buffer is that of its least significant byte (little-endian architecture).
+
+program is likely to follow the same path and yield the same address for the buffer. Even if
+not, the observed value would still provide a good starting point for guessing the right value.
+Guessing the value is made easier by prepending “no-op”s at the shellcode so that a small
+margin of error in guessing the exact address would not matter much.
+In general, a successful exploitation may require detailed information about the target
+program and its run-time behavior. Such information can be discovered in various ways,
+including the following.
+1. Documentation (manuals, technical reports, etc.)
+2. Source code
+3. Reading binary file or core dump using utility programs such as objdump and nm
+4. Using operating system facilities such as /proc file system, ptrace and strace
+5. Running programs in a debugger
+Even dynamic information such as the return address on the stack or the address of a shared
+library function can be observed or guessed by running the program in a similar environment,
+since programs usually follow deterministic algorithms. For example, the stack is likely to grow
+in the same pattern if the same input is given to the program. A program normally maps its
+shared libraries in the same order at the same starting address, yielding the same addresses.
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+6
+
+K. LHEE AND S. J. CHAPIN
+
+return addr
+saved frame ptr
+
+LSB
+
+bogus ret addr
+buffer
+
+placeholder
+
+shellcode
+
+Figure 4. The frame pointer overwrite exploit, showing the stack frame before and after the attack.
+The attack code overwrites the buffer and the least significant byte of the saved frame pointer.
+
+2.1.2.
+
+The frame pointer overwrite
+
+This technique, by [21], is similar to the stack-smashing attack, but it alters the function
+activation record in a different way. It is based on the fact that a function locates the return
+address using the frame pointer (function epilogue in Figure 2). By altering the frame pointer
+we can trick the function into popping a wrong word instead of the return address. Since we
+cannot directly change the frame pointer (a register), we alter the saved frame pointer in the
+stack instead. Note that in the stack-smashing attack we alter the return address, since we
+cannot directly change the program counter. Figure 4 illustrates this exploit. After a buffer is
+overflowed and the saved frame pointer is altered, the overflowed function returns normally to
+its calling function, but the calling function now has the wrong frame pointer. When the caller
+itself returns, it will pop the word of our choosing into the program counter (for example, the
+address of the shellcode).
+The attack code consists of the shellcode, a bogus return address (address to the shellcode),
+and a byte that alters the least significant byte of the saved frame pointer. Since we need
+to change the saved frame pointer by a only small margin, altering its least significant byte
+suffices. In this example the buffer is the first local variable that is adjacent to the saved frame
+pointer. Assuming little endian byte-ordering in x86, the least significant byte of the saved
+frame pointer is the next byte after the buffer. Therefore, such an “off-by-one” vulnerability
+can be exploitable.
+In the stack-smashing attack we do not need to know the exact address of the buffer, by
+prepending “no-op’s” at the shellcode. However, for this exploit we need to know the address
+of the placeholder, which implies that we need to know the exact address of the buffer. Also,
+a function with a wrong frame pointer cannot locate its local variables correctly, so it may
+crash before the exploitation takes effect. Note, however, that such an instability is inherent
+in most exploits, since they usually corrupt the state of the process while overflowing buffers.
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+BUFFER OVERFLOW AND FORMAT STRING OVERFLOW VULNERABILITIES
+
+7
+
+void main (int argc, char **argv)
+{
+char buf1[1024];
+char buf2[256];
+strncpy(buf1, argv[1], 1024);
+strncpy(buf2, argv[2], 256);
+...
+func(buf2);
+}
+void func (char *p)
+{
+char buf3[263];
+sprintf(buf3, “%s”, p);
+}
+Figure 5. A vulnerable program for the non-terminated memory space exploit. If the buf2 is nullterminated, then the buf3 cannot be overflowed by sprintf, since the size of the buf3 is bigger than the
+size of the buf2. However, if the buf2 is not null-terminated, then the buf3 can be overflowed because
+the maximum size of the string p is not the size of the buf2 but the sum of the size of buf1 and the
+buf2 (and more if buf1 is also not null-terminated).
+
+The stack-smashing attack, for example, not only overwrites the buffer and the return address,
+but everything between them.
+2.1.3.
+
+Non-terminated adjacent memory spaces
+
+Most buffer overflow attacks exploit unsafe string functions in the C library such as strcpy.
+There is a safe subset of string functions such as strncpy that limits the copy operation up to
+the number given by programmers. Those functions are definitely safer, but they can give a
+false sense of security if not used carefully. The technique in this section shows how to exploit
+them [42]. Figure 5 is an example of using strncpy in an unsafe way. The problem is that
+strncpy does not null terminate the output string if the source string is longer than the given
+maximum size. In the main in Figure 5, buf1 and buf2 cannot be overflowed, but they will not
+be null-terminated either if their source strings are longer than their limits; func takes buf2 as
+the source string and, since buf2 is smaller than buf3, users might think that buf3 is safe as
+long as buf2 is not overflowed. However, that will not be true if buf2 is not null terminated.
+2.1.4.
+
+Return-into-libc
+
+Return-into-libc exploitation techniques by [37, 45, 28] also alter the return address, but the
+control is directed to a C library function rather than to a shellcode. Figure 6 shows an example
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+8
+
+K. LHEE AND S. J. CHAPIN
+
+return addr
+
+& of "/bin/sh"
+
+parameter
+
+placeholder
+
+return addr
+
+addr of system
+stack
+pointer
+
+saved frame ptr
+padding
+buffer
+
+before overflow
+
+after overflow,
+right before returning
+into system()
+
+right after returning
+into system(); system()
+treats the stack this way
+
+Figure 6. Return-into-libc example that exploits the program in Figure 1.
+
+that exploits the vulnerable program in Figure 1 to spawn a shell by overwriting the return
+address with the address of system. The attack code includes the address of system and the
+parameter to system (pointer to string “/bin/sh”).
+This exploit needs to know the exact address of the string “/bin/sh” and the address
+of system. The string “/bin/sh” can be supplied through a command-line argument or an
+environment variable. In most cases where the C library is linked dynamically, finding the
+address of system requires finding out where in the address space the C library is mapped,
+and to find the offset to system within the C library [45]. The address where the C library is
+mapped can be found at the /proc directory or by running the program on a debugger. The
+offset to system within the C library can be read from the C library object file. This scheme
+is valid unless shared libraries are mapped at random addresses [29].
+If the attack depends on string functions (such as strcpy) in delivering the attack code,
+then the attack code cannot contain a null byte. In fact, defensive techniques in [36, 22] map
+shared libraries such that their addresses always contain null bytes. Nonetheless, return-intolibc can still be effective with a small modification based on the following observation. An
+ELF program contains the Procedure Linkage Table (PLT) [41], which is used to call shared
+library functions. When calling a shared library function, the corresponding PLT entry is used
+instead of the real address of the function since the real address is not known at compile time.
+Unlike shared libraries, PLT is in a fixed location with not much chance of having null bytes.
+Therefore, we can use the PLT entry instead of the real address [45] to bypass such protection.
+The requirement is that system (or any other function in a shared library to which we wish to
+direct the control) has to be called somewhere in the program so that it does have an entry in
+the PLT.
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+BUFFER OVERFLOW AND FORMAT STRING OVERFLOW VULNERABILITIES
+
+return addr
+
+& of "/bin/sh"
+
+param (system)
+
+& of ’0’
+
+param (setuid)
+
+addr of system
+
+ret addr (setuid)
+
+9
+
+addr of setuid
+stack
+pointer
+
+saved frame ptr
+padding
+buffer
+
+before overflow
+
+right before returning
+into seuid()
+
+right after returning
+into setuid(); setuid() treats
+the stack this way
+
+Figure 7. Return-into-libc example that chains two functions in a row; setuid is called to regain the
+root privilege, and system is called to spawn a shell.
+
+return addr
+
+& of shellcode
+
+param 2 (strcpy)
+
+& data segment
+
+param 1 (strcpy)
+
+& data segment
+
+ret addr (strcpy)
+
+addr of strcpy
+stack
+pointer
+
+saved frame ptr
+padding
+buffer
+
+Figure 8. Return-into-libc example with shellcode. When returned to strcpy, strcpy copies the shellcode
+to a data segment and then returns to the data segment.
+
+It is also possible to call two functions in a row by supplying a valid address in the return
+address placeholder in Figure 6. Such a function chaining is illustrated in Figure 7, in which
+setuid and system are called in a row.
+A C library function can also be chained with a shellcode [45]. In the exploit in Figure 8,
+strcpy copies the shellcode into data segment and returns to the shellcode. Since the shellcode
+is executed from a non-stack area, this technique bypasses the non-executable stack patch from
+the Openwall Project [36].
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+10
+
+K. LHEE AND S. J. CHAPIN
+
+stack
+pointer
+
+param 1 (func2)
+
+(4)
+
+addr of epilogue
+
+(3)
+
+addr of func2
+padding
+
+function epilogue
+without frame pointer
+
+param 2 (func1)
+add 0x1c, %esp
+ret
+
+return addr
+
+(2)
+
+param 1 (func1)
+
+(1)
+
+addr of epilogue
+
+28 (0x1c) bytes
+available for
+parameters
+to func1
+
+addr of func1
+
+saved frame ptr
+buffer
+
+padding
+
+Figure 9. The stack pointer lifting method. The first instruction of the function epilogue moves up
+the stack pointer, and the second instruction is a return. The program returns to func1 since the
+return address is overwritten. (1) the stack pointer right after the program returns to the func1 ; (2)
+after func1 returns to the epilogue; (3) after the add instruction of the epilogue; (4) after the return
+instruction of the epilogue (returned to func2 ).
+
+Generally, chaining multiple functions this way is limited due to the difficulty in placing their
+return addresses and parameters. For example, calling the second function is not possible if
+both functions need more than two parameters; system in Figure 7 will crash when it returns,
+since its return address placeholder is occupied by the parameter of setuid. The following two
+methods in [28] show how to chain multiple functions without such limitation by moving the
+stack pointer to accommodate parameters each time a function in the chain is called.
+The first method, the stack pointer lifting method, exploits a function epilogue that does not
+use the frame pointer (i.e., the program was compiled with such optimization flag turned on).
+A function epilogue without a frame pointer does the following:
+1. Pops local variables by increasing the stack pointer by the total size of the local
+variables
+2. Return address is popped
+The idea is that a function returns to such epilogue instead of returning to the next function
+in the chain in order to first lift the stack pointer to skip the parameters. Figure 9 illustrates
+this.
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+BUFFER OVERFLOW AND FORMAT STRING OVERFLOW VULNERABILITIES
+
+addr of epilogue
+
+(4) rtn
+
+addr of epilogue
+
+address of func 2
+
+(4) pop
+
+address of func 2
+
+fake frame ptr 2
+
+(4) lift
+
+fake frame ptr 2
+
+(3) rtn
+
+param 1 (func1)
+
+(2) rtn, (3) pop
+
+addr of epilogue
+
+addr of func 1
+
+(2) pop, (3) lift
+
+addr of func 1
+
+fake frame ptr 1
+
+(1) rtn, (2) lift
+
+fake frame ptr 1
+
+(1) pop
+
+addr of epilogue
+
+(1) lift
+
+fake frame ptr 0
+
+param 1 (func1)
+addr of epilogue
+
+leave
+ret
+
+return addr
+
+addr of epilogue
+
+saved frame ptr
+
+fake frame ptr 0
+
+buffer
+
+padding
+
+(2), (3) pop
+
+param 2 (func1)
+
+param 2 (func1)
+function epilogue
+with frame pointer
+
+11
+
+points
+to
+
+points
+to
+
+stack pointer value,
+right after the
+named operation
+
+padding
+
+(1) pop
+
+frame
+pointer
+
+Figure 10. The frame faking method. The first instruction of the function epilogue (leave) assigns the
+stack pointer with the frame pointer value (thus effectively “lifting” the stack pointer) and restores
+the previous frame pointer from the stack. The lifting the stack pointer and the popping the frame
+pointer are named as lift and pop in the diagram. The second instruction is a return (named as rtn).
+(1) The corrupted function pops the frame pointer and returns to the epilogue; (2) The epilogue lifts
+the stack pointer, pops the frame pointer and returns to func1 ; (3) func1 begins execution by pushing
+the frame pointer. It lifts the stack pointer, pops the frame pointer and returns to the epilogue; (4)
+The epilogue lifts the stack pointer, pops the frame pointer and returns to func2.
+
+The second method, the frame faking method, exploits a function epilogue that uses a frame
+pointer (program that was compiled without such optimization). A function epilogue with a
+frame pointer does the following:
+1. The stack pointer is assigned the current frame pointer value
+2. Previous frame pointer is popped and assigned to the frame pointer
+3. Return address is popped
+Since the stack pointer is assigned the frame pointer value, by changing the frame pointer we
+can again lift the stack pointer. As with the first method, a function returns to an epilogue
+instead of to the next function. Figure 10 illustrates this.
+2.2.
+
+Exploits on function pointers
+
+Below we discuss exploitation techniques that target function pointers rather than the return
+address. Function pointers are convenient as low level constructs and so are used in many C
+programs. They are also used implicitly by the compiler, such as in the procedure linkage table
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+12
+
+K. LHEE AND S. J. CHAPIN
+
+char buffer[64] = “”;
+int (fptr)(char*) = NULL;
+void main (int argc, char **argv)
+{
+...
+strcpy(buffer, argv[1]);
+(void)(*fptr)(argv[2]);
+}
+Figure 11. A vulnerable function pointer in the (initialized) data section.
+
+in ELF binaries or the virtual function pointer in C++ programs. The function pointers can
+be anywhere in the memory space and not just the stack, which opens other possibilities of
+exploitation.
+2.2.1.
+
+User function pointers in heap and data section
+
+This section discusses a technique, by [10], that overflows non-stack area. Figure 11 shows a
+program that allocates a buffer and a function pointer in the data section. This program is
+vulnerable since strcpy can overflow the buffer and alter the function pointer. The function
+pointer is overwritten with a code pointer (address of a shellcode or system). The attack takes
+effect when the function pointer is called.
+In this example the corrupted function is called right after the attack code has been delivered
+through strcpy, but it does not have to be so immediate. If the function pointer is a global
+variable, then it can be corrupted inside one function and called by another. In contrast,
+exploits that target the return address always have function scope.
+2.2.2.
+
+The dtors section
+
+This technique, by [30], exploits function pointers created implicitly by the GNU C compiler;
+gcc provides a number of C language extensions that include function attributes which specify
+special attributes when making function declarations [39]. For example, we can declare a
+destructor function as follows:
+static void end(void)
+
+attribute
+
+((destructor));
+
+The function declared as a destructor is automatically called after main has completed or exit
+has been called; gcc implements it by storing pointers to destructor functions in the dtors
+section, which are walked through when the process exits. To exploit this, we overflow a buffer
+to overwrite an entry in the dtors section with a code pointer; the dtors section always exists
+even if no destructor functions are declared by the programmer. Figure 12 shows a vulnerable
+program to this technique and Figure 13 shows some of the sections in the executable file. From
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+BUFFER OVERFLOW AND FORMAT STRING OVERFLOW VULNERABILITIES
+
+13
+
+static char buffer[32] = “”;
+int main(int argc, char **argv)
+{
+strcpy(buffer, argv[1]);
+return 0;
+}
+Figure 12. A vulnerable program for a dtors exploit. We overflow the buffer placed in the data section
+to overwrite an entry in the dtors section. We supply the argv[1] with 82 bytes (the first destructor
+pointer would be stored four bytes after the beginning of the dtors section) of padding characters +
+the address of a shellcode.
+
+Idx N ame
+...
+13 .rodata
+14 .data
+...
+17 .dtors
+18 .got
+...
+21 .bss
+ALLOC
+...
+
+Size
+
+V MA
+
+LM A
+
+F ileof f
+
+Algn
+
+...
+00000040
+
+08049500
+
+08049500
+
+00000500
+
+2 ∗ ∗5
+
+00000008
+00000024
+
+0804954c
+08049554
+
+0804954c
+08049554
+
+0000054c
+00000554
+
+2 ∗ ∗2
+2 ∗ ∗2
+
+00000018
+
+08049640
+
+08049640
+
+00000640
+
+2 ∗ ∗2
+
+Figure 13. The sections of the vulnerable program in Figure 12. Note that the data section precedes
+the dtors section by 78 bytes and the got section by 84 bytes; the bss (uninitialized static data) section
+follows dtors and the got sections, so variables in bss cannot overflow the dtor or the got sections.
+
+Figure 13 it is apparent that the buffer in the data section is adjacent to the dtors section,
+hence can overflow the dtors section.
+2.2.3.
+
+Global offset table, exit handler functions and setjmp/longjmp buffer
+
+Figure 13 shows that next to the dtors section is the got section, which holds the global offset
+table that stores addresses that need to be resolved at run time (addresses of objects in shared
+libraries, such as the C library). In particular, the global offset table contains addresses of
+shared library functions. As mentioned in Section 2.1.4, programs call the procedure linkage
+table entry instead of the real function in shared library. In an entry in the procedure linkage
+table is a jump instruction to the corresponding global offset table entry that holds the real
+address of the shared library function. Therefore, it is clear that the got section is as vulnerable
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+14
+
+K. LHEE AND S. J. CHAPIN
+
+static char buffer[32] = “”;
+int main(int argc, char **argv)
+{
+strcpy(buf, argv[1]);
+printf(buf);
+return 0;
+}
+Figure 14. A vulnerable program for got exploit. We overflow the buffer in the data section to overwrite
+the printf entry in got. Specifically, we supply the argv[1] with 84 bytes of padding characters and
+the address of a shellcode.
+
+as the dtors section. Unlike destructor functions, however, functions in the got section are not
+called automatically. In order for an attack to take effect, a corrupted entry in got has to be
+called somewhere in the program after the overflow. For example, we can exploit the vulnerable
+program in Figure 14 by overflowing the buffer in the data section to overwrite the got entry
+of printf that is called after strcpy.
+Besides the destructor functions, programmers can register exit handler functions [5] using
+the C library function atexit. Exit handler functions, too, are automatically called when exit is
+called or when main returns, and implemented similarly as the destructor functions (a table of
+function pointers is maintained). The table of pointers to exit handler functions is as vulnerable
+as the dtors section or the got section. However, the vulnerable program in Figure 12 may
+not be exploited since the table of pointers would be located far from the buffer. The table of
+pointers to exit handler functions is a C library object, and the C library is usually mapped
+in the address space too far away to be reached directly from the buffer in the data section
+(unless the C library is statically linked) [5]. We discuss this exploit later in Section 2.4, where
+we discuss overwriting data indirectly via pointers.
+setjmp/longjmp uses a buffer (jmp buf ) to save register values for performing nonlocal goto.
+Since jmp buf saves the program counter, we can exploit this by overflowing jmp buf and
+overwriting the saved program counter with, for example, the address of the shellcode. This
+exploit will take effect when longjmp is called with the overwritten jmp buf [10].
+2.2.4.
+
+C++ virtual function pointer
+
+This technique, by [31], exploits a table of function pointers and a pointer to that table,
+VTABLE and VPTR, respectively, created implicitly by the C++ compiler. VTABLE and
+VPTR are used to implement virtual functions in C++ programs. Pointers to the virtual
+functions defined in a class are stored in the VTABLE. An object instantiated from the class
+contains a VPTR (a pointer to the VTABLE) through which it calls virtual functions. For
+example, a call to the virtual function whose pointer is in the third entry of the VTABLE
+would be compiled as the code below. Figure 15 illustrates this.
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+BUFFER OVERFLOW AND FORMAT STRING OVERFLOW VULNERABILITIES
+
+object variables
+
+VPTR
+
+15
+
+addr of virtual func 1
+addr of virtual func 2
+...
+
+Figure 15. A conceptual view of an allocated object (with VPTR) and the VTABLE of the
+corresponding class.
+
+buffer
+
+*
+
+*
+
+*
+
+VPTR
+
+shellcode
+
+VPTR
+
+Figure 16. An example of a virtual function pointer exploit. An object is overflowed with a bogus
+VTABLE, a shellcode, and a pointer that overwrites the VPTR.
+
+call
+
+*(VPTR + 8)
+
+The exploit in Figure 16 overflows a variable in the object in order to alter the VPTR to
+make it point to the supplied bogus VTABLE. The bogus VTABLE contains pointers to the
+shellcode so that when a virtual function is called the shellcode is executed.
+2.3.
+
+Exploits on malloc internal data structure
+
+This section discusses a vulnerability in the dynamic memory allocator in the GNU C library
+(Doug Lea’s Malloc), by [20] . Memory blocks (called chunks) that are allocated and deallocated
+dynamically via malloc and free are managed by linked lists. Each memory block carries its
+own management data, such as its size and pointers to other chunks, as a typical linked list
+data structure would do (Figure 17).
+The vulnerability is that the user data and the management data are adjacent in a chunk.
+This is comparable to the vulnerability in the stack, in which local variables and the return
+address are adjacent. Just as we can alter the return address by overflowing a stack variable,
+we can alter the management data by overflowing a heap variable. This is referred to as a
+channeling problem [33] or a problem of storing management information in-band [2]. Unlike
+the return address, however, those management data are not code pointers, so altering them
+does not directly change the program control. Here we exploit the management data to
+ultimately change other code pointers.
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+16
+
+K. LHEE AND S. J. CHAPIN
+
+user data
+bk
+fd
+size
+prev_size
+
+next chunk
+
+user data
+12
+
+bk
+
+8
+
+fd
+
+4
+
+size
+
+0
+
+prev_size
+
+addr that is
+returned to user
+
+chunk
+
+Figure 17. Memory block (chunk) managed by malloc. It shows that the memory block also includes
+internal data structure such as size of the chunk, size of the adjacent chunk, forward pointer, and
+backward pointer to other chunks.
+
+Free chunks are managed by doubly linked lists called bins, each of which contains chunks of
+a certain size range. When a free chunk is taken from a bin, a macro unlink is called to adjust
+the forward and backward pointers of the neighboring chunks. When a free chunk is placed
+into a bin, a macro frontlink is called 1) to locate the correct bin, 2) to locate the neighboring
+chunks, and 3) to adjust forward and backward pointers of the neighbors and itself. The next
+two examples exploit the unlink and frontlink macro.
+2.3.1.
+
+Unlink exploit
+
+The unlink macro and the exploit are shown in Figure 18. The idea is that the fd and bk field
+of a free chunk P is altered so that when unlink is called with P, a code pointer is overwritten
+with the address of the shellcode. The exploit will take effect when the corrupted code pointer
+is called. A vulnerable program, for example, calls free(P 0 ) where P 0 is a chunk physically
+adjacent to the corrupted chunk P ; free(P 0 ) in turn calls unlink(P) in order to merge them
+into a bigger free chunk, since P is a free chunk.
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+BUFFER OVERFLOW AND FORMAT STRING OVERFLOW VULNERABILITIES
+
+17
+
+shellcode
+BK−>fd = FD
+
+(4)
+
+shellcode
+shellcode
+BK
+
+BK
+
+(3)
+
+12
+
+code pointer
+
+#define unlink(P, BK, FD)
+{
+BK = P−>bk; (1)
+0
+FD = P−>fd; (2)
+FD−>bk = BK; (3)
+BK−>fd = FD; (4)
+}
+
+corrupted
+chunk
+
+code pointer
+(1)
+FD
+
+FD
+
+(2)
+
+12
+
+bk
+
+bk
+
+8
+
+fd
+
+fd
+
+4
+
+size
+
+size
+
+0
+
+prev_size
+
+prev_size
+
+(1), (2)
+
+P
+
+P
+
+(3), (4)
+
+Figure 18. The unlink macro and the exploit. The fd field of the free chunk P is altered to point to
+a code pointer (minus 12), and the bk field is altered to point to the shellcode. Note that, after the
+exploit, a word in the shellcode is also overwritten at (4). For this, the first instruction of the shellcode
+should be a jump over the overwritten word.
+
+2.3.2.
+
+Frontlink exploit
+
+Figure 19 shows the frontlink macro and the exploit. The idea is to alter the fd field of a
+free chunk (to make it point to a fake chunk) so that when frontlink(P) is called (to place a
+free chunk P in a free list), a code pointer is overwritten with P. The vulnerable program, for
+example, calls free(P 0 ) where P 0 is in the same size range as the corrupted free chunk P. In
+addition, we need to be able to alter the word at P (with, for example, a jump instruction to
+the shellcode), since the corrupted code pointer is overwritten with P.
+2.4.
+
+Indirect alteration via pointer
+
+In this section we discuss techniques, by [8], that exploit pointers to overwrite indirectly the
+code pointers discussed earlier. For such an exploit we need to be able to overwrite a pointer as
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+18
+
+K. LHEE AND S. J. CHAPIN
+
+#define frontlink(A, P, S, IDX, BK, FD)
+{
+if (S < MAX_SMALLBIN_SIZE) {
+/* P goes to smallbin */
+}
+else {
+/* locate the bin of right size for P */
+/* the bin should contain the corrupted free chunk */
+...
+if (FD == BK) {
+mark_binlock(A, IDX);
+}
+else {
+while (FD != BK && S < chunksize(FD)) {
+FD = FD−>fd;
+(1)
+}
+BK = FD−>bk;
+(2)
+}
+P−>bk = BK;
+P−>fd = FD;
+FD−>bk = BK−>fd = P; (3)
+}
+}
+
+code pointer
+
+code pointer
+
+P
+
+BK
+
+a fake
+chunk
+
+FD
+
+BK
+
+bk
+
+bk
+
+bk
+
+fd
+
+fd
+
+fd
+
+size
+
+size
+
+size
+
+prev_size
+
+prev_size
+
+prev_size
+
+(1) FD = FD−>fd
+
+(2) BK = FD−>bk
+
+(3) BK−>fd = P
+
+Figure 19. The frontlink macro and the exploit. fd field of a free chunk is altered to point to a fake
+chunk, so that when while loop exits FD also points to the fake chunk (1). Note that the bk field of
+the fake chunk points to a code pointer (to be altered) − 8. For this exploit, the size of the fake chunk
+should not be larger than the size of P (S in the while loop).
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+BUFFER OVERFLOW AND FORMAT STRING OVERFLOW VULNERABILITIES
+
+19
+
+void f (char **argv)
+{
+char *p;
+char buffer[32];
+...
+strcpy(buffer, argv[1]);
+strcpy(p, argv[2]);
+}
+Figure 20. A program vulnerable to the indirect return address exploit and the indirect exit handler
+exploit.
+
+well as to overwrite a code pointer through that pointer. Such vulnerability is hard to find in
+real programs. On the other hand, such vulnerability is more subtle, thus harder to discover.
+Also, memory space of the target process is more vulnerable since we can alter memory area
+that is far from the overflowed buffer.
+2.4.1.
+
+Altering the return address indirectly
+
+This exploit is similar to the stack-smashing attack, but it overwrites the return address
+indirectly through a pointer. For such an exploit we need two copy operations as in the
+vulnerable program in Figure 20. Figure 21 illustrates this exploit that, since it overwrites only
+the return address and not the StackGuard canary word, will not be detected by StackGuard.
+2.4.2.
+
+Exploiting exit handler functions indirectly
+
+As noted in Section 2.2.3, pointers to exit handler functions are located too far away to be
+altered directly. The program in Figure 20 can, however, be used to exploit pointers to exit
+handler functions. This is the same as the indirect return address exploit except that the
+pointer p is altered to point to the exit handler table rather than to the return address. This
+exploit does not alter the return address, so neither StackGuard nor StackShield can detect
+this.
+2.4.3.
+
+Exploiting global offset table indirectly
+
+The global offset table can be overwritten indirectly by exploiting the vulnerable program
+in Figure 22 (a vulnerable printf ). We overwrite the got entry of printf with the address
+of system so that when printf(“print some string”) is called, system(“print some string”) is
+called instead (Figure 23). For this exploit we need to create a shell script file named “print”
+in the current working directory, which performs the actual attack. The rest of the string
+“some string” is passed as the program arguments to the script file and does no harm unless
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+20
+
+K. LHEE AND S. J. CHAPIN
+
+shellcode
+
+shellcode
+
+shellcode
+
+return addr
+
+return addr
+
+& of shellcode
+
+canary
+
+canary
+
+canary
+
+saved frame ptr
+
+saved frame ptr
+
+saved frame ptr
+
+p
+
+& of return addr
+
+& of return addr
+
+buffer
+
+padding
+
+padding
+
+before strcpy
+
+strcpy(buffer, argv[1])
+
+strcpy(p, argv[2])
+
+Figure 21. The indirect return address exploit on the program in Figure 20. The first strcpy overflows
+the buffer and overwrites the pointer p with the address of the return address, so that the second
+strcpy overwrites the return address with the address of a shellcode; argv[1] points to the attack code
+(thick round box), and argv[2] points to the string, which is the address of the shellcode.
+
+void f (char **argv)
+{
+char *p;
+char buffer[32];
+strcpy(buffer, argv[1]);
+strcpy(p, argv[2]);
+printf(“print some string”);
+}
+Figure 22. A program vulnerable to the indirect got exploits.
+
+it contains a special shell character. This exploit does not alter the return address, so neither
+StackGuard or StackShield can detect this. Note that this exploit does not require executable
+stack or heap. If it uses the address of the PLT entry of system instead of the real address
+of system, it can also bypass the Openwall project (where the address of system can contain
+zero bytes) and PaX (where the address of system is unknown in advance due to the random
+mapping of shared libraries) [45].
+Alternatively, an exploit that is illustrated in Figure 24 alters the got entry of printf so that
+it points to the shellcode. Since this exploit does not alter the return address it bypasses the
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+BUFFER OVERFLOW AND FORMAT STRING OVERFLOW VULNERABILITIES
+
+return addr
+
+return addr
+
+return addr
+
+saved frame ptr
+
+saved frame ptr
+
+saved frame ptr
+
+p
+
+& of GOT printf
+
+& of GOT printf
+
+buffer
+
+padding
+
+padding
+
+system()
+
+system()
+
+system()
+
+printf()
+
+printf()
+
+printf()
+
+system:
+
+system:
+
+system:
+
+printf:
+
+printf:
+
+system:
+
+strcpy(buffer, argv[1])
+
+strcpy(p, argv[2])
+
+21
+
+GOT
+
+before strcpy
+
+Figure 23. Global offset table entry of printf is altered indirectly such that it points to system instead;
+argv[1] points to the attack code (thick round box), and argv[2] points to an address of system.
+
+StackGuard and StackShield. It also bypasses the non-executable stack by Openwall Project
+since the shellcode is copied into the got section.
+
+3.
+
+DEFENSIVE TECHNIQUES AGAINST BUFFER OVERFLOW
+
+3.1.
+
+Run-time detection systems
+
+3.1.1.
+
+StackGuard
+
+The stack-smashing attack overwrites the buffer, the return address and everything in between.
+StackGuard [11] is a GNU C compiler extension that inserts a canary word between the return
+address and the buffer so that an attempt to alter the return address can be detected by
+inspecting the canary word before returning from a function. Programs need to be recompiled
+with StackGuard in order to be protected.
+3.1.2.
+
+StackShield
+
+StackShield [38] is also a GNU C compiler extension that protects the return address. When
+a function is called, StackShield copies away the return address to a non-overflowable area
+it restores the return address upon returning from a function. Even if the return address on
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+22
+
+K. LHEE AND S. J. CHAPIN
+
+return addr
+
+return addr
+
+return addr
+
+saved frame ptr
+
+saved frame ptr
+
+saved frame ptr
+
+p
+
+& of GOT printf
+
+& of GOT printf
+
+shellcode
+
+shellcode
+
+& GOT printf + 4
+
+& GOT printf + 4
+
+buffer
+
+shellcode
+
+GOT
+printf:
+
+printf:
+
+& GOT printf + 4
+
+before strcpy
+
+strcpy(buffer, argv[1])
+
+strcpy(p, argv[2])
+
+Figure 24. Global offset table entry of printf is altered indirectly such that it points to the shellcode;
+argv[1] and argv[2] point to the attack code (thick round box).
+
+the stack is altered, it has no effect since the original return address is remembered. As with
+StackGuard, programs need to be recompiled.
+3.1.3.
+
+Libsafe
+
+Libsafe [4] is an implementation of vulnerable copy functions in the C library such as strcpy.
+In addition to the original functionality of those functions, it imposes a limit on the involved
+copy operations such that they do not overwrite the return address. The limit is determined
+based on the notion that the buffer cannot extend beyond its stack frame. Thus the maximum
+size of a buffer is the distance between the address of the buffer and the corresponding frame
+pointer. Libsafe is implemented as a shared library that is preloaded to intercept C library
+function calls. Programs are protected without recompilation unless they are statically linked
+with the C library or have been compiled to run without the frame pointer (it needs to walk
+up the stack using the saved frame pointers in the stack). Libsafe protects only those C library
+functions, whereas StackGuard and StackShield protect all functions.
+3.1.4.
+
+Linux kernel patch from the Openwall Project
+
+The stack-smashing attack injects an attack code into the stack, which is executed when
+the function returns. One of the core features of the Linux kernel patch from the Openwall
+Project [36] is to make the stack segment non-executable. Another feature is to map into
+the address space the shared libraries such that their addresses always contain zero bytes, in
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+BUFFER OVERFLOW AND FORMAT STRING OVERFLOW VULNERABILITIES
+
+23
+
+order to defend from return-into-libc attacks. If the address of a function is to be delivered
+through a null-terminated string function (such as strcpy), the zero byte in the middle of the
+function address will terminate the copying [37]. It does not impose any performance penalty
+or require program recompilation except for the kernel. There are a few occasions that require
+the stack to be executable, which include nested functions (a C language extension by the
+GNU C compiler) and Linux signal handler (both are emulated by the Linux kernel patch).
+Programs that require executable stack can be made to run individually, using the included
+utility program.
+3.1.5.
+
+PaX, RSX and kNoX
+
+PaX [29] is a page-based protection mechanism that marks data pages as non-executable.
+Unlike the Linux kernel patch from the Openwall Project, PaX protects the heap as well
+as the stack. Since there is no execution permission bit on pages in the x86 processor, PaX
+overloads the supervisor/user bit on pages and augments the page fault handler to distinguish
+the page faults due to the attempts to execute code in data pages. As a result, it imposes a
+run-time overhead due to the extra page faults. PaX is also available as a Linux kernel patch.
+As with the Openwall Project, Pax is not completely transparent to existing programs since
+some programs require the heap or the stack to be executable. For example, an interpreter such
+as Java might cache machine instructions in the heap and execute from there for performance.
+Pax also can map the first loaded library at a random location in the address space in order
+to defend from return-into-libc exploits (since the address of a C library function cannot be
+known in advance) [28].
+Other systems that provide non-executable stack and heap on Linux are RSX [32] and
+kNoX [22]. They also share the disadvantage of Openwall Project and PaX that programs
+requiring executable stack or heap cannot run transparently.
+3.2.
+
+Range-checking systems
+
+The advantage of the array bounds checking approach is that it completely eliminates the
+buffer overflow vulnerability. However, it is also the most expensive solution, particularly for
+the pointer and array intensive programs, since every pointer and array operation must be
+checked. This may not be suitable for a production system.
+The pointer and array access checking technique by Austin et al. [3] is a source-to-source
+translator that transforms C pointers into the extended pointer representation called safe
+pointer, and inserts access checks before pointer or array dereferences. The safe pointer contains
+fields such as the base address, its size, and the scope of the pointer. Those fields are used by
+access checks to determine whether the pointer is valid and within the range. Since it changes
+pointer representation, it is not compatible with existing programs.
+The array bounds and pointer checking technique by Jones and Kelly [19] is an extension
+to the GNU C compiler that imposes an access check on C pointers and arrays. Instead of
+changing pointer representation, it maintains a table of all the valid storage objects that
+hold such information as base address, size, etc. Information concerning the heap variables is
+entered into the table via the modified malloc and deleted from the table via the modified
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+24
+
+K. LHEE AND S. J. CHAPIN
+
+free. Information about the stack variables is entered into/deleted from the table by the
+constructor/destructor function, which is inserted inside a function definition at the point at
+which stack variables enter/leave the scope. The access check is done by substituting pointer
+and array operations with the functions that perform bounds checks using the table in addition
+to the original operation. Since native C pointers are used, this technique is compatible with
+existing programs.
+Purify, by Hastings and Joyce [16], is a commercially available run-time memory access
+error-checking tool. An advantage of Purify is that it inserts access-checking code into the
+object code without requiring source code access. It checks all the memory access, memory
+allocation/deallocation, and function calls, and it maintains states of memory blocks (allocated,
+initialized, etc.) to catch temporal errors such as dangling pointers. Array bounds are checked
+by marking both ends of a memory block returned by malloc. Purify, however, lacks type or
+scope information that is available only at the source level, so it cannot detect some the errors,
+such as buffer overflow within a malloc memory block.
+
+3.3. Static analysis techniques
+Static analysis techniques have several advantages over run-time techniques. They do not incur
+run-time overhead and they narrow down the vulnerabilities specific to the source program
+being analyzed, yielding a more secure program before it is deployed. However, a pure static
+analysis can produce many false alarms due to the lack of run-time information. For example,
+gets reads its input string from stdin, so the size of the string is not known at compile time.
+For such a case a warning is issued as a possible buffer overflow. In fact, all the legitimate copy
+operations that accept their strings from unknown sources (such as a command line argument
+or an I/O channel) are flagged as possible buffer overflows (since they are indeed vulnerable).
+Without further action, those vulnerabilities are identified, but still open to attack.
+The integer range analysis by Wagner et al. [43] is a technique that detects possible buffer
+overflow in the vulnerable C library functions. A string buffer is modeled as a pair of integer
+ranges (lower bound, upper bound) for its allocated size and its current length. A set of
+integer constraints is predefined for a set of string operations (e.g., character array declaration,
+vulnerable C library functions, and assignment statements involving them). Using those integer
+constraints, the technique analyzes the source code by checking each string buffer to find out
+if its inferred allocated size is at least as large as its inferred maximum length.
+The annotation-assisted static analysis technique by Larochelle and Evans [23] based on
+LCLint [14] uses semantic comments, called annotations, provided by programmers to detect
+possible buffer overflow. For example, annotations for strcpy contain an assertion that the
+destination buffer must be allocated to hold at least as many characters as are readable
+in the source buffer. This technique protects any annotated functions, whereas the integer
+range analysis only protects C library functions. However, it requires programmers to provide
+annotations.
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+BUFFER OVERFLOW AND FORMAT STRING OVERFLOW VULNERABILITIES
+
+3.4.
+
+25
+
+Combined static/run-time techniques
+
+The obvious advantage of this approach is that it has access to run-time information as
+well as to the contextual information, specific to the source program to be analyzed, from
+the static analysis. Solutions based on this approach perform static analysis on the source
+programs and insert run-time checks on them if the safety cannot be determined with compiletime information. Compared with range-checking systems, this approach minimizes run-time
+overhead by eliminating unnecessary run-time checks.
+CCured, by Necula et al. [27], translates the source program in C into a CCured program.
+It extends C pointers into CCured pointer types (safe, sequence, and dynamic) through a
+constraint-based type-inference algorithm, and inserts run-time checks according to the class
+of the pointers and the operations on them (where static analysis cannot determine safety).
+Cyclone, by Jim et al. [18], is a safe dialect of C. It also extends the C pointer type so
+that an efficient run-time check can be performed, depending on the use of pointers (a “neverNULL” pointer indicates that a NULL-pointer check is unnecessary, and a fat pointer carries
+bounds information to enable bounds checks). Other enhancements by Cyclone include 1)
+prevention of dangling pointers through the programmer-supplied annotations (region analysis)
+and through the scoped dynamic memory management (growable region) that frees the region
+block automatically rather than by free; and 2) protecting variadic functions using tagged
+union (stacked parameters for printf carry their type information). A disadvantage is that
+programs have to be ported to Cyclone.
+3.5.
+
+Intrusion detection techniques using system call trace
+
+These are anomaly detection techniques that compare the sequence of system calls executed
+by the program with the predefined “normal” sequence of system calls, introduced by Forrest
+et al. [15]. These techniques are based on the assumption that a serious attack has to use
+the underlying operating system facilities, which are accessed through system calls. Most
+buffer overflow attacks discussed in this paper spawn a process by executing exec or system
+system call, which is likely to deviate from the normal sequence of system calls. Therefore,
+this approach is highly effective in detecting such attacks. They can also detect various kinds
+of intrusions (such as Trojan horses), not just buffer overflow attacks. However, they model
+normal program behavior as a sequence of system calls, ignoring other aspects of program
+behavior. While this simplified model can detect most intrusions, it can be bypassed by, for
+example, mimicry attacks [44], in which the attack is made to behave like the predefined model
+(i.e., the sequence of system calls executed by the attack does not deviate from the model).
+The three techniques introduced here are different from each other in the way in which they
+define normal behavior, which affects accuracy and run-time overhead.
+Forrest et al. define normal program behavior as a set of fixed-length system call sequences
+(referred to as N-grams by Sekar et al. [34]), which is built from the observed sequence of
+system calls in the learning stage.
+Sekar et al. [34] define normal program behavior as finite state automata, which is also built
+from the observed sequence of system calls in the learning stage. Finite state automata has a
+number of advantages over the N-gram, which include the following:
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+26
+
+K. LHEE AND S. J. CHAPIN
+
+1. FSA provides a compact way to model a program, whereas N-grams can be quite large.
+2. Matching FSA is faster than looking up what may be a large N-grams.
+3. FSA is more accurate. For example, an invalid subsequence of system calls S 0 S3 S4 S2
+is regarded as normal if trigrams include S0 S3 S4 and S3 S4 S2 . FSA does not have such
+problems.
+4. Accuracy of N-grams depends on their size. If too small, they would miss out on many
+valid system call sequences. If too big, they would become too inclusive to be effective
+in detecting anomalies. FSA does not have such intricacy.
+Learning FSA from a sequence of system calls is difficult. For example, it is difficult to find
+out from a sequence of system calls S0 S1 S2 S4 S2 whether the two occurrences of S2 are from
+the same state or not. Sekar et al. obtain the necessary state information using the program
+counter, in addition to the system calls. That is, the two occurrences of S 2 are from the same
+state if they are associated with the same program counter.
+Wagner and Dean [44] provide four ways to define normal program behavior, using static
+analysis rather than observing a sequence of system calls in the learning stage. Static analysis
+can yield a more accurate model of normal program behavior than program learning, since
+static analysis can uncover all the possible paths in the program, whereas program learning can
+miss program paths that are rarely executed. The four methods of defining normal program
+behavior are the following:
+1. A trivial model is a set of system calls that can be called in the program. This method
+is less accurate since it ignores the sequencing information of system calls. It becomes
+too inclusive to be effective if the set includes too many system calls, so this method
+does not scale well to large programs.
+2. The callgraph model is a non-deterministic finite automaton built from the control-flow
+graph of the program. Unlike FSA by Sekar et al., an NDFA built from static analysis
+does not produce false alarms. However, the callgraph model is still imprecise, since it
+cannot express the calling context (a term by Horwitz et al. [17]) of function calls. For
+example, when a function f1 is returned it should return to the calling function (say,
+f0 ). Since a callgraph treats all the functions that call f1 as return points, it can include
+impossible paths that can be exploited.
+3. The abstract stack model is a non-deterministic push-down automaton that expresses
+function calls and system calls in a program. This approach solves the calling context
+problem. However, matching NDPDA can be too expensive, because for each system call
+there can be multiple choices (that is, there is more than one transition from a state on
+the same input). Naively listing all the possible transitions would not work, because the
+list can grow exponentially.
+4. The digraph model is a digram, which is the same method used by [15].
+3.6.
+
+A lightweight range-checking system
+
+We describe our solution that range-checks the referenced buffers at run time [24]. It is a small
+extension to the GNU C compiler, which augments an executable file with a data structure that
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+BUFFER OVERFLOW AND FORMAT STRING OVERFLOW VULNERABILITIES
+
+Function array
+
+Variable arrays
+
+start addr
+
+fptr offset
+
+end addr
+
+size
+
+27
+
+ptr
+
+...
+
+...
+...
+Figure 25. A type table consists of a function array and variable arrays.
+
+describes type information of automatic buffers (local variables and parameters of functions)
+and static buffers (global variables in the data/bss section). The data structure, called the type
+table, can then be looked up at run time. We provide wrapper functions for the vulnerable
+copy functions in the C library (such as strcpy), which look up the type table before calling the
+real functions. Sizes of heap buffers are maintained in a separate table by intercepting malloc,
+realloc, and free.
+The type table keeps information of the functions and their automatic/static variables, as
+illustrated in Figure 25. We look up the type table and find the size of an automatic buffer as
+follows:
+1. Locate the stack frame that contains the buffer by chasing the saved frame pointers
+in the stack.
+2. Look up the type table for the function that allocated the buffer, using the return
+address in the next stack frame as a key.
+3. Look up the type table for the buffer, using the pointer in the function entry, the frame
+pointer offset in the variable entry, and the address of the buffer.
+A (local) type-table constructor function is appended to each object file, so that the (global)
+type table of a process is built at run time (Figure 26). The modified compilation process for
+appending a constructor function is illustrated in Figure 27. The main reason for the use of
+the constructor function is to include dynamically linked object files.
+There are several advantages to our approach. The compilation is transparent, using the
+makefile in the source distribution. Type table-appended object files are compatible with native
+object files. Since the type table is built at run time, both statically and dynamically linked
+objects are protected. Most important, our approach is insensitive to which attack was chosen,
+since it detects the actual occurrences of buffer overflows (a characteristic of range-checking
+systems), whereas other defensive techniques can be bypassed, as discussed in Section 2. Our
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+28
+
+K. LHEE AND S. J. CHAPIN
+
+
+
+
+
+
+
+shared lib
+
+type
+table
+ptr
+
+table 3
+table 2
+table 1
+
+obj 3
+
+obj 3
+
+ctor 3
+
+ctor 3
+
+obj 2
+
+obj 2
+
+ctor 2
+
+ctor 2
+
+obj 1
+
+obj 1
+
+ctor 1
+
+ctor 1
+
+a.out
+
+process
+
+Figure 26. An executable file and a process.
+
+src.c
+preprocess (cpp0)
+
+src.i
+
+cc1 wrapper
+
+src.s
+compile
+(cc1 −g)
+src.i
+
+parse
+stabs
+statements
+
+static void ctor()
+__attribute__ ((constructor))
+{
+// make local table
+Typetable tab = ...;
+
+ctor
+compile and assemble
+
+// append it to global table
+global_ctor(tab);
+}
+
+src.o
+ctor
+
+Figure 27. In the dashed line the compilation stage (cc1 ) of gcc is intercepted so that a preprocessed
+source file is precompiled with the debugging option turned on. The stabs debugging statements in the
+resulting assembly file are then parsed to produce the constructor function. The constructor function
+(on the right) is attributed so that it runs before main does (a gcc extension to the C language).
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+BUFFER OVERFLOW AND FORMAT STRING OVERFLOW VULNERABILITIES
+
+29
+
+approach is lightweight since we check only the vulnerable copy functions in the C library.
+Although this is not as complete as the range-checking systems in Section 3.2, it is highly
+effective and efficient for the detection of security-relevant buffer overflows. Run-time overhead
+incurred by each wrapper function is rather high, particularly if the length of the input string
+is short (for example, strcpy with an 8-character string as the input yielded 500% overhead).
+However, overhead from real world programs was mostly negligible (for example, a test run of
+the original enscript program took three minutes and one seconds, while type table-appended
+enscript took three minutes and ten seconds, that is, 5% overhead. Both programs called the
+(wrapped) C library functions 6,345,760 times).
+
+4.
+
+FORMAT STRING OVERFLOW VULNERABILITY
+
+String format functions in the C library take variable number of arguments, one of which is
+the format string that is always required. The format string can contain two types of data:
+printable characters and format-directive characters. To access the rest of the parameters
+that the calling function pushed on the stack, the string format function parses the format
+string and interprets the format directives as they are read. For example, printf in Figure 28
+parses the format string “format %s%d” and retrieves two parameters from the stack, a string
+pointer and an integer, in addition to printing the string “format ”. The number and types
+of the parameters pushed on the stack must match the directives in the format string. If the
+number of directives is less than the number of parameters, then the string format function will
+“underflow” the stack (its activation record). If the number of directives exceed the number of
+parameters, then it will “overflow” the stack. If a wrong directive is given for the corresponding
+parameter, the string format function will misinterpret the parameter. Therefore, if users can
+control the format string, then they can exploit the behavior of string format functions and
+alter the memory space of the process; printf shown in Figure 28 is safe, since the format
+string is static. However, printf in Figure 29 is vulnerable, since the format string is supplied
+by users.
+Format string overflow attacks are similar to buffer overflow attacks, since they also can
+alter the memory space and execute arbitrary code, but it is a different kind of attack that
+exploits the vulnerability of variadic functions such as string format functions.
+4.1.
+
+Format string overflow exploitation
+
+The four techniques below, by [33, 40], show how to exploit format string overflow vulnerability.
+4.1.1.
+
+Viewing the memory
+
+The printf below prints the values of five consecutive words in the stack (as eight-digit padded
+hexadecimal numbers). We can walk up the stack this way and view the contents of the stack.
+printf(“%08x %08x %08x %08x %08x”);
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+30
+
+K. LHEE AND S. J. CHAPIN
+
+"format %s%d"
+
+i
+s
+format string ptr
+return addr
+saved frame ptr
+local variables
+
+Figure 28. Activation record of printf(“format %s%d”, s, i) that has three parameters: the format
+string pointer, a string pointer, and an integer. A format function uses an internal stack pointer to
+access the parameters in the stack as it encounters the directives in the format string.
+
+void vulnfunc (char *user)
+{
+...
+printf(user);
+}
+Figure 29. A vulnerable function that has user-supplied (or user-alterable) format string. The printf
+is most likely expecting printable characters only. It would be safe if it is called as printf(“%s”, user)
+instead.
+
+4.1.2.
+
+Overwriting a word in the memory
+
+The %n directive writes an integer value, the number of characters that is written by the
+format function so far, at the location pointed by the corresponding parameter. The following
+printf writes at 0x08480110 a small integer value. The five %08x’s are used to pop the internal
+stack pointer so that it points to the format string itself when %n is processed (assuming that
+the format string itself is stored in the stack prior to this function). Figure 30 illustrates this.
+printf(“\x10\x01\x48\x08%08x%08x%08x%08x%08x%n”);
+The printf above writes 44 at 0x08480110 (four characters for “\x10\x01\x48\x08” and
+eight characters for each “%08x”). We can control the number of characters to be written
+(thus the value we write at 0x08480110) by using the minimum field width specifier if the
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+BUFFER OVERFLOW AND FORMAT STRING OVERFLOW VULNERABILITIES
+
+MSB
+
+31
+
+LSB
+\0 s %
+
+x 8 0 %
+x 8 0 %
+x 8 0 %
+x 8 0 %
+internal
+stack ptr
+when
+processing
+%n
+
+x 8 0 %
+
+internal
+stack ptr
+
+format string ptr
+
+08 48 01 10
+
+return addr
+saved frame ptr
+local variables
+
+Figure 30. Writing an integer value at an arbitrary memory location.
+
+value of the specifier is not too large. However, many implementations of the C library cannot
+handle an arbitrarily large value of width specifier.
+4.1.3.
+
+Overflowing a buffer using minimum field width specifier
+
+This is similar to the stack-smashing attack, since it overflows a buffer and overwrites the return
+address with the address of a code pointer. It overflows the buffer using the minimum field
+width specifier of a format directive. In the function in Figure 31, safebuf cannot be overflowed
+through the parameter user due to the use of snprintf, so the stack-smashing attack cannot
+exploit this program. The safebuf, however, is the format string of the next sprintf, so it will be
+interpreted before it is copied to vulnbuf. For example, a format string “%512d” (the content
+of safebuf ) will result in printing 512 characters to vulnbuf due to the minimum field width
+specifier 512, which in effect overflows vulnbuf. Figure 31 shows the exploit that overflows the
+vulnbuf and overwrites the return address with the address of a shellcode.
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+32
+
+K. LHEE AND S. J. CHAPIN
+
+user
+
+shellcode
+
+shellcode
+
+shellcode
+
+nop’s
+
+nop’s
+
+nop’s
+
+bf ff d3 3c
+
+bf ff d3 3c
+
+bf ff d3 3c
+
+d 3 1 5
+
+d 3 1 5
+
+d 3 1 5
+
+% a a a
+
+% a a a
+
+% a a a
+
+shellcode
+
+void func(char *user)
+{
+return addr
+char safebuf[512];
+char vulnbuf[512];
+saved frame ptr
+snprintf(safebuf, 512, "%s", user);
+sprintf(vulnbuf, safebuf);
+}
+
+saved frame ptr
+
+vulnbuf[512]
+
+vulnbuf[512]
+
+nop’s
+return addr
+
+bf ff d3 3c
+
+an integer
+value (513
+characters)
+
+a a a
+interpreted
+
+safebuf[512]
+
+before snprintf
+
+shellcode
+
+shellcode
+
+nop’s
+
+nop’s
+
+bf ff d3 3c
+
+bf ff d3 3c
+
+d 3 1 5
+% a a a
+
+d 3 1 5
+% a a a
+
+snprintf(safebuf, 512,
+"%s", user)
+
+sprintf(vulnbuf, safebuf)
+
+Figure 31. A program vulnerable to the minimum field width specifier and the exploit.
+
+4.1.4.
+
+Overwriting a code pointer using %n format directive
+
+As mentioned before, we cannot write an arbitrarily large integer value using the minimum
+field width specifier while exploiting a %n directive. However, we can write an arbitrary value
+that fits in a byte, since it will not be that large. To write an arbitrary integer value, therefore,
+we write a byte at a time, from the least significant byte to the most significant one. For
+example, we can write 0x80402010 by writing 0x10, 0x20, 0x40 and 0x80. Figure 32 illustrates
+this.
+Note that, since we are writing four times within one string format function in Figure 32,
+the number of characters written so far is strictly increasing and so is the value of each write.
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+BUFFER OVERFLOW AND FORMAT STRING OVERFLOW VULNERABILITIES
+
+33
+
+printf("%16u%n%16u%n%32u%n%64u%n",
+1, (int *)&foo[0], 1, (int *)&foo[1],
+1, (int *)&foo[2], 1, (int *)&foo[3]);
+MSB
+
+LSB
+
+(1)
+
+00
+
+(2)
+00 00 00 10
+
+00 00 20 10
+
+&foo[0]
+00 00
+
+(3)
+
+00 40 20 10
+
+&foo[2]
+
+&foo[1]
+
+(4)
+
+00 00 00
+80 40 20 10
+
+&foo[3]
+
+Figure 32. The four-stage word overwrite. Four bytes are written for each write (by %n directive,
+inner square box). The first %16u writes 16 characters to stdout, so the following %n writes 16
+(hexadecimal 0x10) at &foo[0]. The first parameter (integer 1) is a dummy parameter for %16u, so
+its value is unimportant. The next parameter &foo[0] is the address at which we want to overwrite.
+For each write we advance this address by one byte. The second %16u writes another 16 characters to
+stdout, a total of 32 characters so far. The following %n thus writes 32 (hexadecimal 0x20) at &foo[1],
+and so on.
+
+This can be overcome with minor modification, since for each write only the least significant
+byte is important. For example, we can write 0x10204080 by writing 0x80, 0x140, 0x220, and
+0x310. As in Figure 32, bytes other than the least significant one will be either overwritten
+in the next write or will not be used at all. Figure 33 shows an attack code that overwrites a
+code pointer using the four-stage overwrite.
+
+5.
+
+DEFENSIVE TECHNIQUES AGAINST FORMAT STRING OVERFLOW
+
+5.1.
+
+Run-time detection systems
+
+5.1.1.
+
+FormatGuard
+
+Exploits from the previous section show that a serious format string attack needs to walk up
+the stack to get to the attack code (usually the format string itself, since it is under attackers’
+control). In order to do that it is usually necessary to have more directives in the format string
+than the number of parameters pushed on the stack.
+FormatGuard [12] is an extension to the GNU C library that provides argument-counting
+string format functions. Programs need to be recompiled, but without any modification. Calls
+to the string format functions in the source code are substituted with safe functions that
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+34
+
+K. LHEE AND S. J. CHAPIN
+
+MSB
+
+(pad,write)
+pairs
+
+(dummy,addr)
+pairs
+
+LSB
+
+"%64u%n"
+
+"%64u%n"
+
+"%64u%n"
+
+"%32u%n"
+
+"%32u%n"
+
+"%32u%n"
+
+"%16u%n"
+
+"%16u%n"
+
+"%16u%n"
+
+"%16u%n"
+
+"%16u%n"
+
+"%16u%n"
+
+& return addr + 3
+
+& return addr + 3
+
+& return addr + 3
+
+integer
+
+integer
+
+integer
+
+& return addr + 2
+
+& return addr + 2
+
+& return addr + 2
+
+integer
+
+integer
+
+integer
+
+& return addr + 1
+
+& return addr + 1
+
+& return addr + 1
+
+integer
+& of return addr
+
+internal
+stack
+pointer
+
+integer
+
+stack pop
+
+integer
+
+integer
+
+& of return addr
+
+& of return addr
+
+integer
+
+integer
+
+...
+
+...
+
+...
+
+"%08x"
+
+"%08x"
+
+"%08x"
+
+"%08x"
+
+"%08x"
+
+"%08x"
+
+format string ptr
+
+format string ptr
+
+format string ptr
+
+return addr
+
+return addr
+
+b0 70 40 30
+
+saved frame ptr
+
+saved frame ptr
+
+saved frame ptr
+
+local variables
+
+local variables
+
+local variables
+
+after printf() has read
+stackpop characters
+(number of characters
+are written to stdout)
+
+after reading (int,addr)
+pairs (more characters
+are written to stdout)
+
+after processing
+(pad,write) pairs
+
+Figure 33. A pure format string overflow exploit. The stack popping directives move the internal stack
+pointer so that it points to the beginning of the dummy integer/address pairs. When printf reaches
+the pad/write-code pairs, it overwrites the address specified in the dummy/address pairs (since the
+internal stack pointer is pointing the dummy/address pair). It overwrites the return address in this
+example.
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+BUFFER OVERFLOW AND FORMAT STRING OVERFLOW VULNERABILITIES
+
+35
+
+FormatGuard provides, using the variadic macro feature in the GNU C preprocessor (a macro
+that accepts a variable number of arguments much as a function can [39]). For example,
+printf(a, b)
+is expanded by the macro to
+protected printf( PRETTY FUNCTION , 2 - 1, a, b)
+where the PRETTY FUNCTION is for error reporting, and the extra parameter 2 − 1 is
+the actual number of parameters given to the format function (not counting the format string).
+The safe format functions verify that the number of directives in the format string does not
+exceed the number of actual parameters.
+FormatGuard protects string format functions in the C library, but cannot protect user
+written format functions or format functions that use vararg such as vsprintf (in the latter
+case it is not possible to find the actual number of parameters at compile time).
+5.1.2.
+
+Libformat
+
+Libformat [25] is an implementation of a safe subset of C library format functions. The safe
+format functions check the format string such that if the format string is in a writable segment
+and contains “%n” directives, then it is regarded as the attack. Libformat is implemented as
+a shared library that is preloaded to intercept vulnerable format functions in the C library,
+so programs need not be recompiled. A downside of Libformat is that the built-in heuristics
+can generate false alarms if a legitimate format string is in a writable segment with “%n”
+directives. Libformat is ineffective if programs are linked with the C library statically.
+5.1.3.
+
+Libsafe
+
+Libsafe checks if there are “%n” directives, and if so then it checks if the destination pointer
+points to a return address of a saved frame pointer in the stack. Unlike FormatGuard, Libsafe
+can protect vsprintf. Libsafe cannot protect programs that are statically linked with the C
+library, or compiled to run without the frame pointer.
+5.2.
+
+Static analysis technique
+
+5.2.1.
+
+Static analysis with type qualifiers
+
+The static analysis technique by Shankar et al. [35] extends the C type system with extra
+type qualifiers, tainted and untainted. Programmers specify untrusted objects as tainted and
+trusted ones as untainted. The following declarations denote that the return value of getchar
+cannot be trusted, as well as the command-line arguments to the program. On the other hand,
+the format string of printf must come from a trusted source.
+tainted int getchar();
+int main(int argc, tainted char **argv);
+int printf(untainted const char *fmt, ...);
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+36
+
+K. LHEE AND S. J. CHAPIN
+
+An untainted object can be assigned to a tainted object, but not vice versa. Not all types
+have to be annotated with tainted/untainted for this technique. A small number of key objects
+are annotated, and types of other expressions are inferred from those annotated objects. This
+technique requires programmers’ efforts, but in a way that is already familiar to them.
+
+6.
+
+CONCLUSION
+
+We have presented a variety of techniques that exploit buffer overflow and format string
+overflow vulnerabilities to change the normal program flow by altering code pointers. Such
+code pointers include the return address, C++ virtual function pointer, setjmp/longjmp buffer,
+function pointer variables, and tables of function pointers such as the global offset table, the
+destructor function table, and the exit handler table. Those code pointers can be altered
+directly by overflowing buffers or indirectly by altering other data structures such as the
+function activation record, malloc internal data, and pointer variables. We saw that format
+string overflow attacks can be as dangerous as buffer overflow attacks. Code pointers exploited
+by buffer overflow attacks can also be exploited by format string overflow attacks.
+It should be stressed that those techniques are not the only ways to exploit buffer overflow
+and format string overflow vulnerabilities, and they can be used in tandem to yield more
+complicated attacks. Also, the code pointers and data structures named in this article are
+not all of them; they are just more likely to be found in real world programs. Moreover, code
+pointers themselves are not the only targets. Generally speaking, any objects that we can
+influence to meet our purpose can be the targets. For example, we could target a file name
+pointer if all we want is to read a file. Also, an attack does not have to be a single step if the
+situation allows. For example, we could first read the target process’s memory by a format
+string overflow attack and subsequently perform the actual attack by a buffer overflow attack
+with knowledge of the memory space.
+Various kinds of defensive techniques against buffer overflow attacks have been discussed.
+Range checking systems can completely eliminate buffer overflow vulnerability, but they are
+the slowest, particularly for pointer and array intensive programs. Run-time systems such as
+StackGuard focus more on the behavior of known attacks, which enables them to perform
+their checking more efficiently. They are faster than range-checking systems, but not all the
+attacks can be detected by them. Pure static analysis techniques do not incur such run-time
+overhead. However, with only compile-time information they can generate many false alarms.
+A characteristic of static analysis techniques is that they can uncover contextual information in
+the source program under analysis. The combined static/run-time techniques take advantage of
+both static and run-time techniques. We also described our buffer overflow detection technique
+that range checks the referenced buffers at run time.
+In sum, our discussion of the buffer overflow and format string overflow exploitation reveals
+how complex it would be to defend from such vulnerabilities. It seems that a defensive technique
+would benefit from the combined static/run-time approach for a sound and complete defense.
+We think that our solution can also be used as a building block in that direction.
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+BUFFER OVERFLOW AND FORMAT STRING OVERFLOW VULNERABILITIES
+
+37
+
+REFERENCES
+
+1. Aleph One. Smashing the Stack for Fun and Profit. Phrack 1996; 7(49).
+2. Anonymous. Once upon a free()... Phrack 2001; 10(57).
+3. Austin TM, Breach SE, Sohi GS. Efficient Detection of All Pointer and Array Access Errors. ACM
+SIGPLAN 94 Conference on Programming Language Design and Implementation ACM: Orlando, FL,
+June 1994; 290–301.
+4. Baratloo A, Singh N, Tsai T. Transparent Run-Time Defense Against Stack Smashing Attacks. Proceedings
+of the 2000 USENIX Annual Technical Conference USENIX: San Jose, CA, June 2000; 251–262.
+5. Bouchareine P. atexit in memory bugs - specific proof of concept with statically linked binaries and heap
+overflows.
+http://community.corest.com/˜juliano/heap atexit.txt.
+6. Bovet DP, Cesati M. Understanding the Linux Kernel O’Reilly & Associates, Inc.: Sebastopol, CA, 2001.
+7. Bugtraq mailing list.
+http://www.securityfocus.com/archive.
+8. Bulba, Kil3r. Bypassing StackGuard and StackShield. Phrack 2000; 10(56).
+9. CERT Coordination Center.
+http://www.cert.org.
+10. Conover M, w00w00 Security Team. w00w00 on Heap Overflows.
+http://www.w00w00.org/files/articles/heaptut.txt [January 1999].
+11. Cowan C, Pu C,Maier D, Hinton H, Walpole J, Bakke P, Beattie S, Grier A, Wagle P, Zhang Q.
+StackGuard: Automatic Adaptive Detection and Prevention of Buffer-Overflow Attacks. Proceedings of
+the 7th USENIX Security Symposium USENIX: San Antonio, TX, January 1998; 63–77.
+12. Cowan C, Barringer M, Beattie S, Kroah-Hartman G, Frantzen M, Lokier J. FormatGuard: Automatic
+Protection From printf Format String Vulnerabilities. Proceedings of the 10th USENIX Security
+Symposium USENIX: Washington, D.C., August 2001;
+13. Cowan C, Wagle P, Pu C, Beattie S, Walpole J. Buffer Overflows: Attacks and Defenses for the
+Vulnerability of the Decade. Proceedings DARPA Information Survivability Conference and Exposition
+Hilton Head, SC, January 2000; 119–129.
+14. Evans D, Guttag J, Horning J, Tan YM. LCLint: A Tool for Using Specifications to Check Code. SIGSOFT
+Symposium on the Foundations of Software Engineering ACM: December 1994; 87–96.
+15. Forrest S, Hofmeyr SA, Somayaji A, Longstaff TA. A Sense of Self for Unix Processes. Proceedings of 1996
+IEEE Symposium on Security and Privacy IEEE: Oakland, CA, May 1996; 120–128.
+16. Hastings R, Joyce B. Purify: Fast Detection of Memory Leaks and Access Errors. Proceedings of the Winter
+USENIX Conference USENIX: 1992.
+17. Horwitz S, Reps T, Binkley D. Interprocedural Slicing Using Dependence Graphs. ACM Transactions on
+Programming Languages and Systems January 1990; 12(1):26–60.
+18. Jim T, Morrisett G, Grossman D, Hicks M, Cheney J, Wang Y. Cyclone: A safe dialect of C. USENIX
+Annual Technical Conference USENIX: Monterey, CA, June 2002.
+19. Jones RWM, Kelly PHJ. Backwards-Compatible Bounds Checking for Arrays and Pointers in C Programs.
+Proceedings of the Third International Workshop on Automatic Debugging Sweden, May 1997; 13–26.
+20. Kaempf M. Vudo - An object superstitiously believed to embody magical powers.
+http://www.synnergy.net/downloads/papers/vudo-howto.txt [2001].
+21. Klog. The Frame Pointer Overwrite. Phrack 1999; 9(55).
+22. kNoX.
+http://cliph.linux.pl/kNoX.
+23. Larochelle D, Evans D. Statically Detecting Likely Buffer Overflow Vulnerabilities. Proceedings of the 10th
+USENIX Security Symposium USENIX: Washington D.C, August 2001;
+24. Lhee K, Chapin SJ. Type-Assisted Dynamic Buffer Overflow Detection. Proceedings of the 11th USENIX
+Security Symposium USENIX: San Francisco, CA, August 2002;
+25. Libformat.
+http://box3n.gumbynet.org/˜fyre/software/libformat.html.
+26. Mudge. How to Write Buffer Overflows.
+http://10pht.com/advisories/bufero.html [1995]
+27. Necula GC, McPeak S, Weimer W. CCured: Type-Safe Retrofitting of Legacy Code. Twenty-Ninth ACM
+Symposium on Principles of Programming Languages ACM: Portland, OR, January 2002.
+28. Nergal. The advanced return-into-lib(c) exploits: PaX case study. Phrack 2001; 10(58).
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+38
+
+K. LHEE AND S. J. CHAPIN
+
+29. PaX.
+https://pageexec.virtualave.net.
+30. Rivas J. Overwriting the .dtors section.
+http://www.synnergy.net/downloads/papers/dtors.txt.
+31. Rix. Smashing C++ VPTRs. Phrack 2000; 10(56).
+32. RSX.
+http://www.ihaquer.com/software/rsx.
+33. Scut, team teso. Exploiting Format String Vulnerabilities.
+http://www.team-teso.net/releases/formatstring-1.2.tar.gz [September 2001]
+34. Sekar R, Bendre K, Dhurjati D, Bollineni P. A Fast Automaton-Based Method for Detecting Anomalous
+Program Behaviors. Proceedings of 2001 IEEE Symposium on Security and Privacy IEEE: Oakland, CA,
+May 1996; 144–155.
+35. Shankar U, Talwar K, Foster JS, Wagner D. Detecting Format String Vulnerabilities with Type Qualifiers.
+Proceedings of the 10th USENIX Security Symposium USENIX: Washington D.C., August 2001.
+36. Solar Designer. Non-executable stack patch.
+http://www.openwall.com/linux.
+37. Solar Designer. Getting around non-executable stack (and fix). Bugtraq mailing list;
+http://www.securityfocus.com/archive/1/7480 [August 1997].
+38. StackShield.
+http://www.angelfire.com/sk/stackshield.
+39. Stallman RM. Using and Porting GNU CC (Version 2.95). Free Software Foundation: Boston, MA, 1999.
+40. Thuemmel A. Analysis of Format String Bugs.
+http://julianor.tripod.com/format-bug-analysis.pdf [February 2001].
+41. TIS. Executable and Linkable Format Version 1.1.
+ftp://download.intel.com/design/perftool/tis/elf11g.zip.
+42. Twitch. Taking Advantage of Non-terminated Adjacent Memory Spaces. Phrack 2000; 10(56).
+43. Wagner D, Foster JS, Brewer EA, Aiken A. A First Step Towards Automated Detection of Buffer Overrun
+Vulnerabilities. Network and Distributed System Security Symposium San Diego, CA, February 2000;
+3–17.
+44. Wagner D, Dean D. Intrusion Detection via Static Analysis. Proceedings of 2001 IEEE Symposium on
+Security and Privacy IEEE: Oakland, CA, May 1996; 156–168.
+45. Wojtczuk R. Defeating Solar Designer non-executable stack patch. Bugtraq mailing list;
+http://www.securityfocus.com/archive/1/8470.
+
+Copyright c
+° 2002 John Wiley & Sons, Ltd.
+
+Softw. Pract. Exper. 2002; 00:1–7
+
+

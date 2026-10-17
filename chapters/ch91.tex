@@ -1,0 +1,211 @@
+\chapter{Closures, Lambda Lifting, and Combinators}
+\label{ch:closures-lifting-combinators}
+
+A nested function that escapes its defining call cannot keep using a stack slot that has already disappeared.
+Its free variables must travel with it or become explicit parameters.
+Closure conversion, lambda lifting, and combinator translation solve this problem with different intermediate representations and costs.
+They should be compared by allocation, access, calling behavior, and preserved evaluation semantics rather than by syntax alone.
+
+\section{Compute free variables by binding identity}
+\label{sec:ch91-free}
+The free variables of a lambda body exclude its bound parameter and include references resolved outside the lambda.
+For lambda y.add(x,y), x is free and y is bound.
+For nested lets, the value expression of a nonrecursive let does not see its new binder, while the body does.
+A recursive let includes the binder in the scope of its right side as well.
+
+Algorithm~\ref{alg:ch91-free} collects free declaration identities.
+With explicit set unions, cost depends on set sizes and repeated copying; a single traversal with scope tracking can avoid naive quadratic accumulation in long nested syntax.
+Names must be resolved first or alpha-renaming must ensure unambiguous binders.
+Using spelling alone after shadowing can capture the wrong x even if the resulting closure layout looks plausible.
+
+\begin{algorithm}[htbp]
+\caption{Collect the free declaration identities needed by a closure.}
+\label{alg:ch91-free}
+\begin{pseudocode}
+\Require resolved syntax and parameter/local binding identities
+\Ensure exactly the references supplied by the enclosing environment
+\State traverse the body, maintaining the set of locally bound declarations
+\ForAll{variable references}
+\If{reference is not locally bound} \State add its declaration identity to captures \EndIf
+\EndFor
+\State include bindings needed by nested closures that are constructed here
+\State return captures in a deterministic layout order
+\end{pseudocode}
+\end{algorithm}
+
+The last step matters when an outer function does not itself read x but constructs an inner closure that does.
+The outer code must retain enough information to populate the inner environment.
+Deterministic field ordering simplifies generated-code tests and debug metadata.
+It also creates an ABI-like contract between closure construction and the compiled closure body.
+
+\section{Convert closures into code and environment}
+\label{sec:ch91-convert}
+Closure conversion turns the function into a code label plus an environment record.
+The converted code takes an explicit environment argument and accesses captured fields through known offsets.
+Calling a closure loads its code and environment and supplies the ordinary argument under the chosen calling convention.
+Figure~\ref{fig:ch91-layout} shows a closure capturing x=11.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=15mm and 18mm]
+\node[basic block] (closure) {closure: code, environment};
+\node[basic block,below left=of closure] (code) {code(env,y): env.x + y};
+\node[basic block,below right=of closure] (env) {field x = 11};
+\draw[cfg edge] (closure)--(code);\draw[cfg edge] (closure)--(env);
+\end{tikzpicture}
+\caption{Converted code and environment must agree on capture layout and calling convention.}
+\label{fig:ch91-layout}
+\end{figure}
+
+A flat closure copies needed values into one record; a linked environment retains parent frames and follows access paths.
+Flat access is simple but can duplicate captures across closures.
+Linked access can share frames but retain unrelated values and add indirections.
+Capturing mutable variables requires retaining the shared cell, not copying its current value, if later mutations must be visible to every closure.
+The pure lab uses cells primarily for recursive bindings and lexical environments.
+
+Table~\ref{tab:ch91-layouts} lists these tradeoffs without assigning universal performance winners.
+Escape analysis can keep some environments on the stack or eliminate them after inlining, but every escaping reference needs a valid lifetime.
+The collector must trace captured references according to the environment layout.
+A code pointer alone is not a complete function value when free variables remain.
+
+\begin{table}[htbp]
+\caption{Environment representation changes access cost, sharing, and retained memory.}
+\label{tab:ch91-layouts}
+\centering
+\begin{tabular}{lll}
+\toprule
+Representation & Benefit & Cost or obligation \\
+\midrule
+flat environment & direct capture offsets & copied fields; layout metadata \\
+linked frames & shared enclosing storage & access paths; accidental retention \\
+captured cell & shared update identity & extra indirection and traced lifetime \\
+eliminated closure & no indirect closure call & requires escape/inlining proof \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Lift free variables into explicit parameters}
+\label{sec:ch91-lifting}
+\term{Lambda lifting} moves suitable local functions to a wider scope and adds parameters for their free variables.
+The local lambda y.add(x,y) can become a top-level function addCaptured(x,y).
+Every transformed call supplies the correct x from its lexical environment.
+If the function itself escapes as a value, the remaining partial application still needs a representation for the supplied x; lifting does not universally eliminate closure allocation.
+
+Mutually recursive local functions require computing capture requirements across their call graph.
+A function may need an extra parameter solely to pass it to another lifted function.
+Fixed-point propagation over call dependencies can determine those requirements, but parameter explosion and repeated argument passing can make unrestricted lifting unattractive.
+Selective lifting measures the tradeoff rather than assuming fewer nested lambdas means faster code.
+
+Algorithm~\ref{alg:ch91-lift} describes a restricted direct-call lifting transformation.
+It assumes resolved direct callees, no escaping function value for the lifted group, and a fixed evaluation-order contract for capture expressions.
+With $F$ functions and $C$ call edges, repeated set propagation costs the number of iterations times edge/set work; strongly connected components can organize recursive groups efficiently.
+The lab explains this transformation but does not implement a production lifting pass.
+
+\begin{algorithm}[htbp]
+\caption{Lift a nonescaping direct-call group with propagated capture requirements.}
+\label{alg:ch91-lift}
+\begin{pseudocode}
+\Require resolved local function group, known direct calls, no escaping function values
+\Ensure lifted definitions and calls preserving lexical bindings
+\State collect each body's immediate free-variable requirements
+\State propagate callee capture requirements to callers until stable
+\State choose deterministic added-parameter order for each lifted function
+\State move definitions and rewrite captured references to added parameters
+\State rewrite every call to supply its callee's required lexical values
+\State verify no former local binding remains free
+\end{pseudocode}
+\end{algorithm}
+
+\section{Eliminate variables through combinators}
+\label{sec:ch91-combinators}
+Combinator translation replaces abstractions with closed operators such as I, K, and S.
+Their characteristic reductions are $I\,x\to x$, $K\,x\,y\to x$, and $S\,f\,g\,x\to f\,x\,(g\,x)$.
+For a bracket abstraction over x, x maps to I, a term not containing x can map to K applied to that term, and an application can be decomposed through S.
+These rules define a translation idea, not a guarantee of compact code.
+
+For lambda x.x the result is I.
+For lambda x.c where c is independent of x, the result is K c.
+For lambda x.f x, a direct S/K/I translation produces S(K f)I; an eta-like contraction to f needs its own semantic conditions under the chosen evaluation strategy.
+Table~\ref{tab:ch91-combinators} records the simple cases.
+
+\begin{table}[htbp]
+\caption{Bracket abstraction removes a binder by making application structure explicit.}
+\label{tab:ch91-combinators}
+\centering
+\begin{tabular}{ll}
+\toprule
+Abstraction & Elementary translation \\
+\midrule
+lambda x.x & I \\
+lambda x.c, with x absent & K c \\
+lambda x.f x, with x absent from f & S(K f)I \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Naive translation can expand code substantially and create many runtime application nodes.
+Supercombinators and richer combinator sets improve granularity by compiling larger closed functions and handling their arguments together.
+Graph reduction can share arguments rather than duplicate their full subgraphs.
+But eliminating source variables does not eliminate the need to specify evaluation strategy, heap updates, or garbage collection.
+
+Figure~\ref{fig:ch91-choices} shows three alternative paths from nested syntax.
+They are not three obligatory sequential stages of the case-study compiler.
+The implemented compiler uses ordinary closures and structured stack code; the other paths explain design choices in functional-language implementation literature.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=13mm and 12mm]
+\node[basic block] (source) {nested functional syntax};
+\node[basic block,below left=of source] (closure) {closures};
+\node[basic block,below=of source] (lift) {lifted functions};
+\node[basic block,below right=of source] (comb) {combinators};
+\draw[cfg edge] (source)--(closure);\draw[cfg edge] (source)--(lift);\draw[cfg edge] (source)--(comb);
+\end{tikzpicture}
+\caption{Closure conversion, lifting, and combinator translation offer different representation tradeoffs.}
+\label{fig:ch91-choices}
+\end{figure}
+
+\section{Optimize higher-order calls with justified target information}
+\label{sec:ch91-analysis}
+A known closure target permits direct-call specialization and sometimes environment elimination.
+Higher-order control-flow analysis approximates which closures can reach each call site.
+A singleton target set can justify devirtualization only when the approximation is sound and calling/environment conventions remain compatible.
+An empty set caused by an unfinished analysis is not a proof that the call is unreachable.
+
+Shivers develops higher-order control-flow recovery and its optimization uses~\cite{shivers-1991-control}.
+The cost and precision depend on context abstraction and representation, not merely on using a graph worklist.
+The lab does not implement that analysis; its lexical-scope and reentrant-closure examples instead test the baseline closure semantics against the stack compiler.
+These are the semantics an advanced analysis must preserve.
+
+\section{Propagate captures through a recursive call group}
+\label{sec:ch91-transitive}
+Suppose local function f directly calls local function g, and only g reads an enclosing variable x.
+If g is lifted to require x explicitly, f must be able to supply x at its call even though f's own arithmetic never inspected it.
+Thus f's lifting requirement contains more than its immediate free-variable reads.
+If f and g call one another, propagating these requirements must reach a fixed point over the recursive group.
+
+With a finite set of enclosing declarations, requirements grow monotonically by set inclusion and cannot grow forever.
+Each newly discovered required declaration must eventually propagate to every relevant predecessor call edge.
+A worklist indexed by callers avoids repeatedly scanning unrelated functions, while a strongly connected component groups mutually recursive propagation.
+The actual cost includes set representation and the number of distinct function/declaration membership additions.
+This finite dataflow argument is much clearer than describing lifting as merely adding whatever names occur in each printed body.
+
+The optimization tradeoff remains after the fixed point is correct.
+Passing x through a deep chain can add repeated call arguments; capturing one environment pointer may be cheaper on a particular target.
+Inlining g into f can remove one call but duplicate code.
+A selective lifting pass therefore separates the mandatory capture analysis from the profitability decision about which functions to lift.
+The same analysis facts can be useful for closure trimming even when no function is moved to top level.
+
+\section{Exercises}
+\label{sec:ch91-exercises}
+\begin{enumerate}
+\item\label{ex:ch91-captures} List the captures of lambda y.add(x,y) and give a flat environment layout.
+\item\label{ex:ch91-lift} Lift that lambda for known direct calls, naming the added parameter and rewritten call arguments.
+\item\label{ex:ch91-comb} Reduce S(K f)I applied to a symbol a under the stated combinator rules.
+\item\label{ex:ch91-escape} Explain why returning a lifted function partially applied to captured x can still require a closure-like value.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch91-reading}
+Appel treats closure conversion and environment representation~\cite{appel-1998-modern}.
+Shivers explains higher-order flow information~\cite{shivers-1991-control}; the STG paper develops a contrasting non-strict closure and entry design~\cite{peytonjones-1992-stg}.

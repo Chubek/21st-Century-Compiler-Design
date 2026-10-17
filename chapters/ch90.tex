@@ -1,0 +1,220 @@
+\chapter{Type Inference, Algebraic Data Types, and Pattern Compilation}
+\label{ch:functional-types-patterns}
+
+An unannotated identity function can be useful at both integer and Boolean arguments.
+An unannotated function parameter cannot necessarily be used polymorphically in the same body.
+The compiler must distinguish those cases before erasing types or compiling pattern matches.
+Inference is not permission to make every use independently acquire whatever type it needs.
+
+\section{Infer monotypes and generalize selected bindings}
+\label{sec:ch90-schemes}
+The lab monotypes are Int, Bool, type variables, arrows, and List(T).
+A \term{type scheme} quantifies selected type variables, written $\forall\alpha_1\ldots\alpha_n.\tau$.
+Using a scheme instantiates its quantified variables with fresh unknowns.
+Using a monomorphic binding shares the same unknown with every use until constraints resolve it.
+
+The let-bound identity receives scheme $\forall\alpha.\alpha\to\alpha$.
+Its application to true instantiates $\alpha$ as Bool; a separate application to seventeen instantiates a fresh variable as Int.
+By contrast, a lambda-bound f is monomorphic within its body in this Hindley--Milner fragment.
+Requiring both f(true) and f(1) forces an incompatible domain and is rejected.
+Table~\ref{tab:ch90-inference} records the cases executed by the tests.
+
+\begin{table}[htbp]
+\caption{Fresh instantiation belongs to quantified schemes, not every variable use.}
+\label{tab:ch90-inference}
+\centering
+\begin{tabular}{ll}
+\toprule
+Program shape & Inference outcome \\
+\midrule
+let id = lambda x.x; use at Bool and Int & accepted with fresh instances \\
+lambda f; require f at Bool and Int domains & incompatible monomorphic constraints \\
+lambda x; apply x to x & occurs-check failure \\
+cons integer onto Boolean list & element-type mismatch \\
+if Boolean then integer else Boolean & branch-type mismatch \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Generalization quantifies free variables of the inferred binding type that are not free in the current environment.
+The environment must be viewed through the current substitution.
+Generalizing an unknown already tied to an outer binding would incorrectly allow later uses to escape that shared constraint.
+The companion explicitly subtracts environment free variables before forming the scheme.
+
+\section{Generate and solve equality constraints}
+\label{sec:ch90-unification}
+Application infers function type F and argument type A, creates fresh result variable B, and unifies F with $A\to B$.
+A conditional requires a Bool test and equal branch types.
+Integer primitives require Int operands, and equality in this lab compares integers only.
+An empty list receives List($\alpha$) with a fresh element unknown; cons unifies its tail with List of the head's type.
+
+Algorithm~\ref{alg:ch90-infer} gives let generalization in the incremental-substitution style used by the lab.
+It mutates a solver substitution rather than returning an explicit composed substitution at every recursive call.
+All subsequent free-variable and type reads resolve through that substitution.
+This is the same semantic discipline as Algorithm W-style inference, organized for a small implementation rather than claimed to be a literal presentation of W.
+
+\begin{algorithm}[htbp]
+\caption{Infer a nonrecursive let with environment-aware generalization.}
+\label{alg:ch90-infer}
+\begin{pseudocode}
+\Require pure expression let x = value in body; scheme environment; current solver
+\Ensure body type or justified type error
+\State infer value type $\tau$ while updating equality constraints
+\State resolve $\tau$ and every relevant environment type under current substitution
+\State $Q\gets\operatorname{FTV}(\tau)\setminus\operatorname{FTV}(environment)$
+\State extend environment with $x:\forall Q.\tau$
+\State infer body under the extended environment
+\end{pseudocode}
+\end{algorithm}
+
+The solver uses an occurs check: solving $\alpha=\alpha\to\beta$ would require an infinite finite-type tree and fails.
+It distinguishes Bool from Int even though Python's Boolean values are integer subclasses; the source language's type system does not inherit that host-language quirk.
+The implementation checks Boolean syntax and types before integer syntax and types.
+Its tests include applying a number as a function and mixing list element types.
+
+There is no general linear source-size bound for this elementary inference engine.
+Repeated resolution, structural types, free-variable scans, and explicit type growth contribute cost, and principal types can be large.
+A production implementation uses sharing, union-find-like structures, levels for generalization, and carefully bounded diagnostic rendering.
+A union-find component alone does not eliminate occurs checking or the cost of a very large inferred type.
+
+\section{Handle recursion without polymorphic recursion guesses}
+\label{sec:ch90-recursive}
+For letrec f=lambda... in body, introduce a fresh monotype for f before inferring its right side.
+Infer the lambda while recursive references use that same monotype, then unify the placeholder with the inferred type.
+Afterward, generalize relative to the outer environment for uses in the body.
+This supports ordinary monomorphic recursion with a polymorphic exported binding when justified.
+
+It does not infer arbitrary polymorphic recursion where recursive calls instantiate the function at structurally different types within its own definition.
+Adding such a feature typically needs annotations or a different inference contract.
+Likewise, unrestricted let generalization in a language with mutable references requires an effect-sensitive restriction such as a value restriction.
+Our core is pure and has no reference allocation, so that additional language feature is not silently assumed.
+
+Figure~\ref{fig:ch90-flow} shows how constraints precede representation choices.
+The compiler consumes solved types for primitive legality and constructor shape but the reference runtime retains ordinary tagged host values.
+The implementation does not claim unboxed polymorphic specialization merely because its checker inferred a type.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=12mm]
+\node[basic block] (syntax) {validated core expression};
+\node[basic block,below=of syntax] (constraints) {fresh variables and equality constraints};
+\node[basic block,below=of constraints] (schemes) {solved types and let schemes};
+\node[basic block,below=of schemes] (lower) {typed primitives and constructor lowering};
+\draw[cfg edge] (syntax)--(constraints);\draw[cfg edge] (constraints)--(schemes);\draw[cfg edge] (schemes)--(lower);
+\end{tikzpicture}
+\caption{Inference justifies later operations but does not by itself implement a specialized representation.}
+\label{fig:ch90-flow}
+\end{figure}
+
+\section{Compile algebraic cases through constructor tests}
+\label{sec:ch90-patterns}
+An algebraic data type is described by constructors and their field types.
+The lab implements the list type with Nil and Cons, while the general design extends to arbitrary declared sums and products.
+A case first identifies the constructor, then exposes only that constructor's fields to its branch.
+The empty branch and cons branch must have the same result type.
+
+Algorithm~\ref{alg:ch90-case} compiles the lab's exhaustive two-constructor case.
+Its dispatch is constant-time once the scrutinee's outer constructor is available; evaluating that scrutinee can take arbitrary computation.
+In the lazy machine, exposing Cons does not force its head or tail.
+In the strict machine those fields were evaluated during construction.
+
+\begin{algorithm}[htbp]
+\caption{Lower a typed list case without evaluating the unselected branch.}
+\label{alg:ch90-case}
+\begin{pseudocode}
+\Require list scrutinee, empty branch, cons field binders and branch; equal result types
+\Ensure selected branch with correctly bound fields
+\State evaluate scrutinee to its required outer constructor
+\If{constructor is Nil} \State execute empty branch
+\Else
+\State bind head and tail fields in a fresh lexical environment
+\State execute cons branch under that environment
+\EndIf
+\end{pseudocode}
+\end{algorithm}
+
+General nested patterns form a matrix of constructors, variables, literals, and wildcards.
+Decision-tree compilation chooses a column to inspect, specializes constructor rows, and carries default rows into compatible branches.
+Source rule order matters when patterns overlap, and guards can fail after a structural match.
+A DAG can share tests across branches, but sharing must not reorder effects or demand lazy fields earlier than the source semantics allows.
+
+Figure~\ref{fig:ch90-case} gives the simple list decision tree.
+Coverage checking for general nested and recursive types is more involved than counting distinct first-level constructors.
+Redundancy checking asks whether an earlier pattern/guard combination already covers a later one.
+The lab validates only its fixed two-arm syntax and does not implement a general pattern-matrix compiler or exhaustiveness solver.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=14mm and 15mm]
+\node[basic block] (tag) {inspect outer list constructor};
+\node[basic block,below left=of tag] (nil) {Nil: empty branch};
+\node[basic block,below right=of tag] (cons) {Cons: bind h,t; body};
+\draw[cfg edge] (tag)--(nil);\draw[cfg edge] (tag)--(cons);
+\end{tikzpicture}
+\caption{Constructor dispatch exposes fields only on the branch where their representation exists.}
+\label{fig:ch90-case}
+\end{figure}
+
+\section{Use types without discarding diagnostics}
+\label{sec:ch90-diagnostics}
+A failed unification is most useful when it names the two conflicting constraints and their source spans.
+The minimal lab reports mismatch categories but does not retain rich source spans through inference.
+A production elaborator should preserve provenance while normalizing types, especially when one occurrence creates a constraint and a distant occurrence reveals its inconsistency.
+Pretty-printing inferred type variables deterministically also makes regression tests and user reports reproducible.
+
+Table~\ref{tab:ch90-pattern-obligations} lists contracts that richer language additions would require.
+Type erasure preserves behavior only when runtime operations still implement the checked representation and required dynamic tests.
+An optimizer replacing a typed node must update or recompute its attached type facts, not retain a stale annotation from the old expression.
+
+\begin{table}[htbp]
+\caption{Richer functional-language features add static and runtime obligations together.}
+\label{tab:ch90-pattern-obligations}
+\centering
+\begin{tabular}{ll}
+\toprule
+Feature & Additional machinery \\
+\midrule
+general algebraic types & declarations, constructor schemes, layout metadata \\
+nested patterns & ordered decision compilation and coverage checks \\
+mutable references & restricted generalization and effect-aware optimization \\
+polymorphic recursion & explicit annotation/inference policy \\
+unboxed specialization & calling and representation consistency at every use \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Work a recursive list function's constraints}
+\label{sec:ch90-sum-constraints}
+The sum example illustrates how several local constraints determine a recursive type together.
+Give the recursive binding sum a fresh placeholder $\alpha$ and the lambda parameter xs a fresh type $\beta$.
+The case scrutinee requires $\beta=\operatorname{List}(\gamma)$ for fresh element type $\gamma$.
+The empty branch returns integer zero, so the case result must be Int.
+In the cons branch, head has type $\gamma$ and tail has type List($\gamma$).
+
+The addition requires head to be Int, solving $\gamma=\operatorname{Int}$.
+The recursive call sum(tail) constrains $\alpha$ to an arrow from List(Int) to a fresh result type, and addition requires that result to be Int.
+The lambda therefore has type List(Int)$\to$Int.
+Unifying it with the recursive placeholder is consistent and closes the recursive obligation.
+No polymorphic recursive instantiation was needed inside the body.
+
+This example also explains why constraints must flow both forward and backward through syntax.
+Nil alone leaves its element type unknown, but a later cons head or case branch can constrain it.
+Inferring each subexpression once and freezing its first printed type would miss those equations.
+The solver keeps references to shared unknowns and resolves them under the current substitution whenever a type is consumed or generalized.
+After successful inference, the case compiler can trust that both arms return Int and that the cons fields have the promised element and list types.
+
+\section{Exercises}
+\label{sec:ch90-exercises}
+\begin{enumerate}
+\item\label{ex:ch90-id} Derive the scheme of let-bound identity and its two instances for true and seventeen.
+\item\label{ex:ch90-self} Generate the type equation for lambda x.app(x,x) and explain the occurs-check failure.
+\item\label{ex:ch90-list} Infer the type of cons(4,cons(7,nil)) and locate the conflict if seven is replaced by true.
+\item\label{ex:ch90-case} Type a case returning eight for Nil and the head for Cons.
+What type must its list elements have?
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch90-reading}
+Milner develops the polymorphic typing foundation~\cite{milner-1978-polymorphism}.
+Appel develops ML implementation, inference, and pattern compilation in a larger compiler setting~\cite{appel-1998-modern}.
+The finite-term unification chapter provides the occurs-check foundation, while the earlier type-theory chapter distinguishes explicit checking from inference.

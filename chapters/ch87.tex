@@ -1,0 +1,223 @@
+\chapter{Graph Transformation and Compiler IR Rewriting}
+\label{ch:compiler-graph-transformation}
+
+A compiler graph contains more than expression children.
+Value uses, control edges, block ownership, dominance, memory dependencies, and exception successors all constrain a valid transformation.
+Deleting a node because its local pattern matches can leave a user pointing at nothing or a value definition on the wrong side of a branch.
+Graph transformation therefore needs an interface between the matched region and the context that remains.
+
+\section{Specify what the rule preserves}
+\label{sec:ch87-interface}
+A common algebraic description uses a span $L\leftarrow K\to R$.
+The left graph L is matched, the interface K identifies preserved structure, and R describes the replacement including that interface.
+The host graph supplies the surrounding context.
+This description separates deleting structure, preserving structure, and adding structure instead of treating a rule as an unstructured before/after drawing.
+
+\term{Double-pushout graph rewriting} formalizes deletion and gluing through categorical constructions under stated graph-category assumptions~\cite{graphtransformation-2006-fundamentals}.
+For the ordinary injective setting, a central operational issue is the dangling condition: deleting a vertex must not leave an incident context edge without an endpoint.
+Other frameworks, such as single-pushout approaches, can delete incident edges automatically, which gives different semantics.
+A compiler cannot choose between those policies accidentally.
+
+Figure~\ref{fig:ch87-interface} illustrates a producer-consumer replacement whose external input and output remain available.
+The preserved boundary is a contract for clients outside the matched region.
+For SSA IR, it includes type-compatible results and any control/memory token results, not only the main arithmetic value.
+This chapter explains general graph-rewrite design, while the lab executes only a restricted deletion check with a supplied match.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=12mm]
+\node[basic block] (i) {preserved external inputs};
+\node[basic block,below=of i] (l) {matched internal region L};
+\node[basic block,below=of l] (o) {preserved result interface K};
+\draw[cfg edge] (i)--(l);\draw[cfg edge] (l)--(o);
+\end{tikzpicture}
+\caption{An IR rewrite must preserve the interface observed by the surrounding program.}
+\label{fig:ch87-interface}
+\end{figure}
+
+\section{Check dangling references before deletion}
+\label{sec:ch87-dangling}
+Suppose vertices are $\{0,1\}$ with edge $0\to1$.
+Deleting vertex one while preserving that edge is invalid.
+If the rule explicitly deletes the edge too, a fuller deletion operation can be valid; if it redirects the edge to a replacement vertex, the use can remain satisfied.
+The restricted companion deletes only isolated selected vertices, so it rejects any incident edge rather than silently choosing a redirection policy.
+
+Table~\ref{tab:ch87-dangling} gives the executed cases.
+The provided match is a set of vertex IDs, not a solved general subgraph-isomorphism problem.
+General graph matching can be combinatorial; typing, fixed labels, bounded patterns, and IR-specific indexes often make practical compiler matching manageable.
+Those engineering restrictions should be included before quoting a matching complexity bound.
+
+\begin{table}[htbp]
+\caption{Deleting a node and deleting its references are separate graph operations.}
+\label{tab:ch87-dangling}
+\centering
+\begin{tabular}{lll}
+\toprule
+Edges & Deleted vertices & Restricted lab outcome \\
+\midrule
+$\{0\to1\}$ & $\{1\}$ & reject dangling edge \\
+empty & $\{1\}$ & retain vertex zero \\
+empty & unknown vertex two & reject unknown vertex \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Algorithm~\ref{alg:ch87-delete} checks that restricted contract transactionally.
+With explicit sets, membership is expected constant time and checking every edge costs $O(|E|+|D|)$ for deleted set D, excluding output-set copying.
+Adjacency indexes can check only incident edges but must themselves be maintained correctly.
+The algorithm never mutates the original graph on failure.
+
+\begin{algorithm}[htbp]
+\caption{Delete supplied isolated vertices without inventing an edge-removal policy.}
+\label{alg:ch87-delete}
+\begin{pseudocode}
+\Require vertex set $V$, valid edge set $E$, selected deletion set $D$
+\Ensure graph with $D$ removed, or unchanged input and a diagnostic
+\State require $D\subseteq V$
+\ForAll{edges $(u,v)\in E$}
+\If{$u\in D$ or $v\in D$} \State reject dangling incident edge \EndIf
+\EndFor
+\State return $(V\setminus D,E)$ as a new graph
+\end{pseudocode}
+\end{algorithm}
+
+\section{Preserve SSA and control validity}
+\label{sec:ch87-ssa}
+Replacing every use of value v with value w requires compatible types and dominance of each new use.
+An apparently equivalent value computed only in one branch cannot replace a value used after a join unless the necessary path conditions or merge structure are preserved.
+For phi-like nodes, the use belongs to an incoming edge and its predecessor context, not simply the textual location of the merge instruction.
+A CFG edit can also change the analyses used to justify the rewrite.
+
+Figure~\ref{fig:ch87-dominance} shows a value produced on only one arm.
+Moving its use to the join without a valid merge or dominating definition makes the IR ill-formed even before asking whether its numeric computation is equivalent.
+Graph well-formedness and semantic preservation are different verification layers.
+A graph-category gluing condition by itself does not establish dominance, memory ordering, or exception behavior.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=13mm and 17mm]
+\node[basic block] (e) {branch};\node[basic block,below left=of e] (l) {define w};
+\node[basic block,below right=of e] (r) {no w};\node[basic block,below=of e,yshift=-22mm] (j) {join uses v};
+\draw[cfg edge] (e)--(l);\draw[cfg edge] (e)--(r);\draw[cfg edge] (l)--(j);\draw[cfg edge] (r)--(j);
+\end{tikzpicture}
+\caption{A branch-local definition cannot replace a join-visible value without a dominance argument.}
+\label{fig:ch87-dominance}
+\end{figure}
+
+Memory operations add ordering constraints beyond value edges.
+Replacing two loads by one requires an intervening-effect argument and compatible access semantics.
+Deleting a call because its result is unused may remove I/O, exceptions, synchronization, or divergence.
+The effect-aware IR chapter provides the summaries that such rules need; a graph matcher only locates the candidate region.
+
+\section{Build and commit a replacement atomically}
+\label{sec:ch87-transaction}
+A replacement can fail halfway through allocation or invariant checking.
+Publishing new uses before their definitions or deleting old nodes before all uses are redirected exposes an invalid intermediate graph to verifiers and concurrent readers.
+Algorithm~\ref{alg:ch87-commit} uses a private replacement and explicit commit boundary.
+The actual engine may use an undo log instead, but it must provide equivalent rollback and publication guarantees.
+
+\begin{algorithm}[htbp]
+\caption{Commit an IR graph rewrite only after structural and semantic checks succeed.}
+\label{alg:ch87-commit}
+\begin{pseudocode}
+\Require valid IR, matched region and version, established rule premises
+\Ensure valid committed replacement or unchanged visible IR
+\State allocate replacement privately and connect its preserved interface
+\State validate types, arities, dominance, control successors, and memory results
+\State revalidate match and analysis versions at the commit boundary
+\State redirect all selected uses according to the rule's sharing policy
+\State publish replacement and retire unreachable old nodes safely
+\State invalidate or update affected analyses and reverse-use indexes
+\end{pseudocode}
+\end{algorithm}
+
+Local structural checks cost the size of the replacement and touched use lists.
+Dominance or alias recomputation can involve the whole function, so a universal constant-time rewrite claim is usually false.
+Incremental maintenance can reduce common-case cost but introduces its own consistency invariants.
+An analysis invalidation table should say which edits preserve it, which update it, and which force recomputation.
+
+Table~\ref{tab:ch87-invalidation} illustrates those dependencies.
+A mere operator replacement preserving all control edges can still alter effects or use counts.
+A CFG edit can invalidate dominance, loops, and phi-edge mappings even when no arithmetic opcode changes.
+Recording only a generic modified flag makes both unnecessary recomputation and stale-analysis bugs harder to diagnose.
+
+\begin{table}[htbp]
+\caption{Different graph edits invalidate different compiler facts.}
+\label{tab:ch87-invalidation}
+\centering
+\begin{tabular}{ll}
+\toprule
+Edit & Facts needing review \\
+\midrule
+replace value result & type compatibility, uses, value analyses \\
+change memory operation & alias/effect summaries, memory dependencies \\
+add or remove CFG edge & dominance, loops, merge inputs, reachability \\
+split shared computation & use counts, cost, effect duplication \\
+remove block & debug spans, exception edges, live metadata references \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Parallelize independent matches only with conflicts defined}
+\label{sec:ch87-parallel}
+Two matches can be node-disjoint yet interfere through analysis premises or shared external uses.
+For example, both can rely on a one-use condition that one rewrite changes, or both can redirect the same preserved interface.
+A conflict relation should cover read/write sets of graph structure, analysis epochs, and ownership changes.
+Optimistic parallel engines need validation and retry; serial engines still benefit from explicit conflict information for scheduling.
+
+The lab does not implement parallel graph rewriting or a complete DPO framework.
+Its supplied-match deletion fixture and shared-term update isolate two concrete hazards that larger implementations must handle.
+The chapter's broader contracts connect those hazards to real compiler IR rather than implying that a few pointer edits constitute a general graph-transformation library.
+
+\section{Use negative conditions and preserved identity deliberately}
+\label{sec:ch87-negative}
+Some graph rules require the absence of a structure, such as no additional uses of an intermediate result or no exceptional edge from a candidate region.
+These are negative application conditions, not ordinary positive pattern edges.
+A matcher finding all required nodes has not established an absence claim unless it also checks the complete relevant neighborhood.
+An incomplete use list can therefore make a locally convincing graph rule unsound.
+
+Preserved identity is equally important.
+If a rule removes a wrapper but clients observe its address as an object identity, redirecting every use to its child changes an observable property even when payload values agree.
+Pure compiler temporaries often have no observable identity, while heap allocations, synchronization objects, and foreign handles can.
+The interface K should preserve the identities that the surrounding semantics can distinguish, not only the labels needed to redraw a similar graph.
+
+Typed graph transformations can encode some constraints directly in node and edge sorts.
+An edge representing a value use is different from an edge representing control succession or block ownership.
+Requiring sort-preserving matches rules out many malformed replacements cheaply.
+But type graphs generally do not express whole-path properties such as dominance or the absence of an intervening write.
+Those remain semantic or analysis premises checked around the structural match.
+
+\section{Plan CFG replacement as a multi-result operation}
+\label{sec:ch87-control}
+Consider replacing a conditional branch with a direct jump after proving its test constant.
+Deleting the untaken edge changes the destination's predecessor set.
+Any phi-like merge there must remove the corresponding incoming value, and newly unreachable blocks may have their own outgoing edges and metadata obligations.
+The branch edit is thus not a one-edge operation when the IR invariants are included.
+A transactional helper can gather the affected blocks, merge inputs, reachability changes, and analysis invalidations before publication.
+
+Exception edges make the interface richer still.
+Replacing a potentially trapping instruction with a total operation may legitimately remove an exception successor only after the no-trap premise is established under the language's error semantics.
+Moving a trap into a different block can alter which side effects precede it.
+An ordinary labeled-graph isomorphism check cannot establish that ordering equivalence.
+The graph rule needs the same effect and control contract used by the semantic IR.
+
+This leads to a useful implementation boundary: structural helpers maintain uses, ownership, predecessor/merge consistency, and version counters; semantic rule code supplies and checks the premises authorizing the change.
+Neither layer should secretly assume the other has established everything.
+The verifier can independently inspect the committed IR for structural correctness, while translation validation or rule proofs address the preserved program behavior.
+Separating those responsibilities makes counterexamples much easier to localize.
+
+\section{Exercises}
+\label{sec:ch87-exercises}
+\begin{enumerate}
+\item\label{ex:ch87-dangle} Apply the restricted deletion algorithm to edge $0\to1$ and deletion set $\{1\}$, then to an empty edge set.
+\item\label{ex:ch87-dominate} Explain why w in Figure~\ref{fig:ch87-dominance} cannot replace every use of v at the join.
+\item\label{ex:ch87-rollback} A private replacement allocates successfully but fails a type check.
+Which structures may be reclaimed and which visible structures must remain unchanged?
+\item\label{ex:ch87-conflict} Two disjoint matches both rely on the same external node having one use.
+Explain why graph-node disjointness alone does not prove parallel independence.
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch87-reading}
+The term-rewriting literature supplies the local-rule foundation~\cite{ohlebusch-2002-rewriting}; the algebraic graph-transformation reference develops the broader gluing framework~\cite{graphtransformation-2006-fundamentals}.
+The book's SSA, effect-IR, and validation chapters provide the additional compiler invariants that pure graph gluing does not express.

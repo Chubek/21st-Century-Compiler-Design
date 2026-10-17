@@ -1,0 +1,314 @@
+\chapter{Case Study: Building a Lua-Preprocessed Assembler}
+\label{ch:lua-assembler}
+
+An assembler becomes a useful case study when its output survives another tool's interpretation.
+Producing a plausible hex dump is insufficient: a symbol may name the wrong section, a relocation may point one byte too far, or a valid instruction may be assigned the wrong operand width.
+The implementation in \path{example-code/lua-toolchain/luaas.c} therefore produces real x86-64 ELF64 objects and participates in two independently checked linking paths.
+This chapter follows its data structures and decisions from a Lua source file to the final relocation records.
+
+The implementation is C11 with the Lua 5.4 library.
+It contains its own instruction encoder and ELF writer; it does not invoke another assembler to produce its output.
+GNU \code{as}, GNU \code{ld}, and \code{readelf} are independent verification tools used by the test driver.
+Their role must remain separate from the implementation being tested.
+
+\section{Set an executable contract}
+\label{sec:ch56-contract}
+
+The command accepts a Lua source file and an output object path.
+With \code{--asm}, it instead reads already expanded assembly text.
+Both paths feed the same parser, encoder, and object writer.
+This second entry path is valuable for isolating an encoding problem from a preprocessing problem: a failing generated line can be reproduced without executing its Lua generator.
+
+The supported registers are the first eight x86 general-purpose registers, in 32-bit or 64-bit forms.
+The instruction set includes immediate and register moves, register XOR, immediate add/subtract/compare, RIP-relative address formation, near call/jump/conditional branches, return, no-operation, undefined-instruction trap, and system call.
+There is no general memory-operand grammar, SIMD family, extended-register encoding, or short-branch selection.
+The purpose of a subset is to make every accepted form precise and tested.
+
+Table~\ref{tab:ch56-contract} distinguishes implemented features from the design topics developed in the preceding chapters.
+An unsupported mnemonic or directive must fail explicitly rather than being ignored as an annotation.
+The writer does not publish a partial object when an earlier phase fails.
+
+\begin{table}[htbp]
+\caption{The case-study interface defines a coherent implemented subset rather than an approximate full assembler.}
+\label{tab:ch56-contract}
+\centering
+\begin{tabular}{p{0.29\linewidth}p{0.58\linewidth}}
+\toprule
+Facility & Implemented contract \\
+\midrule
+Preprocessing & Lua 5.4 script with emit; optional plain-text input. \\
+Sections & Text, read-only data, writable data, and NOBITS storage. \\
+Symbols & Local labels, explicit global/external/weak declarations. \\
+Expressions & Signed 64-bit integer or one symbol plus integer addend. \\
+Relocations emitted & AMD64 64, PC32, and unsigned 32. \\
+Layout & Fixed instruction forms and power-of-two alignment through 4096. \\
+Not implemented & General expression algebra, short-branch relaxation, debug/unwind emission. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Keep ownership simple enough to inspect}
+\label{sec:ch56-storage}
+
+The common support header provides a growable byte buffer with checked growth, explicit little-endian field access, file I/O, and a bounded allocation registry.
+All tool-owned allocations live until process exit and are released by one registered cleanup function.
+The Lua state is also closed there.
+This avoids mixing temporary symbol-string ownership, object-buffer ownership, and relocation ownership in a small command-line program.
+It is not a recommended lifetime model for a long-running compiler server, which would need a per-request context and reusable error returns.
+
+Buffers have a 16 MiB cap, symbols a 4096-entry cap, and relocations an 8192-entry cap.
+The caps make resource failures explicit and bound the review examples.
+They do not change the meaning of a successfully assembled source.
+A capacity failure is reported as a tool failure rather than silently dropping a symbol or truncating an output section.
+
+Figure~\ref{fig:ch56-storage} shows the principal structures.
+The source buffer is mutable while lines are tokenized.
+Symbol names are separately copied, so a later split at a colon or comma cannot change a previously interned name.
+Relocations retain numeric symbol identities rather than pointers into a resizable symbol array.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=16mm and 18mm]
+\node[basic block] (text) {generated source buffer};
+\node[basic block,below left=of text] (secs) {four section records};
+\node[basic block,below right=of text] (sym) {stable symbol array};
+\node[basic block,below=of sym] (rel) {fixup array};
+\draw[cfg edge] (text)--(secs); \draw[cfg edge] (text)--(sym);
+\draw[cfg edge] (rel)--node[right,font=\small] {symbol identifier}(sym);
+\draw[cfg edge] (rel)--node[below,font=\small,fill=white,inner sep=2pt] {section + field offset}(secs);
+\end{tikzpicture}
+\caption{Stable identifiers connect fixups to symbols, while section records own the byte and memory extents.}
+\label{fig:ch56-storage}
+\end{figure}
+
+\section{Run Lua before parsing any generated statement}
+\label{sec:ch56-emit}
+
+Listing~\ref{lst:ch56-emit} is the actual host callback.
+It uses the explicit Lua string length, checks for an embedded source NUL, copies the text, and appends one newline.
+The copy matters because the pointer returned by Lua refers to Lua-managed storage.
+The assembler's source stream must remain valid independently of later Lua garbage collection.
+
+\begin{listing}[htbp]
+\inputminted[firstline=14,lastline=20]{c}{example-code/lua-toolchain/luaas.c}
+\caption{The emit callback copies Lua bytes into the assembler-owned source stream.}
+\label{lst:ch56-emit}
+\end{listing}
+
+The script may emit several lines at once or one line at a time.
+Their concatenation is parsed only after the protected Lua call returns successfully.
+Consequently, an error after an earlier \code{emit} call still prevents assembly and object publication.
+The test suite explicitly executes a script that emits a no-operation and then raises an error, verifying that no object is produced.
+The Lua API and its protected-call behavior are specified by the reference manual~\cite{ierusalimschy-2026-lua}.
+
+The callback does not assign target addresses.
+It also does not evaluate \code{.quad answer} as a Lua variable access.
+Those bytes describe a later assembler statement, preserving the separation between the generator's variables and the target program's symbols.
+
+\section{Parse statements and bind labels}
+\label{sec:ch56-parser}
+
+For each generated line, the parser removes its semicolon comment, trims whitespace, recognizes an optional label, and separates opcode/directive from operands.
+A label binds the current section offset before the rest of that line emits bytes.
+Section directives only select the active counter; they do not reset it.
+Binding directives change the symbol's linkage attribute without inventing a definition.
+
+The parser is intentionally not a general token framework.
+Its line language has no quoted string directive, so semicolon handling cannot accidentally remove a semicolon inside such a string.
+Lua emits target string data as numeric bytes instead.
+If a future version adds quoted assembly strings, comment scanning must become quote-aware before that syntax is accepted.
+This is an example of keeping the parser's implementation assumptions aligned with its advertised grammar.
+
+Expression parsing accepts a signed integer or a symbol with an optional integer addend.
+Arithmetic overflow is checked before negating or adjusting the addend.
+A branch or RIP-relative address-forming instruction requires a symbolic expression so that the place-relative adjustment is unambiguous.
+Raw numeric displacement syntax could be added, but would need to state whether its number is a displacement or an absolute target.
+
+\begin{algorithm}[htbp]
+\caption{Assemble one line under the case-study grammar.}
+\label{alg:ch56-line}
+\begin{pseudocode}
+\Require one generated line and current section/symbol state
+\Ensure state update, exact bytes/fixup, or a line-specific error
+\State remove comment and surrounding whitespace; ignore an empty line
+\If{a label precedes the statement}
+  \State validate its spelling and require no previous definition
+  \State define it at the current section-relative offset
+\EndIf
+\State classify the remaining operation as directive or instruction
+\If{directive}
+  \State validate all operands and update section, binding, alignment, or storage
+\Else
+  \State validate operand classes and select a supported fixed-size form
+  \State emit known bytes and retain symbolic fields as fixups
+\EndIf
+\end{pseudocode}
+\end{algorithm}
+
+Algorithm~\ref{alg:ch56-line} is the organizing control flow; the source contains the concrete checks.
+The most useful tests target decisions that could otherwise be silently coerced: incompatible register widths, an unsupported register, an oversized immediate, a symbolic byte, and initialized bytes inside NOBITS storage.
+Each must produce a diagnostic rather than an object that happens to have a valid ELF header.
+
+\section{Reserve fields without losing relocation meaning}
+\label{sec:ch56-fields}
+
+The field-emission routine receives a classified expression, width, and relocation type.
+For constants it verifies the field's permitted range and writes the low bytes in little-endian order.
+For a symbol it creates a fixup at the current section offset, then writes exactly the required number of zero placeholder bytes.
+For PC32 fields it subtracts four from the expression addend because the supported displacement fields end at the instruction boundary.
+This adjustment is validated against signed-64 overflow before the subtraction.
+
+No later code guesses where the field begins by decoding the instruction again.
+The exact field offset is captured at reservation time.
+Figure~\ref{fig:ch56-fixup} shows the call in the supplied demo object.
+Its opcode is at text offset 17 and its fixup at offset 18; the later linker places the target at text-base plus 32.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=18mm]
+\node[basic block] (bytes) {text+17: E8 00 00 00 00};
+\node[basic block,below=of bytes] (fix) {offset 18; PC32; answer; addend -4};
+\node[basic block,below=of fix] (sym) {answer: global, undefined};
+\draw[cfg edge] (fix)--node[right,font=\small] {patch four bytes}(bytes);
+\draw[cfg edge] (fix)--node[right,font=\small] {stable identity}(sym);
+\end{tikzpicture}
+\caption{The placeholder bytes and relocation record are emitted together, before the target address is known.}
+\label{fig:ch56-fixup}
+\end{figure}
+
+\section{Walk the complete demo object}
+\label{sec:ch56-demo}
+
+The demo initializes \code{ecx} to three, decrements it in a loop, calls \code{answer}, moves the returned value to the exit-status register, and invokes the Linux exit system call.
+The separately assembled \path{answer.lua} supplies a function returning $42$.
+The first object also contains a pointer initialized to \code{answer} and a 32-byte zero-filled scratch area.
+Together these exercise local PC-relative control flow, an external call, absolute pointer relocation, section placement, and NOBITS storage.
+
+Table~\ref{tab:ch56-offsets} computes the first object's text layout.
+The subtract uses the fixed six-byte \code{81 /5 imm32} form rather than a shorter immediate encoding.
+The conditional branch uses the six-byte near form.
+These choices explain the offsets; they are not estimates based on source line count.
+
+\begin{table}[htbp]
+\caption{The demo's exact fixed forms produce a 31-byte text contribution.}
+\label{tab:ch56-offsets}
+\centering
+\begin{tabular}{llll}
+\toprule
+Operation & Start & Length & Next offset \\
+\midrule
+Initialize ecx & $0$ & $5$ & $5$ \\
+Subtract one & $5$ & $6$ & $11$ \\
+Conditional branch & $11$ & $6$ & $17$ \\
+Call answer & $17$ & $5$ & $22$ \\
+Move eax to edi & $22$ & $2$ & $24$ \\
+Load exit syscall number & $24$ & $5$ & $29$ \\
+System call & $29$ & $2$ & $31$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The loop branch field begins at $13$ and targets offset $5$, so its final displacement is $5-4-13=-12$.
+The external call's value remains unresolved in the object.
+The data pointer contributes eight file bytes and an absolute relocation at data offset zero.
+Scratch contributes zero payload bytes and a NOBITS extent of $32$ with alignment $16$.
+Table~\ref{tab:ch56-fixups} records the three relocation relationships.
+
+\begin{table}[htbp]
+\caption{The demo carries three independent deferred computations across the object boundary.}
+\label{tab:ch56-fixups}
+\centering
+\begin{tabular}{llll}
+\toprule
+Target section & Field offset & Symbol & Type/addend \\
+\midrule
+Text & $13$ & private loop label & PC32, $-4$ \\
+Text & $18$ & answer & PC32, $-4$ \\
+Data & $0$ & answer & 64, $0$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Serialize one coherent ELF graph}
+\label{sec:ch56-object}
+
+The writer creates four allocated sections, four corresponding RELA sections, a symbol table, a symbol string table, and a section-name string table, plus section zero.
+Even an empty relocation section has correct type and cross-table links.
+The symbol writer places local entries first and builds an internal-to-ELF index map before serializing fixups.
+The file writer aligns each payload as required, records its actual offset, and writes the section-header table last.
+
+\begin{algorithm}[htbp]
+\caption{Finish the case-study relocatable object only after all consistency checks succeed.}
+\label{alg:ch56-object}
+\begin{pseudocode}
+\Require section buffers, symbol entries, and stable-identifier fixups
+\Ensure a self-consistent ELF64 ET\_REL file
+\State reject unresolved names lacking permitted external binding
+\State build string tables and local-first symbol serialization
+\State translate every fixup's target to its final ELF symbol index
+\State append aligned section payloads, excluding NOBITS contents
+\State append relocation and symbol/string payloads
+\State append section headers containing the recorded offsets and links
+\State complete the ELF header with section-table location and sizes
+\State publish the complete file
+\end{pseudocode}
+\end{algorithm}
+
+Figure~\ref{fig:ch56-file} emphasizes that NOBITS size is metadata rather than an omitted chunk that still occupies file space.
+Its section header records the logical extent.
+The loader does not read that extent from the relocatable object; the later linker incorporates it into the memory size of a loadable segment.
+Confusing these two file types is a common source of incorrect BSS handling.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=10mm]
+\node[basic block] (h) {ELF64 header};
+\node[basic block,below=of h] (p) {text / data / relocation payloads};
+\node[basic block,below=of p] (s) {symbols and string tables};
+\node[basic block,below=of s] (t) {section headers, including BSS size};
+\draw[cfg edge] (h.east) to[out=0,in=0] node[right,font=\small] {section-table offset}(t.east);
+\draw[cfg edge] (t.west) to[out=180,in=180] node[left,font=\small] {payload offsets}(p.west);
+\end{tikzpicture}
+\caption{The writer records BSS extent in metadata while keeping the corresponding initialized payload absent.}
+\label{fig:ch56-file}
+\end{figure}
+
+\section{Build and verify through independent paths}
+\label{sec:ch56-tests}
+
+The build script requires a C11 compiler, Lua 5.4 headers/library, and \code{pkg-config}.
+Its output directory is supplied explicitly so generated executables remain outside the source tree.
+The following commands assemble the two demo inputs:
+\begin{verbatim}
+sh example-code/lua-toolchain/build.sh /tmp/opencode/lua-tools gcc
+/tmp/opencode/lua-tools/luaas example-code/lua-toolchain/demo.lua \
+  /tmp/opencode/lua-tools/demo.o
+/tmp/opencode/lua-tools/luaas example-code/lua-toolchain/answer.lua \
+  /tmp/opencode/lua-tools/answer.o
+\end{verbatim}
+
+The test driver compiles both tools with GCC and Clang, normally and with address and undefined-behavior sanitizers.
+It compares selected encodings against GNU \code{as}, checks object metadata with \code{readelf}, links the objects with GNU \code{ld}, and executes the native program.
+Chapter~\ref{ch:lua-linker} adds the independent layout and relocation checks for our linker.
+Whole-object bytes are compared across configurations to detect nondeterministic ordering or uninitialized serialized padding.
+
+Negative tests are equally important.
+Duplicate labels, undeclared external references, unsupported registers, bad alignment, oversized data, mismatched operand widths, and Lua errors must all fail before output publication.
+The tests also use an error object that is a Lua table, exercising the non-string error path.
+These checks establish concrete behavior on their tested cases; they do not establish correctness for arbitrary Lua programs or every possible assembly file.
+
+\section{Exercises}
+\label{sec:ch56-exercises}
+\begin{enumerate}
+\item\label{ex:ch56-field} Starting from Table~\ref{tab:ch56-offsets}, derive both PC32 field offsets without reading the relocation table.
+\item\label{ex:ch56-counter} Change the countdown's runtime count from three to seven. Which instruction bytes change, and which symbol offsets remain unchanged?
+\item\label{ex:ch56-size} Compare the demo's eight-byte initialized pointer and 32-byte scratch area. State their object payload sizes, memory extents, and relocation needs.
+\item\label{ex:ch56-script-error} Explain why executing the script and assembling each emitted line immediately would complicate the guarantee that a later Lua error produces no object.
+\item\label{ex:ch56-differential} Why does the reference encoding test request \code{movabs} for a full-width 64-bit immediate move instead of accepting the production assembler's default choice?
+\end{enumerate}
+
+\section{Further reading}
+\label{sec:ch56-reading}
+The Lua reference manual defines the embedding operations used by the host~\cite{ierusalimschy-2026-lua}.
+The generic ELF and AMD64 specifications define the serialized contract independently of our C implementation~\cite{xinuos-2026-elf,matz-2012-amd64}.
+Salomon provides broader context for assembler listings, diagnostics, and implementation choices~\cite{salomon-1993-assemblers}.
