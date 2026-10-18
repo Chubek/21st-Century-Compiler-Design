@@ -127,8 +127,10 @@ examples. The output is `book/pamphlet.pdf`.
 
 ## Build the main book
 
-Requires XeLaTeX (or LuaLaTeX), Biber, makeindex, and the fonts Source Serif 4,
-Source Sans 3, and JetBrains Mono. `minted` uses its Pygments helper
+Requires XeLaTeX (or LuaLaTeX), Biber, and makeindex. Source Serif 4,
+Source Sans 3, and JetBrains Mono are bundled in [`typeface/`](typeface/README.md)
+with their licenses; no system font installation or Fontconfig setup is needed.
+Run the build commands from the repository root. `minted` uses its Pygments helper
 (`latexminted` for minted 3). `minted` and `stmaryrd` are standard TeX Live
 packages: the former supplies the requested code highlighting, and the latter
 supplies semantic evaluation brackets.
@@ -161,25 +163,18 @@ are ignored by version control; do not include them in manuscript changes.
 
 ### This host's build dependencies
 
-The initial environment lacks Source Serif 4 and Source Sans 3, and its Biber
-binary needs `libcrypt.so.1`. Verification uses temporary, build-local copies
-under `/tmp/opencode/21cc-build`, without changing system fonts or libraries:
-
-- Required font files from Adobe's official `source-serif` and `source-sans`
-  repositories, exposed through a temporary Fontconfig configuration.
-- The compatibility library from Arch's official `libxcrypt-compat` package,
-  exposed through `LD_LIBRARY_PATH`.
-
-While those temporary files remain available, the verification environment is:
+This host's Biber binary needs `libcrypt.so.1`. Verification uses a temporary
+copy from Arch's official `libxcrypt-compat` package under
+`/tmp/opencode/21cc-build/usr/lib`, exposed through `LD_LIBRARY_PATH` without
+changing system libraries. While that temporary copy remains available:
 
 ```sh
-FONTCONFIG_FILE=/tmp/opencode/21cc-build/fonts.conf \
 LD_LIBRARY_PATH=/tmp/opencode/21cc-build/usr/lib \
 texlua build.lua draftfull 1
 ```
 
-For a lasting setup, install the documented fonts and the Biber runtime
-dependency through the host's normal package process. Temporary paths are not
+For a lasting setup, install the Biber runtime dependency through the host's
+normal package process. Temporary paths are not
 repository dependencies and are not downloaded automatically by the build.
 
 ## Run the examples

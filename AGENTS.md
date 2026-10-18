@@ -76,8 +76,8 @@ populated. Look first, then act.
 - Bibliography: **biber** (biblatex backend).
 - Index: **makeindex**.
 - Build driver: `build.lua`, run with `texlua` (ships with TeX Live).
-- Fonts (must be installed on the system): Source Serif 4, Source Sans 3,
-  JetBrains Mono.
+- Fonts (bundled in `typeface/`, no system installation needed): Source Serif 4,
+  Source Sans 3, JetBrains Mono. See `typeface/README.md` for versions and licenses.
 
 ### Commands
 
@@ -86,7 +86,7 @@ texlua build.lua                 full build (engine, biber, makeindex, 2x engine
 texlua build.lua draft 3 4 7     build only chapters 3, 4 and 7 (fast, 2 passes)
 texlua build.lua quick           single engine pass, no bibliography or index
 texlua build.lua check           verify that expected source files exist
-texlua build.lua fonts           verify that required fonts are installed
+texlua build.lua fonts           verify that bundled font files are present
 texlua build.lua clean           remove auxiliary files
 texlua build.lua distclean       clean and remove the PDF
 ENGINE=lualatex texlua build.lua use LuaLaTeX instead of XeLaTeX

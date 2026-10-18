@@ -3,7 +3,7 @@
 %% Document class for a book on compilers and interpreters.
 %%
 %% Requires XeLaTeX or LuaLaTeX (fontspec).
-%% Fonts (SIL OFL, install system-wide):
+%% Fonts (SIL OFL, bundled in typeface/; build from the repository root):
 %%   Source Serif 4   body text
 %%   Source Sans 3    headings, captions, running heads
 %%   JetBrains Mono   code
@@ -63,6 +63,31 @@
 
 % ---------- Fonts ----------
 \RequirePackage{fontspec}
+% Explicit filenames avoid system font discovery and work with both engines.
+\defaultfontfeatures[Source Serif 4]{
+  Path=typeface/source-serif/,
+  Extension=.otf,
+  UprightFont=SourceSerif4-Regular,
+  BoldFont=SourceSerif4-Bold,
+  ItalicFont=SourceSerif4-It,
+  BoldItalicFont=SourceSerif4-BoldIt
+}
+\defaultfontfeatures[Source Sans 3]{
+  Path=typeface/source-sans/,
+  Extension=.otf,
+  UprightFont=SourceSans3-Regular,
+  BoldFont=SourceSans3-Bold,
+  ItalicFont=SourceSans3-It,
+  BoldItalicFont=SourceSans3-BoldIt
+}
+\defaultfontfeatures[JetBrains Mono]{
+  Path=typeface/jetbrains-mono/,
+  Extension=.ttf,
+  UprightFont=JetBrainsMono-Regular,
+  BoldFont=JetBrainsMono-Bold,
+  ItalicFont=JetBrainsMono-Italic,
+  BoldItalicFont=JetBrainsMono-BoldItalic
+}
 \setmainfont{Source Serif 4}
 \setsansfont{Source Sans 3}
 \ifcc@monoligs

@@ -6,7 +6,7 @@
 --   texlua build.lua draft 1 2 5     build only chapters 1, 2 and 5 (fast)
 --   texlua build.lua draftfull 1     partial build with bibliography and index
 --   texlua build.lua quick           single xelatex pass, no bib/index
---   texlua build.lua fonts           check that the required fonts are installed
+--   texlua build.lua fonts           check the bundled fonts in typeface/
 --   texlua build.lua check           check that all chapter files exist
 --   texlua build.lua clean           remove auxiliary files
 --   texlua build.lua distclean       clean + remove the PDF
@@ -25,7 +25,14 @@ local config = {
   extra     = { "frontmatter/preface.tex", "references.bib",
                 "appendices/appendix-a.tex", "appendices/appendix-b.tex",
                 "appendices/appendix-c.tex", "appendices/appendix-d.tex" },
-  fonts     = { "Source Serif 4", "Source Sans 3", "JetBrains Mono" },
+  fonts     = {
+    { prefix = "typeface/source-serif/SourceSerif4-", extension = ".otf",
+      styles = { "Regular", "Bold", "It", "BoldIt" } },
+    { prefix = "typeface/source-sans/SourceSans3-", extension = ".otf",
+      styles = { "Regular", "Bold", "It", "BoldIt" } },
+    { prefix = "typeface/jetbrains-mono/JetBrainsMono-", extension = ".ttf",
+      styles = { "Regular", "Bold", "Italic", "BoldItalic" } },
+  },
   aux_exts  = { "aux", "toc", "lof", "lot", "out", "log", "bbl", "bcf", "blg",
                 "run.xml", "idx", "ilg", "ind", "fls", "fdb_latexmk",
                 "synctex.gz", "bak" },
@@ -65,12 +72,30 @@ local function chapter_path(n)
   return string.format("%s/" .. config.chapfmt, config.chapdir, n)
 end
 
+local function check_fonts(verbose)
+  local all_ok = true
+  for _, font in ipairs(config.fonts) do
+    for _, style in ipairs(font.styles) do
+      local path = font.prefix .. style .. font.extension
+      local found = exists(path)
+      if verbose or not found then
+        print(string.format("  [%s] %s", found and "ok" or "MISSING", path))
+      end
+      all_ok = all_ok and found
+    end
+  end
+  return all_ok
+end
+
 ------------------------------------------------------------------------
 -- TeX invocations
 ------------------------------------------------------------------------
 
 -- Run the engine. `includeonly` is an optional list of chapter paths.
 local function tex(includeonly)
+  if not check_fonts(false) then
+    die("restore the missing bundled fonts in typeface/; see typeface/README.md")
+  end
   local input
   if includeonly and #includeonly > 0 then
     -- \includeonly must appear before \begin{document}; it is legal
@@ -126,25 +151,7 @@ function commands.check()
 end
 
 function commands.fonts()
-  if is_windows then
-    print("Font check is not automated on Windows; verify in the Fonts settings:")
-    for _, f in ipairs(config.fonts) do print("  " .. f) end
-    return true
-  end
-  local all_ok = true
-  for _, family in ipairs(config.fonts) do
-    local p = io.popen("fc-list : family 2>/dev/null")
-    local found = false
-    if p then
-      for line in p:lines() do
-        if line:find(family, 1, true) then found = true; break end
-      end
-      p:close()
-    end
-    print(string.format("  [%s] %s", found and "ok" or "MISSING", family))
-    all_ok = all_ok and found
-  end
-  return all_ok
+  return check_fonts(true)
 end
 
 function commands.quick()
